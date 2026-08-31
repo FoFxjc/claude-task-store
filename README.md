@@ -114,6 +114,63 @@ claude-task-store stores the latter. It does not record conversation history. It
 
 ---
 
+## What about automatic compaction?
+
+Automatic compaction is useful, and this is not a replacement for it. It solves a
+different problem.
+
+Compaction asks: *"What parts of this conversation should remain in context?"*
+
+claude-task-store asks: *"What execution state should not need to live in the
+conversation at all?"*
+
+Both can be true at once. But a compacted conversation still consumes context:
+the system reads the existing context, generates a summary, and the model carries
+that summary forward — where later compactions may compress already-compressed
+history again. Execution-critical state also ends up interleaved with
+conversational background, so the parts you most need to survive are not stored
+separately from the parts you do not.
+
+For execution continuity, a fresh session usually needs much less than a summary
+of everything that was said:
+
+- the goal
+- what is done
+- what failed, and how
+- what is active or blocked
+- the decisions that constrain the next step
+- what happens next
+
+claude-task-store keeps that state outside the conversation and injects only a
+small resume projection when a session starts.
+
+**Don't compact what you can externalize.**
+
+Compaction for conversation continuity. Task store for execution continuity.
+
+### Why this matters in auto-compacting harnesses
+
+Coding harnesses that compact automatically — Claude Code and OpenCode among them
+— can keep a session alive considerably longer. But task lifetime stays coupled to
+an accumulating conversational summary. A durable execution checkpoint decouples
+the two: the task survives even when the conversation is discarded completely, so
+starting a genuinely fresh session becomes a normal move rather than a loss.
+
+That trade matters most with private or smaller-context models, internal inference
+gateways, long-running agents, and workflows where starting clean is cheaper or
+more reliable than compressing history again.
+
+|  | Auto-compaction | claude-task-store |
+| --- | --- | --- |
+| Primary goal | Conversation continuity | Execution continuity |
+| Stored form | Conversation summary | Structured execution state |
+| Lives in context | Yes | Only a small resume projection |
+| Needs the prior transcript | Yes, during compaction | No |
+| Survives a fresh session or provider | Platform-dependent | Yes, via local state |
+| Typical role | Keep the current session going | Let work continue after the session ends |
+
+---
+
 ## For constrained-context models
 
 Many development environments cannot simply use the largest frontier model with effectively unlimited context. Relevant constraints include:

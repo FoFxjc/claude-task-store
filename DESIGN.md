@@ -75,6 +75,40 @@ The problem is **execution state loss**, not knowledge loss:
 | **Structure** | Unstructured or semi-structured | Strict schema: goal, tasks, blockers, next action |
 | **Audience** | Future sessions retrieving knowledge | The *next model instance resuming this work* |
 
+## Relationship to Automatic Context Compaction
+
+Automatic compaction (as implemented in Claude Code, OpenCode, and similar coding
+harnesses) and this project address adjacent but distinct problems, and the
+distinction shapes several design principles below.
+
+Compaction is a *context-window management* mechanism: when a conversation
+approaches the window limit, prior turns are summarized so the session can
+continue. It operates over the conversation, its output is a summary that itself
+occupies context, and it must read the existing context to produce that summary.
+Because the summary re-enters the conversation, a long-running session can end up
+compressing already-compressed history.
+
+This project is a *state externalization* mechanism. Execution state is written to
+a structured file outside the conversation, and only a bounded projection of it is
+injected when a session begins. It never reads the transcript, so it does not
+depend on the conversation existing at all.
+
+The practical consequence, and the reason principles 1, 3, and 7 are written as
+they are: what must survive a long coding task is much smaller than what a
+conversation summary preserves. Goal, current task, completed work, failed
+approaches, blockers, decisions, and next action are a bounded set with a stable
+schema. Keeping them out of the conversation means a session can be discarded
+outright rather than compressed, which is why the resume projection has a hard
+token ceiling (principle 3) and why the store deliberately records checkpoints
+rather than a diary (principle 7).
+
+This is not a replacement for compaction. A session that needs conversational
+continuity — an ongoing discussion, an unresolved design argument — still benefits
+from it. The two compose: compaction keeps the current session coherent; the task
+store lets the work outlive the session.
+
+**Don't compact what you can externalize.**
+
 ## Design Principles
 
 1. **Preserve only state expensive or ambiguous to reconstruct** — Don't store conversation, don't store code, don't store file contents. Only store what the agent cannot cheaply derive from the repository: goal, current task, completed work, failures, decisions, and next action.
