@@ -218,7 +218,7 @@ If the task store claims something is complete but the repository or tests disag
 
 ## Validated results
 
-Measured across 203 automated test scenarios:
+Measured across 324 automated test scenarios:
 
 | Scenario | Resume context |
 |----------|---------------:|
@@ -357,6 +357,8 @@ On next session start (or in a fresh model session), Claude automatically receiv
 | `task-store repair` | Recover from corrupted state |
 | `task-store stale` | Detect tasks stuck in-progress >48h |
 | `task-store token-estimate` | Estimate injected token count |
+| `task-store config` | Show project-local configuration |
+| `task-store config auto-checkpoint <off\|conservative>` | Enable/disable auto-checkpoint mode |
 
 ### Cross-agent flags
 
@@ -374,15 +376,106 @@ task-store next "action" --expect-rev 14   # reject write if another agent wrote
 
 ## Claude Code integration
 
-After installation, three hooks run automatically:
+After installation, these hooks run automatically:
 
 | Hook | Event | Action |
 |------|-------|--------|
 | `session-start.sh` | `SessionStart` | Injects compact resume context if state exists |
 | `pre-compact.sh` | `PreCompact` | Saves a checkpoint to history before compaction |
 | `session-end.sh` | `SessionEnd` | Warns if `next_action` is not set |
+| `post-tool-use.sh` | `PostToolUse` | Auto-checkpoint only — marks the checkpoint possibly stale |
+| `stop.sh` | `Stop` | Auto-checkpoint only — asks the agent to reconcile at a boundary |
+
+The last two are installed unconditionally but are **inert unless you opt in**: each exits in a few milliseconds of shell, before starting Node, when `.claude-task/config.json` is absent or not set to `conservative`. See [Optional auto-checkpoint mode](#optional-auto-checkpoint-mode).
 
 The `/task-store` skill is also installed. Claude uses it when starting long-running tasks, after milestones, and before ending sessions. Invoke directly with `/task-store`.
+
+---
+
+## Optional auto-checkpoint mode
+
+**Default: off.** Nothing below happens unless you turn it on.
+
+`claude-task-store` covers session boundaries well, but not the middle of a long session. The agent can edit files, run tests and finish milestones without ever calling the CLI, and `.claude-task/state.json` quietly falls behind the repository. Auto-checkpoint is a conservative fix for exactly that drift.
+
+> Auto-checkpoint does not try to guess what your code means. It only notices that meaningful work happened and asks the agent to reconcile the checkpoint at a safe boundary.
+
+### Enable / disable
+
+```bash
+task-store config auto-checkpoint conservative   # turn it on
+task-store config auto-checkpoint off            # turn it off (default)
+task-store config auto-checkpoint                # print the current mode
+```
+
+The setting lives in `.claude-task/config.json`, alongside your state:
+
+```json
+{
+  "auto_checkpoint": "conservative"
+}
+```
+
+`task-store status` always shows it, so you never have to open the file to find out whether it is on:
+
+```
+Auto-checkpoint: conservative
+⚠  task-store may be stale — 4 change signal(s) since the last checkpoint write.
+   Reconcile with: task-store start|done|attempt|block|decide|next
+```
+
+Only `off` and `conservative` exist. There is no `aggressive` mode; asking for one is an explicit error rather than a silent fallback.
+
+### How conservative mode works
+
+```
+tool activity  →  mark possibly stale   (no task-store write)
+                        ↓
+             wait for a safe boundary + debounce
+                        ↓
+          ask the agent to reconcile (one short instruction)
+                        ↓
+      agent uses the ordinary CLI: start | done | attempt | block | decide | next
+                        ↓
+        checkpoint changes only if the agent decides it should
+```
+
+**Dirty signals** are tool calls that can change repository or execution state — `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash`. Read-only tools are deliberately excluded, so browsing the codebase never marks anything stale. A dirty signal records two timestamps and a counter. It never writes task state.
+
+**Reconciliation boundaries** are where the checkpoint is allowed to be questioned:
+
+| Boundary | What happens | Why |
+|----------|--------------|-----|
+| `Stop` | Emits the reconciliation instruction to the model as `additionalContext`; the conversation continues so the agent can act on it | The only event that can actually get the agent to reconcile |
+| `PreCompact` | Emits the same instruction as custom compact instructions | Compaction is when a stale checkpoint hurts most |
+| `SessionEnd` | Warns **you** on stderr that the checkpoint looks stale | This event has no channel back to the model — the session is already over |
+
+**Debounce.** A boundary asks only when *both* gates open: new work has arrived since the last request, **and** at least 120 seconds have passed since it. So a burst of fifty edits produces exactly one request, and a rapid back-and-forth does not carry a nag on every turn. No timers, no background processes — just two timestamps compared on demand.
+
+**Freshness** is derived, not scanned. Because every CLI write bumps `state.updated_at`, "stale" simply means *work was signalled and the checkpoint has not been written since*. There is no repository scan, no diffing, and no dependency on Git — it works in a project with no version control at all. It is a hint, never a claim of certainty, which is why the wording is always "may be stale".
+
+### What it will never do
+
+Auto-checkpoint **never mutates your task state.** It emits an instruction; the agent decides. Specifically forbidden, by design rather than by convention:
+
+- ❌ file changed → task done
+- ❌ tests passed → related task done
+- ❌ commit exists → milestone complete
+- ❌ inventing a `next_action`, decision, or blocker
+
+A file edit or a passing test is *evidence that work happened*, not proof that a task is complete. Completion still requires an explicit `task-store done` with evidence, exactly as it does with the feature off. The trust hierarchy is unchanged, and the injected instruction restates it verbatim:
+
+```
+repository / tests  >  git state  >  task-store  >  model memory
+```
+
+### Cost when off
+
+Zero writes and no Node process. The hooks bail out in bash before spawning anything, so a project that never opts in behaves byte-for-byte like v0.1.0. When it *is* on, each matched tool call spawns one short-lived Node process to record the signal.
+
+### Provider neutrality
+
+The core knows nothing about Claude Code event names. Adapters map their own lifecycle onto three verbs — `markDirty()`, `shouldReconcile()`, `markReconciled()` — in [`src/autocheckpoint.ts`](src/autocheckpoint.ts). That is the entire extension surface; an OpenCode adapter reuses the same config file and the same behavior without touching the core.
 
 ---
 
@@ -495,6 +588,8 @@ Options:
 - **Gitignore everything** — For private or transient work
 - **Commit both** — Full audit trail in git (history.jsonl grows unbounded)
 
+`.claude-task/config.json` is yours and is committable — commit it if you want auto-checkpoint enabled for everyone on the project. `.claude-task/auto-checkpoint.json` is ephemeral machine-local bookkeeping (dirty/debounce timestamps) and is gitignored by the installer.
+
 ---
 
 ## Security and limitations
@@ -518,12 +613,13 @@ npm test                           # Unit tests (31)
 bash tests/acceptance.sh           # Cross-session recovery test
 bash tests/phase2/pressure_test.sh # 22-session pressure test
 bash tests/phase3/handoff_test.sh  # Cross-agent handoff test
+bash tests/autocheckpoint_test.sh  # Auto-checkpoint mode regression
 ```
 
-203 automated checks pass across unit, acceptance, and integration test suites
-(unit 31, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22, installer
-regression 17, path safety 32, project-local runtime 32). CI runs all of them
-on Node 18/20/22.
+324 automated checks pass across unit, acceptance, and integration test suites
+(unit 69, acceptance 22, Phase 2 reliability 67, Phase 3 handoff 22, installer
+regression 18, path safety 33, project-local runtime 33, auto-checkpoint 60).
+CI runs all of them on Node 18/20/22.
 
 ---
 

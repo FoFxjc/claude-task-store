@@ -53,3 +53,6 @@ jobs:
 
       - name: Project-local runtime suite
         run: bash tests/local_runtime_test.sh
+
+      - name: Auto-checkpoint suite
+        run: bash tests/autocheckpoint_test.sh

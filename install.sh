@@ -85,8 +85,15 @@ echo "  ✓ Installed skill: .claude/skills/task-store/SKILL.md"
 cp "$SCRIPT_DIR/hooks/scripts/session-start.sh" "$CLAUDE_DIR/hooks/scripts/session-start.sh"
 cp "$SCRIPT_DIR/hooks/scripts/pre-compact.sh" "$CLAUDE_DIR/hooks/scripts/pre-compact.sh"
 cp "$SCRIPT_DIR/hooks/scripts/session-end.sh" "$CLAUDE_DIR/hooks/scripts/session-end.sh"
+# Auto-checkpoint hooks. These are installed unconditionally but are inert
+# unless the project opts in — each one bails out in bash, before spawning
+# anything, when .claude-task/config.json is absent or not set to
+# conservative. Installing them up front means enabling the feature is a
+# single `task-store config auto-checkpoint conservative` with no reinstall.
+cp "$SCRIPT_DIR/hooks/scripts/post-tool-use.sh" "$CLAUDE_DIR/hooks/scripts/post-tool-use.sh"
+cp "$SCRIPT_DIR/hooks/scripts/stop.sh" "$CLAUDE_DIR/hooks/scripts/stop.sh"
 chmod +x "$CLAUDE_DIR/hooks/scripts/"*.sh
-echo "  ✓ Installed hooks: session-start, pre-compact, session-end"
+echo "  ✓ Installed hooks: session-start, pre-compact, session-end, post-tool-use, stop"
 
 # ── Project-local CLI runtime ───────────────────────────────────────────────
 # The hooks need to run the canonical TypeScript resume renderer
@@ -187,6 +194,17 @@ OWNED_COMMANDS = {
     'SessionStart': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-start.sh',
     'PreCompact': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/pre-compact.sh',
     'SessionEnd': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-end.sh',
+    # Auto-checkpoint (inert unless the project opts in to conservative mode).
+    'PostToolUse': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/post-tool-use.sh',
+    'Stop': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/stop.sh',
+}
+
+# PostToolUse is the only event we scope with a matcher. The list is the set
+# of tools that can change repository or execution state; read-only tools
+# (Read, Grep, Glob, WebFetch, ...) are deliberately excluded so that merely
+# looking at the codebase never marks the checkpoint stale.
+MATCHERS = {
+    'PostToolUse': 'Write|Edit|MultiEdit|NotebookEdit|Bash',
 }
 
 def is_owned(event, command):
@@ -218,9 +236,8 @@ def add_hook(event, matcher, command):
         'hooks': [{'type': 'command', 'command': command}]
     })
 
-add_hook('SessionStart', '', OWNED_COMMANDS['SessionStart'])
-add_hook('PreCompact', '', OWNED_COMMANDS['PreCompact'])
-add_hook('SessionEnd', '', OWNED_COMMANDS['SessionEnd'])
+for event in ('SessionStart', 'PreCompact', 'SessionEnd', 'PostToolUse', 'Stop'):
+    add_hook(event, MATCHERS.get(event, ''), OWNED_COMMANDS[event])
 
 with open(settings_file, 'w') as f:
     json.dump(settings, f, indent=2)
@@ -236,6 +253,17 @@ GITIGNORE_MARKER="# claude-task-store"
 
 if [[ -f "$GITIGNORE" ]] && grep -q "$GITIGNORE_MARKER" "$GITIGNORE"; then
   echo "  ✓ .gitignore already has task-store entries"
+  # Backfill entries added after the marker block was first written. Without
+  # this, upgrading a v0.1.0 project would leave the auto-checkpoint runtime
+  # marker showing up as an untracked file forever, because the marker check
+  # above short-circuits the whole block.
+  if ! grep -q '.claude-task/auto-checkpoint.json' "$GITIGNORE"; then
+    cat >> "$GITIGNORE" <<'EOF'
+# auto-checkpoint runtime marker (ephemeral dirty/debounce bookkeeping)
+.claude-task/auto-checkpoint.json
+EOF
+    echo "  ✓ Added .claude-task/auto-checkpoint.json to .gitignore"
+  fi
 else
   echo "" >> "$GITIGNORE"
   cat >> "$GITIGNORE" <<'EOF'
@@ -245,6 +273,9 @@ else
 .claude-task/history.jsonl
 # .lock is a transient O_EXCL write lock; a crashed process can leave one behind
 .claude-task/.lock
+# auto-checkpoint.json is ephemeral dirty/debounce bookkeeping for the optional
+# auto-checkpoint mode — machine-local, never meaningful to another checkout
+.claude-task/auto-checkpoint.json
 # settings.json.bak is written by install.sh/uninstall.sh before each rewrite
 .claude/settings.json.bak
 # .claude/task-store/ is build output copied in by install.sh; re-created by
