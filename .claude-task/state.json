@@ -1,7 +1,7 @@
 {
   "version": "1",
-  "revision": 24,
-  "goal": "Pre-release remediation for v0.1.0: fix defects found after the pre-publish review, verify each with a regression test",
+  "revision": 32,
+  "goal": "Prepare claude-task-store v0.1.0 for public release: implement, harden, audit, and verify the installation path",
   "status": "completed",
   "current_task": null,
   "tasks": [
@@ -214,17 +214,59 @@
       "status": "done",
       "notes": null,
       "evidence": [
-        "committed on branch fofxjc-pre-release-remediation",
-        "17 files, 171 tests pass"
+        "merged into main via PR #3",
+        "171 checks passing at that commit (203 after release hardening)"
       ],
       "attempts": [],
       "started_at": "2026-08-31T04:25:02.289Z",
       "completed_at": "2026-08-31T07:56:06.271Z"
+    },
+    {
+      "id": "T18",
+      "title": "Final pre-publish audit of merged main",
+      "status": "done",
+      "notes": null,
+      "evidence": [
+        "README: corrected false install claim; test counts 122 -> 203",
+        "SKILL.md: removed absolutist wording contradicting the trust hierarchy",
+        "tests/phase2/safety_test.sh: replaced unconditional PASS with a real assertion"
+      ],
+      "attempts": [],
+      "started_at": null,
+      "completed_at": "2026-08-31T08:25:20.651Z"
+    },
+    {
+      "id": "T19",
+      "title": "Make default install self-contained (project-local CLI runtime)",
+      "status": "done",
+      "notes": null,
+      "evidence": [
+        "install.sh copies built runtime to .claude/task-store/ (ESM marker + ownership marker)",
+        "session-start.sh resolves project-local runtime -> PATH -> minimal fallback",
+        "uninstall.sh removes it only when the ownership marker matches",
+        "tests/local_runtime_test.sh 32/32; verified non-vacuous (21/32 pre-fix)"
+      ],
+      "attempts": [],
+      "started_at": null,
+      "completed_at": "2026-08-31T08:25:20.708Z"
+    },
+    {
+      "id": "T20",
+      "title": "Position task-store relative to automatic context compaction",
+      "status": "done",
+      "notes": null,
+      "evidence": [
+        "README.md: 'What about automatic compaction?' section + comparison table",
+        "DESIGN.md: 'Relationship to Automatic Context Compaction' design note"
+      ],
+      "attempts": [],
+      "started_at": null,
+      "completed_at": "2026-08-31T08:27:57.174Z"
     }
   ],
   "decisions": [
     {
-      "summary": "Numbering in docs/pre-release-remediation.md is load-bearing: items 1,3,5,6,11 are cited by exact number from README.md, SECURITY.md, src/cli.ts, src/core.ts, install.sh, session-start.sh and install_regression_test.sh. Never renumber.",
+      "summary": "docs/pre-release-remediation.md item numbers are load-bearing — cited by exact number from README, SECURITY.md, src/, and the installers. Never renumber.",
       "rationale": null,
       "at": "2026-08-31T04:25:02.114Z"
     },
@@ -234,14 +276,14 @@
       "at": "2026-08-31T04:25:02.171Z"
     },
     {
-      "summary": "The store lock covers all mutating CLI commands, not just --expect-rev, because SECURITY.md/README promised general serialization. Read-only and unknown commands stay unlocked so status on an uninitialized project does not create .claude-task/.",
+      "summary": "The store lock covers every mutating CLI command, not just --expect-rev, because SECURITY.md/README promise general serialization. Read-only commands stay unlocked so `status` does not create .claude-task/.",
       "rationale": null,
       "at": "2026-08-31T04:25:02.230Z"
     }
   ],
   "blockers": [],
-  "next_action": "Watch CI on branch fofxjc-pre-release-remediation — it now runs all 8 suites on Node 18/20/22 for the first time, so a failure there is new signal, not a regression. Do not tag v0.1.0 without the user's go-ahead.",
+  "next_action": "Tag v0.1.0 after final CI passes.",
   "created_at": "2026-08-31T04:24:05.956Z",
-  "updated_at": "2026-08-31T07:56:06.336Z",
+  "updated_at": "2026-08-31T08:27:57.232Z",
   "updated_by": "claude-opus-5"
 }
