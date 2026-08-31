@@ -6,7 +6,7 @@ Keep long-running coding tasks on track across session restarts, context compact
 
 **Use smaller models for longer tasks.**
 
-Plain JSON · Local-first · No cloud · No embeddings · No database
+Plain JSON · Local-first · No cloud · No embeddings · No database · No workflow framework
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/FoFxjc/claude-task-store/actions/workflows/ci.yml/badge.svg)](https://github.com/FoFxjc/claude-task-store/actions/workflows/ci.yml)
@@ -73,6 +73,8 @@ NEXT ACTION: Replace mock with local HTTP fixture, then complete streaming test
 ```
 
 Typical size: 100–300 tokens. One file. No transcript replay.
+
+The <400-token resume ceiling is a **design constraint**: as state accumulates, older completed tasks and historical details stay out of the default projection and are only loaded on explicit request.
 
 ---
 
@@ -252,7 +254,9 @@ Validated: Claude Code ↔ Codex handoffs in both directions. See [`docs/phase3-
 - **RAG or semantic search** — no embeddings, no vector database
 - **Long-term knowledge base** — not designed for "what do I know about X?"
 - **Project management** — no kanban, no sprint planning, no issue tracker
-- **Agent orchestration** — no multi-agent coordination
+- **Workspace manager** — does not create worktrees or isolated task environments
+- **Agent orchestration** — no multi-agent coordination or routing
+- **Workflow framework** — does not drive sequences of agent actions
 - **Cloud service** — everything stays on your local filesystem
 
 Conversation memory asks: *"What happened before?"*  
@@ -272,6 +276,22 @@ Conversation memory asks: *"What happened before?"*
 | Git-committable | Awkward | Native |
 
 See [`DESIGN.md`](DESIGN.md) for full analysis.
+
+---
+
+## Related projects
+
+Several projects solve adjacent problems. This is a known area with multiple active approaches:
+
+- [**ddaanet/handoff**](https://github.com/ddaanet/handoff) — A minimal task-frame bridge for Claude Code. Best suited when the core need is preserving the active task context across `/clear` or `/compact` within a single Claude Code project. No per-project setup required.
+
+- [**joeeeeey/task-workspace**](https://github.com/joeeeeey/task-workspace) — Isolated task environments with dedicated worktrees, `AGENTS.md`, `goal.md`, `decisions.md`, and `status.md`. Better suited when the work requires per-task isolation, artifact tracking, and structured multi-day agent sessions.
+
+- [**stefan-jansen/coding-agent-toolkit**](https://github.com/stefan-jansen/coding-agent-toolkit) — A structured idea-to-PR workflow using GitHub issues/milestones as the canonical state machine. Better suited when adopting a spec-first engineering process with explicit handoff assertions and GitHub integration.
+
+- [**jonmmease/jons-plan**](https://github.com/jonmmease/jons-plan) — A full workflow engine with typed phases, artifact systems, parallel subagents (Opus + Codex CLI), and a `/jons-plan` slash interface. Better suited for sophisticated multi-session planning workflows.
+
+**claude-task-store** targets a different point in this space: a small, drop-in execution checkpoint that requires no workflow adoption, no worktree setup, and no GitHub integration — just a file that keeps any coding agent oriented across session boundaries.
 
 ---
 

@@ -10,7 +10,7 @@ Claude Code provides `CLAUDE.md` for persistent project instructions and **auto 
 - Loaded in full every session regardless of relevance (cost overhead)
 - Not structured for "where am I in a multi-step task right now?"
 
-### Existing Memory Plugins (Research Findings)
+### Existing Memory and Checkpoint Projects
 
 **General memory systems** (claude-memory, context-memory, similar):
 - Focus on long-term knowledge accumulation (facts, code patterns, preferences)
@@ -19,14 +19,34 @@ Claude Code provides `CLAUDE.md` for persistent project instructions and **auto 
 - Add significant dependencies (vector DBs, embedding models)
 - Designed for "what do I know about X?" not "what was I doing?"
 
-**Project Brain (conceptual)**:
-- Indexes codebases for code understanding
-- Not focused on execution state or task tracking
+**[ddaanet/handoff](https://github.com/ddaanet/handoff)**:
+- A Claude Code-specific task-frame bridge for the `/clear` and `/compact` boundaries
+- Stores a single `.claude/handoff-task.md` with the current task frame and open decisions
+- Narrowly scoped: session boundary only, no per-project setup required
+- Does not track structured tasks, evidence, failed approaches, or decisions across multiple sessions
 
-**CodeMemory / OpenLTM**:
-- Long-term memory for code patterns and architectural decisions
+**[joeeeeey/task-workspace](https://github.com/joeeeeey/task-workspace)**:
+- Per-task isolated environments: dedicated worktrees, `goal.md`, `status.md`, `decisions.md`
+- Works with Claude Code and Codex; task history is local by default (`.gitignored`)
+- Solves a different problem: task isolation and environment management for multi-day work
+- Does not target small-context optimization or compact injection
+
+**[stefan-jansen/coding-agent-toolkit](https://github.com/stefan-jansen/coding-agent-toolkit)**:
+- Structured idea-to-PR workflow with GitHub as the canonical state machine
+- Seven sequential steps writing to `.workspace/`; handoff files contain inline assertions
+- Dual Claude/Codex support; GitHub issues/milestones are the persistent record
+- Broader scope than an execution checkpoint: requires GitHub, structured workflow adoption
+
+**[jonmmease/jons-plan](https://github.com/jonmmease/jons-plan)**:
+- Full workflow engine: typed phases, artifact tracking, parallel subagents, slash interface
+- Claude Code v2.1.3+, optional `uv`, optional `graphviz`; significant complexity
+- Directly represents the scope that claude-task-store avoids in v1
+- Useful reference for what to deliberately not build
+
+**Project Brain / CodeMemory / OpenLTM**:
+- Codebase indexing and long-term code pattern memory
 - Retrieval-based, not checkpoint-based
-- Designed for knowledge recall, not resumption
+- Designed for knowledge recall, not execution resumption
 
 ## The Gap This Project Fills
 
@@ -57,13 +77,21 @@ The problem is **execution state loss**, not knowledge loss:
 
 ## Design Principles
 
-1. **Files, not databases** — `state.json` + `history.jsonl`, human-readable, git-committable
-2. **Minimal injection** — Only a compact summary at session start, never on every turn
-3. **Checkpoint semantics** — Record meaningful state transitions, not conversation logs
-4. **Explicit next action** — Every state update must include `next_action`, so the resuming model has one clear starting point
-5. **Evidence required** — Tasks cannot be marked done without evidence (file path, test output, etc.)
-6. **Fail fast on corruption** — Validate state on every read; never silently overwrite valid state
-7. **Git-friendly** — `.claude-task/state.json` is committable by default; `history.jsonl` is configurable
+1. **Preserve only state expensive or ambiguous to reconstruct** — Don't store conversation, don't store code, don't store file contents. Only store what the agent cannot cheaply derive from the repository: goal, current task, completed work, failures, decisions, and next action.
+
+2. **Repository reality is authoritative** — The task store is a navigation checkpoint, not a source of truth. Before acting on a consequential claim (task complete, test passing, file modified), the agent must verify against the repository. Trust hierarchy: `repository/tests > git state > task-store > model memory`.
+
+3. **Resume context has a bounded token budget** — The default resume projection must stay below 400 tokens. This is a hard design constraint, not a benchmark target. Any feature that would inflate the default projection without a cap is not acceptable.
+
+4. **Features that grow state must not grow the projection automatically** — More completed tasks, more decisions, and more attempts must not cause the resume context to grow unboundedly. The projection algorithm must age out older state.
+
+5. **The store must be usable without Claude Code** — Skills and hooks are a convenience layer. Any agent with shell access can fully operate the store via the CLI. Claude Code integration is an adapter, not the core data model.
+
+6. **The CLI is the interoperability boundary** — Cross-agent use (Claude ↔ Codex ↔ other) does not require any agent-specific SDK, hook, or skill. The CLI provides a clean, stable interface that any agent or human can call.
+
+7. **Checkpoint semantics, not diary semantics** — Only persist high-value state transitions: task start, meaningful milestone, failed approach, decision, completion, session exit. Do not record every conversation turn.
+
+8. **State describes execution reality, not model internals** — Fields must be interpretable by any agent. Avoid chain-of-thought, conversation summaries, or provider-specific metadata. Prefer: `goal`, `tasks`, `status`, `attempts`, `decisions`, `blockers`, `evidence`, `next_action`.
 
 ## Architecture
 
