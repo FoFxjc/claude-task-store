@@ -1,0 +1,12 @@
+# .gitignore for projects using claude-task-store
+
+# claude-task-store
+# state.json is committable — it enables cross-session and cross-developer handoffs.
+# Commit it when you want another model/developer to be able to resume your work.
+#
+# history.jsonl is verbose (one entry per state update) — usually gitignored.
+# Commit it only if you want a full audit trail in version control.
+.claude-task/history.jsonl
+
+# Uncomment below to gitignore state.json too (private/noisy work):
+# .claude-task/state.json

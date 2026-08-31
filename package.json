@@ -1,0 +1,72 @@
+{
+  "name": "claude-task-store",
+  "version": "0.1.0",
+  "description": "Persistent execution checkpoints for Claude Code. Resume long coding tasks across sessions and models without replaying the full conversation.",
+  "type": "module",
+  "bin": {
+    "task-store": "./bin/task-store.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "claude-skill",
+    "execution-checkpoint",
+    "task-store",
+    "ai-agent",
+    "context-persistence",
+    "small-context"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FoFxjc/claude-task-store.git"
+  },
+  "homepage": "https://github.com/FoFxjc/claude-task-store#readme",
+  "bugs": {
+    "url": "https://github.com/FoFxjc/claude-task-store/issues"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "jest": "^29.0.0",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0",
+    "@jest/globals": "^29.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist/",
+    "bin/",
+    "skills/",
+    "hooks/",
+    "schemas/",
+    "DESIGN.md",
+    "README.md",
+    "SECURITY.md",
+    "install.sh",
+    "uninstall.sh"
+  ],
+  "jest": {
+    "preset": "ts-jest/presets/default-esm",
+    "testEnvironment": "node",
+    "extensionsToTreatAsEsm": [".ts"],
+    "moduleNameMapper": {
+      "^(\\.{1,2}/.*)\\.js$": "$1"
+    },
+    "transform": {
+      "^.+\\.tsx?$": [
+        "ts-jest",
+        {
+          "useESM": true
+        }
+      ]
+    }
+  }
+}
