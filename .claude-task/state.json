@@ -1,125 +1,247 @@
 {
   "version": "1",
-  "goal": "Phase 3: Cross-agent handoff validation — verify state.json is model-neutral and sufficient for agent handoff",
+  "revision": 24,
+  "goal": "Pre-release remediation for v0.1.0: fix defects found after the pre-publish review, verify each with a regression test",
   "status": "completed",
   "current_task": null,
   "tasks": [
     {
       "id": "T1",
-      "title": "Protocol audit: identify Claude-specific fields in schema",
+      "title": "Item 1: installer/uninstaller must not delete hooks they do not own",
       "status": "done",
       "notes": null,
       "evidence": [
-        "src/core.ts:TaskState interface"
+        "install.sh + uninstall.sh: OWNED_COMMANDS exact-match",
+        "tests/install_regression_test.sh 17/17 pass"
       ],
       "attempts": [],
-      "started_at": "2026-08-31T02:41:10.028Z",
-      "completed_at": "2026-08-31T02:44:42.914Z"
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.184Z"
     },
     {
       "id": "T2",
-      "title": "Add optional provenance field (updated_by)",
+      "title": "Item 2: back up settings.json before rewriting",
       "status": "done",
       "notes": null,
       "evidence": [
-        "src/cli.ts:--by flag"
+        "install.sh + uninstall.sh cp to settings.json.bak",
+        "install_regression_test.sh asserts .bak exists"
       ],
       "attempts": [],
-      "started_at": "2026-08-31T02:41:10.086Z",
-      "completed_at": "2026-08-31T02:44:42.972Z"
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.243Z"
     },
     {
       "id": "T3",
-      "title": "Add optimistic concurrency (revision number + compare-before-write)",
+      "title": "Item 3: serialize all mutating CLI writes behind O_EXCL lock",
       "status": "done",
       "notes": null,
       "evidence": [
-        "src/cli.ts:--expect-rev flag"
+        "src/core.ts:withStoreLock + process.once('exit') release",
+        "src/cli.ts:MUTATING_COMMANDS locks all writers",
+        "path_safety_test.sh scenario 8: 12/12 concurrent adds survive; unlocked build loses 3"
       ],
       "attempts": [],
-      "started_at": "2026-08-31T02:41:10.145Z",
-      "completed_at": "2026-08-31T02:44:43.029Z"
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.302Z"
     },
     {
       "id": "T4",
-      "title": "Design Claude->Codex handoff experiment task",
+      "title": "Item 4: stop comma-joining/splitting evidence strings",
       "status": "done",
       "notes": null,
       "evidence": [
-        "tests/phase3/handoff_test.sh:experiment design"
+        "src/cli.ts:parseArgs evidence string[] end-to-end",
+        "path_safety_test.sh scenario 2"
       ],
       "attempts": [],
-      "started_at": "2026-08-31T02:47:08.155Z",
-      "completed_at": "2026-08-31T02:47:08.241Z"
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.359Z"
     },
     {
       "id": "T5",
-      "title": "Execute Claude->Codex handoff simulation",
+      "title": "Item 5: remove duplicate resume renderer from session-start.sh",
       "status": "done",
       "notes": null,
       "evidence": [
-        "22/22 pass: Claude->Codex 12/12",
-        "Codex->Claude 5/5",
-        "conflict 2/2",
-        "CLI 4/4"
+        "hooks/scripts/session-start.sh: minimal fallback, CLI is canonical renderer",
+        "path_safety_test.sh scenario 4"
       ],
       "attempts": [],
-      "started_at": "2026-08-31T02:47:08.314Z",
-      "completed_at": "2026-08-31T02:47:08.378Z"
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.416Z"
     },
     {
       "id": "T6",
-      "title": "Execute Codex->Claude handoff simulation",
+      "title": "Item 6: reject --by on read-only commands",
       "status": "done",
       "notes": null,
       "evidence": [
-        "22/22 pass (Codex->Claude subtests pass)"
+        "src/cli.ts:READ_ONLY_COMMANDS rejects --by",
+        "path_safety_test.sh scenario 6"
       ],
       "attempts": [],
-      "started_at": "2026-08-31T02:47:08.445Z",
-      "completed_at": "2026-08-31T02:47:08.507Z"
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.476Z"
     },
     {
       "id": "T7",
-      "title": "CLI interoperability audit: verify CLI is sufficient cross-agent interface",
+      "title": "Item 7: block must not destroy pre-existing task notes",
       "status": "done",
       "notes": null,
       "evidence": [
-        "22/22 pass: all CLI interop checks pass"
+        "src/core.ts:blockTask backfills notes only if empty; buildResumeContext reads state.blockers",
+        "path_safety_test.sh scenario 3"
       ],
       "attempts": [],
-      "started_at": "2026-08-31T02:47:08.565Z",
-      "completed_at": "2026-08-31T02:47:08.624Z"
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.533Z"
     },
     {
       "id": "T8",
-      "title": "Conflict test: stale-write detection",
+      "title": "Item 8: path safety for spaces/quotes in project paths",
       "status": "done",
       "notes": null,
       "evidence": [
-        "22/22 pass: conflict test with --expect-rev works"
+        "python inlines use os.environ under quoted heredocs; TASK_STORE_CMD is a bash array",
+        "path_safety_test.sh runs full surface against a path with space, apostrophe and dollar"
       ],
       "attempts": [],
-      "started_at": "2026-08-31T02:47:08.684Z",
-      "completed_at": "2026-08-31T02:47:08.744Z"
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.592Z"
     },
     {
       "id": "T9",
-      "title": "Write docs/phase3-cross-agent-handoff.md",
+      "title": "Item 9: fix SKILL.md frontmatter and authority overclaim",
       "status": "done",
       "notes": null,
       "evidence": [
-        "docs/phase3-cross-agent-handoff.md"
+        "skills/task-store/SKILL.md: name added, invocation removed, authority overclaim replaced"
       ],
       "attempts": [],
-      "started_at": "2026-08-31T02:47:12.305Z",
-      "completed_at": "2026-08-31T02:48:16.190Z"
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.649Z"
+    },
+    {
+      "id": "T10",
+      "title": "Item 10: document token-estimate in --help",
+      "status": "done",
+      "notes": null,
+      "evidence": [
+        "src/cli.ts USAGE lists token-estimate; case arm reformatted"
+      ],
+      "attempts": [],
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.707Z"
+    },
+    {
+      "id": "T11",
+      "title": "Item 11: make global npm install opt-in",
+      "status": "done",
+      "notes": null,
+      "evidence": [
+        "install.sh: TASK_STORE_INSTALL_GLOBAL=1 opt-in",
+        "path_safety_test.sh scenario 5"
+      ],
+      "attempts": [],
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.765Z"
+    },
+    {
+      "id": "T12",
+      "title": "Item 12: run all 8 test suites in CI",
+      "status": "done",
+      "notes": null,
+      "evidence": [
+        ".github/workflows/ci.yml runs all 8 suites on node 18/20/22"
+      ],
+      "attempts": [],
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.822Z"
+    },
+    {
+      "id": "T13",
+      "title": "Item 13: sync package-lock license to MPL-2.0",
+      "status": "done",
+      "notes": null,
+      "evidence": [
+        "package-lock.json license MPL-2.0"
+      ],
+      "attempts": [],
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.880Z"
+    },
+    {
+      "id": "T14",
+      "title": "Item 14: gitignore .lock and settings.json.bak",
+      "status": "done",
+      "notes": null,
+      "evidence": [
+        ".gitignore + install.sh template ignore .claude-task/.lock and .claude/settings.json.bak",
+        "git check-ignore confirms both"
+      ],
+      "attempts": [],
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.938Z"
+    },
+    {
+      "id": "T15",
+      "title": "Write docs/pre-release-remediation.md (referenced by code/docs)",
+      "status": "done",
+      "notes": null,
+      "evidence": [
+        "docs/pre-release-remediation.md: 14 items, resolves all dangling references"
+      ],
+      "attempts": [],
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:01.996Z"
+    },
+    {
+      "id": "T16",
+      "title": "Add tests/path_safety_test.sh (referenced by CI)",
+      "status": "done",
+      "notes": null,
+      "evidence": [
+        "tests/path_safety_test.sh 32/32 pass; referenced by ci.yml"
+      ],
+      "attempts": [],
+      "started_at": null,
+      "completed_at": "2026-08-31T04:25:02.055Z"
+    },
+    {
+      "id": "T17",
+      "title": "Commit the remediation work",
+      "status": "done",
+      "notes": null,
+      "evidence": [
+        "committed on branch fofxjc-pre-release-remediation",
+        "17 files, 171 tests pass"
+      ],
+      "attempts": [],
+      "started_at": "2026-08-31T04:25:02.289Z",
+      "completed_at": "2026-08-31T07:56:06.271Z"
     }
   ],
-  "decisions": [],
+  "decisions": [
+    {
+      "summary": "Numbering in docs/pre-release-remediation.md is load-bearing: items 1,3,5,6,11 are cited by exact number from README.md, SECURITY.md, src/cli.ts, src/core.ts, install.sh, session-start.sh and install_regression_test.sh. Never renumber.",
+      "rationale": null,
+      "at": "2026-08-31T04:25:02.114Z"
+    },
+    {
+      "summary": "Deleting hooks/hooks.json was correct: nothing referenced it, and install.sh writes hook config into settings.json inline, so it was a dead second source of truth.",
+      "rationale": null,
+      "at": "2026-08-31T04:25:02.171Z"
+    },
+    {
+      "summary": "The store lock covers all mutating CLI commands, not just --expect-rev, because SECURITY.md/README promised general serialization. Read-only and unknown commands stay unlocked so status on an uninitialized project does not create .claude-task/.",
+      "rationale": null,
+      "at": "2026-08-31T04:25:02.230Z"
+    }
+  ],
   "blockers": [],
-  "next_action": "Phase 3 complete — all 122 tests pass — PR #1 ready for merge",
-  "created_at": "2026-08-31T02:41:06.454Z",
-  "updated_at": "2026-08-31T02:48:16.248Z",
-  "revision": 16
+  "next_action": "Watch CI on branch fofxjc-pre-release-remediation — it now runs all 8 suites on Node 18/20/22 for the first time, so a failure there is new signal, not a regression. Do not tag v0.1.0 without the user's go-ahead.",
+  "created_at": "2026-08-31T04:24:05.956Z",
+  "updated_at": "2026-08-31T07:56:06.336Z",
+  "updated_by": "claude-opus-5"
 }

@@ -21,21 +21,35 @@ if command -v npm &>/dev/null; then
   npm run build --silent
   echo "  ✓ Built TypeScript"
 
-  # Install globally so `task-store` is on PATH
-  npm install -g . --silent 2>/dev/null || {
-    echo "  ⚠  Global install failed (no sudo?). Using local bin instead."
-    # Create a shim in ~/bin if it exists
-    if [[ -d "$HOME/bin" ]]; then
-      cat > "$HOME/bin/task-store" <<'SHIM'
+  # Global install is opt-in: it silently altered the user's global npm
+  # environment by default, which was surprising and undocumented (see
+  # docs/pre-release-remediation.md item 11). The CLI does not need to be on
+  # PATH for hooks to work — session-start.sh already falls back to
+  # `node bin/task-store.js` / node_modules/.bin/task-store when `task-store`
+  # isn't found on PATH.
+  if [[ "${TASK_STORE_INSTALL_GLOBAL:-0}" == "1" ]]; then
+    npm install -g . --silent 2>/dev/null || {
+      echo "  ⚠  Global install failed (no sudo?). Using local bin instead."
+      # Create a shim in ~/bin if it exists. Uses an unquoted heredoc so
+      # $SCRIPT_DIR is expanded once, safely, even if it contains spaces or
+      # apostrophes (e.g. "/tmp/pat's project") — no sed post-processing
+      # step is needed, which previously could break on such paths.
+      if [[ -d "$HOME/bin" ]]; then
+        cat > "$HOME/bin/task-store" <<SHIM
 #!/usr/bin/env bash
-node "SCRIPT_DIR/dist/cli.js" "$@"
+exec node "$SCRIPT_DIR/dist/cli.js" "\$@"
 SHIM
-      sed -i.bak "s|SCRIPT_DIR|$SCRIPT_DIR|g" "$HOME/bin/task-store"
-      rm -f "$HOME/bin/task-store.bak"
-      chmod +x "$HOME/bin/task-store"
-      echo "  ✓ Shim installed at ~/bin/task-store"
-    fi
-  }
+        chmod +x "$HOME/bin/task-store"
+        echo "  ✓ Shim installed at ~/bin/task-store"
+      fi
+    }
+  else
+    echo "  ℹ  Skipping global npm install (opt-in only)."
+    echo "     The CLI works via bin/task-store.js and hook fallback detection without it."
+    echo "     To put \`task-store\` on PATH globally, run:"
+    echo "       TASK_STORE_INSTALL_GLOBAL=1 ./install.sh"
+    echo "     or manually: npm install -g ."
+  fi
 else
   echo "  ⚠  npm not found. Falling back to Python-only mode."
   echo "     The Python fallback in hooks will be used instead of the CLI."
@@ -84,38 +98,76 @@ if [[ ! -f "$SETTINGS_FILE" ]]; then
 EOF
 fi
 
-# Add hooks to settings.json using Python (no jq dependency required)
-python3 - <<PYEOF
-import json, sys
+# Back up settings.json before rewriting it. JSON is parsed and re-emitted
+# below, so comments (not valid in JSON anyway) and original formatting are
+# not preserved — the backup is the recovery path if that matters to you.
+cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak"
+echo "  ✓ Backed up existing settings to $(basename "$SETTINGS_FILE").bak"
 
-settings_file = '$SETTINGS_FILE'
+# Add hooks to settings.json using Python (no jq dependency required).
+# STATE/paths are passed via environment variables, never interpolated into
+# the Python source, so this is safe for project paths containing spaces,
+# apostrophes, or other shell metacharacters.
+export SETTINGS_FILE
+python3 <<'PYEOF'
+import json, os
+
+settings_file = os.environ['SETTINGS_FILE']
 with open(settings_file) as f:
     settings = json.load(f)
 
 hooks = settings.setdefault('hooks', {})
 
+# Ownership is determined by an EXACT match against the literal command
+# string claude-task-store installs — never a substring match. This is
+# critical: a substring match (e.g. matching any command containing
+# "session-start.sh") would silently delete unrelated hooks that a user or
+# another plugin registered for the same event, such as
+# scripts/my-own-session-start.sh. Only these exact strings are ever removed.
+OWNED_COMMANDS = {
+    'SessionStart': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-start.sh',
+    'PreCompact': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/pre-compact.sh',
+    'SessionEnd': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-end.sh',
+}
+
+def is_owned(event, command):
+    return command == OWNED_COMMANDS.get(event)
+
+def remove_owned(event):
+    entries = hooks.get(event, [])
+    kept = []
+    for entry in entries:
+        inner = entry.get('hooks', [])
+        kept_inner = [h for h in inner if not is_owned(event, str(h.get('command', '')))]
+        if kept_inner:
+            # Preserve the entry (and any unrelated hooks inside it) if
+            # anything is left after removing only our own hook(s).
+            new_entry = dict(entry)
+            new_entry['hooks'] = kept_inner
+            kept.append(new_entry)
+        # else: this entry consisted solely of our own hook — drop it.
+    if kept:
+        hooks[event] = kept
+    elif event in hooks:
+        del hooks[event]
+
 def add_hook(event, matcher, command):
+    remove_owned(event)
     entries = hooks.setdefault(event, [])
-    # Remove any existing task-store hook for this event to avoid duplicates
-    hooks[event] = [e for e in entries if not any(
-        'task-store' in str(h.get('command', '')) or 'session-start.sh' in str(h.get('command',''))
-        or 'pre-compact.sh' in str(h.get('command','')) or 'session-end.sh' in str(h.get('command',''))
-        for h in e.get('hooks', [])
-    )]
-    hooks[event].append({
+    entries.append({
         'matcher': matcher,
         'hooks': [{'type': 'command', 'command': command}]
     })
 
-add_hook('SessionStart', '', '\${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-start.sh')
-add_hook('PreCompact', '', '\${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/pre-compact.sh')
-add_hook('SessionEnd', '', '\${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-end.sh')
+add_hook('SessionStart', '', OWNED_COMMANDS['SessionStart'])
+add_hook('PreCompact', '', OWNED_COMMANDS['PreCompact'])
+add_hook('SessionEnd', '', OWNED_COMMANDS['SessionEnd'])
 
 with open(settings_file, 'w') as f:
     json.dump(settings, f, indent=2)
     f.write('\n')
 
-print('  ✓ Merged hooks into .claude/settings.json')
+print('  ✓ Merged hooks into .claude/settings.json (unrelated hooks preserved)')
 PYEOF
 
 # ── 3. Add .gitignore entries ────────────────────────────────────────────────
@@ -132,6 +184,10 @@ else
 # state.json is committable (enables cross-session handoff)
 # history.jsonl is verbose — commit it only if you want a full audit trail
 .claude-task/history.jsonl
+# .lock is a transient O_EXCL write lock; a crashed process can leave one behind
+.claude-task/.lock
+# settings.json.bak is written by install.sh/uninstall.sh before each rewrite
+.claude/settings.json.bak
 EOF
   echo "  ✓ Updated .gitignore (history.jsonl ignored, state.json committable)"
 fi

@@ -209,7 +209,13 @@ npm install && npm run build
 ./install.sh /path/to/your/project
 ```
 
-Or globally:
+By default `install.sh` does **not** put `task-store` on your global PATH — the CLI works without it, since hooks already fall back to `node bin/task-store.js` / `node_modules/.bin/task-store` when `task-store` isn't found. To also install it globally:
+
+```bash
+TASK_STORE_INSTALL_GLOBAL=1 ./install.sh /path/to/your/project
+```
+
+Or manually, any time:
 
 ```bash
 npm install -g .
@@ -219,13 +225,14 @@ The installer:
 1. Builds the TypeScript CLI
 2. Copies the skill to `.claude/skills/task-store/SKILL.md`
 3. Copies hook scripts to `.claude/hooks/scripts/`
-4. Merges hook config into `.claude/settings.json`
+4. Merges hook config into `.claude/settings.json` — only claude-task-store's own hook entries are ever added or removed (matched by exact command path, not substring), so any other hooks you or another plugin registered for `SessionStart`/`PreCompact`/`SessionEnd` are left untouched. A backup is written to `.claude/settings.json.bak` before each rewrite.
 5. Updates `.gitignore`
 
 **Uninstall:**
 ```bash
 ./uninstall.sh /path/to/your/project
 ```
+Uninstalling backs up `.claude/settings.json` to `.claude/settings.json.bak` first and removes only claude-task-store's own hook entries, in the same exact-match-safe way as install.
 
 ---
 
@@ -288,6 +295,10 @@ task-store start T1 --by claude-code       # record which agent is writing
 task-store done T1 --by codex -e proof     # handoff provenance (informational)
 task-store next "action" --expect-rev 14   # reject write if another agent wrote first
 ```
+
+`--by` is accepted on every command that writes state (`init`, `add`, `start`, `done`, `block`, `resume-task`, `attempt`, `decide`, `next`, `archive`, `repair`) and is rejected as an unsupported flag if you pass it to a purely read-only command.
+
+`--expect-rev` is enforced atomically: the revision check and the write both happen inside an O_EXCL lock file (`.claude-task/.lock`) held for the full read-compare-write cycle, so two concurrent `task-store` CLI invocations cannot race each other into a lost update. This protects concurrent **CLI** invocations specifically; code that imports `src/core.ts` directly and calls `writeState()` without going through `withStoreLock()` bypasses it. See [`docs/pre-release-remediation.md`](docs/pre-release-remediation.md) item 3 for the exact guarantee.
 
 ---
 
@@ -420,7 +431,8 @@ Options:
 
 - State files are injected into Claude's context. Treat `.claude-task/state.json` with the same trust as other project config. A malicious state file could inject arbitrary text into the AI context (prompt injection).
 - No network requests are made. All state is local.
-- Concurrent agent sessions: last-writer-wins by default. Use `--expect-rev` for conflict detection.
+- Concurrent `task-store` CLI invocations are serialized by an O_EXCL lock file around each command's full read-modify-write cycle; `--expect-rev` makes this an atomic compare-and-write (not last-writer-wins) against other CLI callers. Direct library callers that bypass `withStoreLock()` are not protected. See [`SECURITY.md`](SECURITY.md).
+- Evidence (`-e` values) is kept as a plain string array end-to-end — no delimiter-based joining/splitting — so evidence text may safely contain commas, quotes, or other special characters.
 - Evidence paths in state.json are claims, not verified proofs. The trust hierarchy is: repository/tests > git state > task-store > model memory.
 
 See [`SECURITY.md`](SECURITY.md) for full details.

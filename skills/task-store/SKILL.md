@@ -1,10 +1,10 @@
 ---
+name: task-store
 description: >
   Manages persistent execution state across sessions using the task store.
   Use when resuming work, updating task status, recording failures, or
   checking what was done previously. Automatically invoked at session start
   when .claude-task/state.json exists.
-invocation: user-or-claude
 ---
 
 # Task Store Skill
@@ -170,7 +170,9 @@ REMAINING:
 NEXT ACTION: Replace mock with local HTTP fixture in tests/fixtures/
 ```
 
-**This context is authoritative.** Use it to resume work without re-reading transcripts.
+Use this context to orient quickly without replaying prior transcripts.
+Verify consequential claims against repository and test state — see
+**Trust Hierarchy** above: `repository/tests > git state > task-store > model memory`.
 
 ## Token Budget Awareness
 
