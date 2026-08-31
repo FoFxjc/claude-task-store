@@ -8,7 +8,7 @@ import {
   initState, readState, writeState, startTask, completeTask, blockTask,
   resumeTask, addTask, recordAttempt, recordDecision, setNextAction,
   archiveState, buildResumeContext, repairState, detectStaleTasks,
-  compareAndWriteState, ConflictError,
+  compareAndWriteState, ConflictError, withStoreLock, LockError,
   stateFilePath, historyFilePath, StateError, findProjectRoot,
 } from './core.js';
 import { readFileSync, existsSync } from 'fs';
@@ -32,17 +32,24 @@ COMMANDS:
   archive                           Archive the current state
   repair                            Attempt to recover from corrupted state.json
   stale                             Detect tasks in_progress for >48h
+  token-estimate                    Estimate the token size of the resume context
 
 FLAGS:
   --root <path>         Use a specific project root (default: auto-detect from cwd)
   --by <agent>          Record who/what is writing (e.g. --by claude-code, --by codex)
-  --expect-rev <N>      Optimistic concurrency: fail if on-disk revision != N
+  --expect-rev <N>      Optimistic concurrency: fail if on-disk revision != N.
+                         Enforced atomically via an O_EXCL lock file around the
+                         read-compare-write cycle for this CLI invocation — see
+                         docs/pre-release-remediation.md item 3 for the exact
+                         guarantee (protects concurrent task-store CLI callers;
+                         does not protect direct library callers).
   --help, -h            Show this help
 `;
 
-function parseArgs(argv: string[]): { command: string; args: string[]; flags: Record<string, string | boolean> } {
+function parseArgs(argv: string[]): { command: string; args: string[]; flags: Record<string, string | boolean>; evidence: string[] } {
   const args: string[] = [];
   const flags: Record<string, string | boolean> = {};
+  const evidence: string[] = [];
   let command = '';
 
   for (let i = 0; i < argv.length; i++) {
@@ -50,20 +57,26 @@ function parseArgs(argv: string[]): { command: string; args: string[]; flags: Re
     if (a === '--help' || a === '-h') { flags.help = true; }
     else if (a === '--root') { flags.root = argv[++i] ?? ''; }
     else if (a === '-e') {
-      // evidence flag: collect all subsequent values until next flag
-      const evidence: string[] = [];
-      while (i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
-        evidence.push(argv[++i]);
+      // Evidence flag: each `-e` takes exactly one following value, kept as
+      // a single opaque string. Multiple `-e` flags accumulate into a plain
+      // string[] — there is no delimiter-based join/split round trip, so
+      // evidence text may safely contain commas, quotes, or any other
+      // characters.
+      const value = argv[++i];
+      if (value === undefined) {
+        console.error('Error: -e requires a value');
+        process.exit(1);
       }
-      flags.evidence = evidence.join(',');
-    } else if (a === '--tail') { flags.tail = argv[++i] ?? '20'; }
+      evidence.push(value);
+    }
+    else if (a === '--tail') { flags.tail = argv[++i] ?? '20'; }
     else if (a === '--by') { flags.by = argv[++i] ?? ''; }
     else if (a === '--expect-rev') { flags['expect-rev'] = argv[++i] ?? ''; }
     else if (!command) { command = a; }
     else { args.push(a); }
   }
 
-  return { command, args, flags };
+  return { command, args, flags, evidence };
 }
 
 function printState(projectRoot?: string): void {
@@ -115,7 +128,7 @@ function printState(projectRoot?: string): void {
 }
 
 async function main(): Promise<void> {
-  const { command, args, flags } = parseArgs(process.argv.slice(2));
+  const { command, args, flags, evidence } = parseArgs(process.argv.slice(2));
   const projectRoot = flags.root ? String(flags.root) : findProjectRoot();
 
   if (flags.help || !command) {
@@ -127,30 +140,59 @@ async function main(): Promise<void> {
     const by = flags.by ? String(flags.by) : undefined;
     const expectRev = flags['expect-rev'] !== undefined ? parseInt(String(flags['expect-rev']), 10) : undefined;
 
-    // Validate --expect-rev before mutation if provided
-    if (expectRev !== undefined) {
-      const current = readState(projectRoot);
-      const currentRev = current?.revision ?? 0;
-      if (currentRev !== expectRev) {
-        console.error(
-          `Error: Revision conflict. Expected rev ${expectRev}, found rev ${currentRev}.\n` +
-          `Re-read state with \`task-store status\` before retrying.`
-        );
-        process.exit(2);
-      }
+    // --by is only meaningful on commands that write state. Passing it to a
+    // read-only command was previously silently ignored, which is not
+    // acceptable — reject it explicitly instead (see
+    // docs/pre-release-remediation.md item 6).
+    const READ_ONLY_COMMANDS = new Set(['status', 'resume', 'history', 'stale', 'token-estimate']);
+    if (by !== undefined && READ_ONLY_COMMANDS.has(command)) {
+      console.error(`Error: --by is not supported on read-only command \`${command}\` (it never writes state).`);
+      process.exit(1);
     }
 
-    switch (command) {
-      case 'init': {
-        const goal = args[0];
-        if (!goal) { console.error('Error: goal is required\nUsage: task-store init "<goal>" [task1] [task2] ...'); process.exit(1); }
-        const tasks = args.slice(1);
-        const state = initState(goal, tasks, projectRoot);
-        console.log(`✓ Initialized task store for: ${state.goal}`);
-        console.log(`  ${state.tasks.length} task(s) created`);
-        console.log(`  State: ${stateFilePath(projectRoot)}`);
-        break;
+    // Every command that writes state performs a read-modify-write cycle, so
+    // every one of them must hold the store lock for the whole cycle — not
+    // just the `--expect-rev` ones. Locking only the `--expect-rev` path
+    // would leave plain `task-store done T1 -e x` racing another writer and
+    // silently losing an update, while SECURITY.md/README promise that
+    // concurrent CLI invocations are serialized.
+    //
+    // This set is enumerated explicitly rather than derived as "not
+    // read-only" so that an unknown/misspelled command does not take the
+    // lock (and does not create .claude-task/) on its way to the usage error.
+    const MUTATING_COMMANDS = new Set([
+      'init', 'add', 'start', 'done', 'block', 'resume-task',
+      'attempt', 'decide', 'next', 'archive', 'repair',
+    ]);
+
+    // The revision check and the command's mutation both run inside
+    // runCommand(), so when the whole thing runs under withStoreLock() the
+    // check-then-write cycle is atomic against other task-store CLI
+    // invocations (see docs/pre-release-remediation.md item 3).
+    const runCommand = (): void => {
+      if (expectRev !== undefined) {
+        const current = readState(projectRoot);
+        const currentRev = current?.revision ?? 0;
+        if (currentRev !== expectRev) {
+          throw new ConflictError(
+            `Revision conflict. Expected rev ${expectRev}, found rev ${currentRev}. ` +
+            `Re-read state with \`task-store status\` before retrying.`,
+            currentRev,
+          );
+        }
       }
+
+      switch (command) {
+        case 'init': {
+          const goal = args[0];
+          if (!goal) { console.error('Error: goal is required\nUsage: task-store init "<goal>" [task1] [task2] ...'); process.exit(1); }
+          const tasks = args.slice(1);
+          const state = initState(goal, tasks, projectRoot, by);
+          console.log(`✓ Initialized task store for: ${state.goal}`);
+          console.log(`  ${state.tasks.length} task(s) created`);
+          console.log(`  State: ${stateFilePath(projectRoot)}`);
+          break;
+        }
       case 'status': {
         printState(projectRoot);
         break;
@@ -164,7 +206,7 @@ async function main(): Promise<void> {
       case 'add': {
         const title = args.join(' ');
         if (!title) { console.error('Error: title required'); process.exit(1); }
-        const state = addTask(title, undefined, projectRoot);
+        const state = addTask(title, undefined, projectRoot, by);
         const t = state.tasks[state.tasks.length - 1];
         console.log(`✓ Added task [${t.id}] ${t.title}`);
         break;
@@ -180,13 +222,15 @@ async function main(): Promise<void> {
       case 'done': {
         const taskId = args[0]?.toUpperCase();
         if (!taskId) { console.error('Error: taskId required'); process.exit(1); }
-        const evidenceStr = String(flags.evidence ?? '');
-        const evidence = evidenceStr ? evidenceStr.split(',').map(s => s.trim()).filter(Boolean) : args.slice(1);
-        if (evidence.length === 0) {
+        // Evidence is a plain string[] end-to-end — no comma-delimited
+        // join/split round trip, so evidence text may contain commas safely.
+        // Falls back to positional args only if no -e flags were given.
+        const evidenceList = evidence.length > 0 ? evidence : args.slice(1);
+        if (evidenceList.length === 0) {
           console.error('Error: evidence required. Use: task-store done T1 -e src/foo.ts -e "tests pass"');
           process.exit(1);
         }
-        const state = completeTask(taskId, evidence, undefined, projectRoot, by);
+        const state = completeTask(taskId, evidenceList, undefined, projectRoot, by);
         console.log(`✓ Completed [${taskId}]`);
         if (state.next_action) console.log(`  Next: ${state.next_action}`);
         break;
@@ -252,12 +296,12 @@ async function main(): Promise<void> {
         break;
       }
       case 'archive': {
-        archiveState(projectRoot);
+        archiveState(projectRoot, by);
         console.log('✓ State archived.');
         break;
       }
       case 'repair': {
-        const recovered = repairState(projectRoot);
+        const recovered = repairState(projectRoot, by);
         if (recovered) {
           console.log(`✓ Recovered state from history. Goal: ${recovered.goal}`);
         } else {
@@ -282,7 +326,8 @@ async function main(): Promise<void> {
         }
         break;
       }
-      case 'token-estimate': {        const state = readState(projectRoot);
+      case 'token-estimate': {
+        const state = readState(projectRoot);
         if (!state) { console.log('No state found.'); break; }
         const ctx = buildResumeContext(state);
         // Rough estimate: ~4 chars per token
@@ -295,6 +340,15 @@ async function main(): Promise<void> {
         console.error(`Unknown command: ${command}\nRun task-store --help`);
         process.exit(1);
       }
+      }
+    };
+
+    if (MUTATING_COMMANDS.has(command)) {
+      withStoreLock(projectRoot, runCommand);
+    } else {
+      // Read-only and unknown commands: no lock, so `status` on a project
+      // that has never been initialized does not create .claude-task/.
+      runCommand();
     }
 
   } catch (err) {
@@ -305,6 +359,10 @@ async function main(): Promise<void> {
     if (err instanceof ConflictError) {
       console.error(`Error: ${err.message}`);
       process.exit(2);
+    }
+    if (err instanceof LockError) {
+      console.error(`Error: ${err.message}`);
+      process.exit(3);
     }
     throw err;
   }

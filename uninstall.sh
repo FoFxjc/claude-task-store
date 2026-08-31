@@ -20,32 +20,56 @@ rm -f "$CLAUDE_DIR/hooks/scripts/session-end.sh"
 # Remove task-store hooks from settings.json
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 if [[ -f "$SETTINGS_FILE" ]]; then
+  # Back up before rewriting. JSON is parsed and re-emitted below, so
+  # comments (not valid in JSON anyway) and original formatting are not
+  # preserved — the backup is the recovery path if that matters to you.
+  cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak"
+  echo "  ✓ Backed up settings to $(basename "$SETTINGS_FILE").bak"
+
   export SETTINGS_FILE
-  python3 - <<'PYEOF'
+  python3 <<'PYEOF'
 import json, os
 
-settings_file = os.environ.get('SETTINGS_FILE', '.claude/settings.json')
+settings_file = os.environ['SETTINGS_FILE']
 with open(settings_file) as f:
     settings = json.load(f)
 
 hooks = settings.get('hooks', {})
+
+# Ownership is determined by an EXACT match against the literal command
+# string claude-task-store installs — never a substring match. A substring
+# match (e.g. matching any command containing "session-start.sh") would
+# silently delete unrelated hooks a user or another plugin registered for
+# the same event, such as scripts/my-own-session-start.sh. Only these exact
+# strings are ever removed; everything else in settings.json is untouched.
+OWNED_COMMANDS = {
+    'SessionStart': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-start.sh',
+    'PreCompact': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/pre-compact.sh',
+    'SessionEnd': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-end.sh',
+}
+
+def is_owned(event, command):
+    return command == OWNED_COMMANDS.get(event)
+
 for event in list(hooks.keys()):
-    hooks[event] = [
-        e for e in hooks[event]
-        if not any(
-            'session-start.sh' in str(h.get('command',''))
-            or 'pre-compact.sh' in str(h.get('command',''))
-            or 'session-end.sh' in str(h.get('command',''))
-            for h in e.get('hooks', [])
-        )
-    ]
-    if not hooks[event]:
-        del hooks[event]
+    entries = hooks.get(event, [])
+    kept = []
+    for entry in entries:
+        inner = entry.get('hooks', [])
+        kept_inner = [h for h in inner if not is_owned(event, str(h.get('command', '')))]
+        if kept_inner:
+            new_entry = dict(entry)
+            new_entry['hooks'] = kept_inner
+            kept.append(new_entry)
+    if kept:
+        hooks[event] = kept
+    else:
+        hooks.pop(event, None)
 
 with open(settings_file, 'w') as f:
     json.dump(settings, f, indent=2)
     f.write('\n')
-print('  ✓ Removed task-store hooks from .claude/settings.json')
+print('  ✓ Removed task-store hooks from .claude/settings.json (unrelated hooks preserved)')
 PYEOF
 fi
 

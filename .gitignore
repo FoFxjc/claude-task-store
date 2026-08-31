@@ -6,6 +6,10 @@ dist/
 # claude-task-store state: state.json is committable (cross-session handoff)
 # history.jsonl is verbose — ignored by default
 .claude-task/history.jsonl
+# .lock is a transient O_EXCL write lock; a crashed process can leave one behind
+.claude-task/.lock
+# settings.json.bak is written by install.sh/uninstall.sh before each rewrite
+.claude/settings.json.bak
 
 # Editor
 .DS_Store

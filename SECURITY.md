@@ -33,7 +33,7 @@ The hook scripts (`session-start.sh`, `pre-compact.sh`, `session-end.sh`) are sh
 **Mitigation**: Review hook scripts before installing. The scripts in this repository do not make network requests, do not execute arbitrary code from state files, and do not send data to external services.
 
 ### Atomic writes
-State writes use a write-to-temp-then-rename pattern to prevent corruption from interrupted writes. The temp file is always in the same directory as the target file.
+State writes use a write-to-temp-then-rename pattern to prevent corruption from interrupted writes. The temp file is always in the same directory as the target file. Separately, `task-store` CLI invocations serialize their full read-modify-write cycle behind an O_EXCL lock file (`.claude-task/.lock`) so that two concurrent CLI invocations cannot interleave a read and a write — see the "Multi-user environments" recommendation below for the exact scope of this guarantee.
 
 ## Recommendations
 
@@ -45,7 +45,7 @@ State writes use a write-to-temp-then-rename pattern to prevent corruption from 
 
 4. **Local filesystem only.** This plugin makes no network requests. All state is local.
 
-5. **Multi-user environments.** If multiple developers share a project and commit `state.json`, concurrent modifications from separate sessions may conflict. Use git merge workflows to resolve. The last writer wins on atomic write; there is no distributed lock.
+5. **Multi-user environments.** By default, concurrent writes from separate `task-store` CLI invocations are serialized (not merely last-writer-wins) by an O_EXCL lock file (`.claude-task/.lock`) held around each command's full read-modify-write cycle. Passing `--expect-rev <N>` additionally makes the write fail with a conflict error if another writer's revision has moved since you last read state — this check is performed inside the same lock, so it is atomic, not a best-effort/TOCTOU-prone check. This protects concurrent **task-store CLI** invocations. It does **not** protect code that imports `src/core.ts` directly and calls `writeState()`/mutation functions without going through `withStoreLock()` — such callers can still race. See [`docs/pre-release-remediation.md`](docs/pre-release-remediation.md) item 3 for the exact guarantee and limitation.
 
 ## Reporting Vulnerabilities
 

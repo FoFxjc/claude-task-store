@@ -6,13 +6,14 @@
  * Uses atomic writes to prevent corruption.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, renameSync, unlinkSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, renameSync, unlinkSync, openSync, closeSync, statSync } from 'fs';
 import { join, resolve } from 'path';
 import { randomBytes } from 'crypto';
 
 const STORE_DIR = '.claude-task';
 const STATE_FILE = 'state.json';
 const HISTORY_FILE = 'history.jsonl';
+const LOCK_FILE = '.lock';
 export const SCHEMA_VERSION = '1';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -87,6 +88,101 @@ export function stateFilePath(projectRoot?: string): string {
 
 export function historyFilePath(projectRoot?: string): string {
   return join(storePath(projectRoot), HISTORY_FILE);
+}
+
+function lockFilePath(projectRoot?: string): string {
+  return join(storePath(projectRoot), LOCK_FILE);
+}
+
+// ─── Process-level locking ────────────────────────────────────────────────────
+
+export class LockError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LockError';
+  }
+}
+
+const LOCK_ACQUIRE_TIMEOUT_MS = 5000;
+const LOCK_POLL_INTERVAL_MS = 25;
+/** A lock file older than this is assumed to be left behind by a crashed process. */
+const LOCK_STALE_MS = 30000;
+
+function sleepSync(ms: number): void {
+  const sab = new SharedArrayBuffer(4);
+  Atomics.wait(new Int32Array(sab), 0, 0, ms);
+}
+
+/**
+ * Acquire an exclusive O_EXCL lock file around a read-modify-write cycle and
+ * run `fn` while holding it, releasing the lock afterward (even on error).
+ *
+ * This provides real (not merely best-effort) process-level conflict
+ * protection for concurrent `task-store` CLI invocations against the same
+ * project root: only one process can hold the lock at a time, so a
+ * read-compare-write sequence (e.g. `--expect-rev`) cannot be interleaved
+ * with another writer's read-compare-write sequence.
+ *
+ * Limitation: this protects callers that go through this function (the CLI
+ * always does). Code that imports core.ts directly and calls writeState()
+ * without going through withStoreLock() bypasses this protection.
+ */
+export function withStoreLock<T>(projectRoot: string | undefined, fn: () => T): T {
+  const dir = storePath(projectRoot);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const lockPath = lockFilePath(projectRoot);
+  const start = Date.now();
+
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, 'wx');
+      writeFileSync(fd, String(process.pid));
+      closeSync(fd);
+      break;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') throw err;
+
+      // Break stale locks left behind by a crashed process.
+      try {
+        const age = Date.now() - statSync(lockPath).mtimeMs;
+        if (age > LOCK_STALE_MS) {
+          unlinkSync(lockPath);
+          continue;
+        }
+      } catch {
+        // Lock file disappeared between our check and stat(); retry immediately.
+        continue;
+      }
+
+      if (Date.now() - start > LOCK_ACQUIRE_TIMEOUT_MS) {
+        throw new LockError(
+          `Timed out waiting for task-store lock at ${lockPath}. ` +
+          `Another task-store process may be writing. If no process is running, ` +
+          `it is safe to remove the stale lock file manually.`
+        );
+      }
+      sleepSync(LOCK_POLL_INTERVAL_MS);
+    }
+  }
+
+  // `fn` may call process.exit() directly — several CLI commands do that on
+  // a validation error (e.g. `done` with no evidence). process.exit() does
+  // NOT run `finally` blocks, so a `finally`-only release would leak the
+  // lock file and make the user's very next command block for the full
+  // acquire timeout before failing. An 'exit' listener does run on an
+  // explicit process.exit(), so release through both paths.
+  const releaseOnExit = (): void => {
+    try { unlinkSync(lockPath); } catch { /* already removed */ }
+  };
+  process.once('exit', releaseOnExit);
+
+  try {
+    return fn();
+  } finally {
+    process.removeListener('exit', releaseOnExit);
+    try { unlinkSync(lockPath); } catch { /* already removed */ }
+  }
 }
 
 // ─── Atomic write ────────────────────────────────────────────────────────────
@@ -188,7 +284,7 @@ function appendHistory(entry: Record<string, unknown>, projectRoot?: string): vo
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
-export function initState(goal: string, tasks: string[], projectRoot?: string): TaskState {
+export function initState(goal: string, tasks: string[], projectRoot?: string, updatedBy?: string): TaskState {
   const existing = readState(projectRoot);
   if (existing && existing.status !== 'archived') {
     throw new StateError(
@@ -220,7 +316,7 @@ export function initState(goal: string, tasks: string[], projectRoot?: string): 
     updated_at: now,
   };
 
-  writeState(state, projectRoot);
+  writeState(state, projectRoot, updatedBy);
   appendHistory({ event: 'init', goal, taskCount: tasks.length }, projectRoot);
   return state;
 }
@@ -297,7 +393,13 @@ export function blockTask(taskId: string, reason: string, projectRoot?: string, 
 
   const task = getTask(state, taskId);
   task.status = 'blocked';
-  task.notes = reason;
+  // Preserve any existing task notes — do not destroy prior context by
+  // overwriting it with the blocker reason. The reason is always recorded
+  // in state.blockers below; task.notes is only backfilled here when there
+  // isn't already a note, to keep prior display behavior for the common case.
+  if (!task.notes) {
+    task.notes = reason;
+  }
   state.status = 'blocked';
 
   state.blockers = state.blockers ?? [];
@@ -455,7 +557,11 @@ export function buildResumeContext(state: TaskState): string {
   if (blocked.length > 0) {
     lines.push('BLOCKED:');
     for (const t of blocked) {
-      lines.push(`  ✗ [${t.id}] ${t.notes ?? t.title}`);
+      // The blocker reason lives in state.blockers (task.notes is preserved,
+      // not overwritten, when a task is blocked) — look up the most recent
+      // blocker entry for this task to render the reason.
+      const blocker = (state.blockers ?? []).slice().reverse().find(b => b.task_id === t.id);
+      lines.push(`  ✗ [${t.id}] ${blocker?.description ?? t.notes ?? t.title}`);
       if (t.attempts && t.attempts.length > 0) {
         for (const a of t.attempts.slice(-2)) {
           lines.push(`    ✗ tried: ${a.description} → ${a.outcome}`);
@@ -495,7 +601,12 @@ export class ConflictError extends Error {
  * Write state only if the current on-disk revision matches expectedRevision.
  * Throws ConflictError if another agent has written since the state was read.
  *
- * Use this when concurrent agents are possible and last-writer-wins is unacceptable.
+ * The read-compare-write cycle runs inside an O_EXCL lock (see
+ * withStoreLock), so this is a real atomic compare-and-write against other
+ * CLI-driven writers, not merely a best-effort check — see
+ * docs/pre-release-remediation.md item 3 for the exact guarantee and its
+ * limitation (direct library callers that bypass withStoreLock are not
+ * covered).
  */
 export function compareAndWriteState(
   state: TaskState,
@@ -503,19 +614,20 @@ export function compareAndWriteState(
   projectRoot?: string,
   updatedBy?: string,
 ): void {
-  // Read current on-disk revision
-  const current = readState(projectRoot);
-  const currentRev = current?.revision ?? 0;
+  withStoreLock(projectRoot, () => {
+    const current = readState(projectRoot);
+    const currentRev = current?.revision ?? 0;
 
-  if (currentRev !== expectedRevision) {
-    throw new ConflictError(
-      `State conflict: expected revision ${expectedRevision}, found ${currentRev}. ` +
-      `Another agent has written since you read. Re-read state before retrying.`,
-      currentRev,
-    );
-  }
+    if (currentRev !== expectedRevision) {
+      throw new ConflictError(
+        `State conflict: expected revision ${expectedRevision}, found ${currentRev}. ` +
+        `Another agent has written since you read. Re-read state before retrying.`,
+        currentRev,
+      );
+    }
 
-  writeState(state, projectRoot, updatedBy);
+    writeState(state, projectRoot, updatedBy);
+  });
 }
 
 
@@ -562,7 +674,7 @@ export function detectStaleTasks(projectRoot?: string): StaleTaskWarning[] {
 /**
  * Attempt to recover the last valid state from history.jsonl
  */
-export function repairState(projectRoot?: string): TaskState | null {
+export function repairState(projectRoot?: string, updatedBy?: string): TaskState | null {
   const histPath = historyFilePath(projectRoot);
   if (!existsSync(histPath)) return null;
 
@@ -572,7 +684,7 @@ export function repairState(projectRoot?: string): TaskState | null {
       const entry = JSON.parse(line) as { event: string; snapshot?: TaskState };
       if (entry.event === 'state_updated' && entry.snapshot) {
         const state = validateState(entry.snapshot);
-        writeState(state, projectRoot);
+        writeState(state, projectRoot, updatedBy);
         return state;
       }
     } catch {

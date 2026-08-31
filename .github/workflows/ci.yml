@@ -33,3 +33,20 @@ jobs:
 
       - name: Acceptance test
         run: bash tests/acceptance.sh
+
+      - name: Phase 2 reliability suites
+        run: |
+          bash tests/phase2/pressure_test.sh
+          bash tests/phase2/decay_test.sh
+          bash tests/phase2/recovery_test.sh
+          bash tests/phase2/safety_test.sh
+          bash tests/phase2/git_workflow_test.sh
+
+      - name: Phase 3 cross-agent handoff suite
+        run: bash tests/phase3/handoff_test.sh
+
+      - name: Installer/uninstaller regression suite
+        run: bash tests/install_regression_test.sh
+
+      - name: Path safety regression suite
+        run: bash tests/path_safety_test.sh
