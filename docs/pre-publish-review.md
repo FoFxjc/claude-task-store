@@ -27,7 +27,7 @@ All tests pass. Installation is verified. Security posture is sound. The caveats
 | `package.json` had no `repository`, `homepage`, `bugs` fields | Low | Added |
 | `package.json` description was verbose | Low | Replaced with concise positioning statement |
 | `uninstall.sh` not listed in `package.json` `files` | Low | Added |
-| No LICENSE file despite `"license": "MIT"` in package.json | High | Created `LICENSE` (MIT) |
+| No LICENSE file despite `"license": "MIT"` in package.json | High | Created `LICENSE` (MIT → changed to MPL-2.0 in subsequent maintenance) |
 | No CI workflow | Medium | Added `.github/workflows/ci.yml` |
 
 ### No issues found
@@ -182,7 +182,7 @@ No stack traces for normal user errors. All `StateError` instances caught before
 {
   "name": "claude-task-store",
   "version": "0.1.0",
-  "license": "MIT",
+  "license": "MPL-2.0",
   "repository": "github:FoFxjc/claude-task-store",
   "engines": { "node": ">=18.0.0" }
 }
@@ -196,8 +196,8 @@ No stack traces for normal user errors. All `StateError` instances caught before
 
 ## 9. License
 
-✓ `LICENSE` file created (MIT).  
-✓ `package.json` `"license": "MIT"` matches.
+✓ `LICENSE` file present (MPL-2.0).  
+✓ `package.json` `"license": "MPL-2.0"` matches.
 
 ---
 
@@ -249,7 +249,7 @@ Runs on push/PR to main, tests Node.js 18/20/22:
 | File | Change |
 |------|--------|
 | `.gitignore` | Fixed: only ignore `history.jsonl`, not all of `.claude-task/` |
-| `LICENSE` | Created: MIT license |
+| `LICENSE` | Created: MIT license (later changed to MPL-2.0) |
 | `package.json` | Version `0.1.0`; add `repository`/`homepage`/`bugs`; update description; fix `files`; better keywords |
 | `.github/workflows/ci.yml` | Created: minimal CI workflow |
 | `hooks/scripts/session-start.sh` | Export `STATE_FILE` before heredoc; cap done tasks at 5 (match TypeScript); fix attempts for blocked tasks |

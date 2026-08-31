@@ -2,47 +2,69 @@
 
 Persistent execution checkpoints for Claude Code and coding agents.
 
-Keep long-running coding tasks on track across session restarts, context compaction, and model switching — without replaying the full conversation.
+**Your context window should not be your task lifetime.**
 
-**Use smaller models for longer tasks.**
+Long coding tasks often outlive a single model session. When a session restarts, compacts, or switches models, the next agent should not have to reconstruct the entire execution history.
+
+claude-task-store keeps only the small amount of state required to continue:
+what is done, what failed, what is active, and what should happen next.
+
+Typical validated resume context: ~100–300 tokens.
 
 Plain JSON · Local-first · No cloud · No embeddings · No database · No workflow framework
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](LICENSE)
 [![CI](https://github.com/FoFxjc/claude-task-store/actions/workflows/ci.yml/badge.svg)](https://github.com/FoFxjc/claude-task-store/actions/workflows/ci.yml)
 
 ---
 
 ## Why this exists
 
-Large coding sessions accumulate context quickly. When a session restarts, compacts, or switches models, the next agent often spends tokens rediscovering:
+This project came from repeatedly encountering the same failure mode while using coding agents with constrained-context models: the implementation survived in the repository, but the execution state did not.
 
-- what was already implemented
-- what was attempted and failed
-- which architectural decisions were made
-- what task should happen next
+A typical failure sequence:
 
-This is especially costly for smaller-context or lower-cost models that cannot afford to carry long execution histories.
+1. A coding agent works through a long implementation.
+2. It reaches 70–90% completion.
+3. The session approaches the model's context limit.
+4. A new session must be started.
+5. The new session has no compact, reliable record of:
+   - the original goal
+   - what is already done
+   - what failed and why
+   - what decisions were made
+   - what is currently in progress
+   - what should happen next
+6. The human ends up manually copying fragments from the old session and reconstructing task state.
 
-`claude-task-store` treats context as expensive.
+After the restart:
+- **The code is still there.** Git is still there. Tests are still there.
+- **What is missing is the tiny amount of process state needed to continue efficiently.**
 
-Instead of storing conversation history, it keeps a tiny durable execution checkpoint — only the state needed to continue working.
+This is not a memory problem. It is an execution continuity problem.
+
+Human users were acting as the state synchronization layer between coding-agent sessions. claude-task-store externalizes that state.
 
 **Without task-store:**
 ```
-Fresh agent
-→ re-reads repository
-→ reconstructs what was done
-→ may retry already-failed approaches
-→ spends thousands of tokens regaining orientation
+Long task
+→ context fills up
+→ new session
+→ reread repository
+→ reconstruct prior work
+→ repeat failed approaches
+→ human manually copies old output
+→ continue
 ```
 
 **With task-store:**
 ```
-Fresh agent
-→ reads .claude-task/state.json  (one file)
-→ receives ~100–300 token resume summary
-→ continues from next_action
+Long task
+→ checkpoint
+→ new session
+→ read one state file
+→ ~100–300 token resume projection
+→ continue from next_action
 ```
 
 ---
@@ -78,25 +100,68 @@ The <400-token resume ceiling is a **design constraint**: as state accumulates, 
 
 ---
 
-## Why smaller models benefit
+## Execution state vs. conversation memory
 
-A smaller-context or lower-cost model may be fully capable of executing a focused local coding task. What degrades reliability is carrying the full weight of prior session history.
+These are different problems.
 
-`claude-task-store` externalizes execution state so the model can spend its context budget on:
+**Conversation memory** asks: *"What happened before?"*  
+It stores dialogue, facts, and learnings accumulated over time.
 
-- the current code
-- the current task
-- immediate reasoning
+**Execution state** asks: *"What is the minimum state required to keep working?"*  
+It stores only the navigation data needed to continue: goal, current task, completed work, failed attempts, decisions, next action.
 
-rather than reconstructing what happened three sessions ago.
+claude-task-store stores the latter. It does not record conversation history. It does not summarize sessions. It preserves only what cannot be cheaply derived from the repository — the process state that disappears when a session ends.
 
-> **Note:** This improves continuity and reduces repeated orientation work. It does not make a weaker model equivalent to a stronger one.
+---
+
+## For constrained-context models
+
+Many development environments cannot simply use the largest frontier model with effectively unlimited context. Relevant constraints include:
+
+- private or on-prem models (14B / 27B / 32B / 70B)
+- internal inference gateways
+- privacy or compliance restrictions
+- limited GPU capacity
+- smaller practical context windows
+- agent frameworks that consume substantial context through system prompts, tool definitions, repository files, diffs, test output, and prior conversation
+
+For constrained-context models, execution history competes directly with the code and reasoning needed for the current step.
+
+Externalizing execution state allows:
+- fresh sessions with shorter prompts
+- cleaner local reasoning on the current task
+- lower reorientation cost after context loss
+- model switching without transcript replay
+
+Smaller models often do not fail because they cannot perform the next coding step. They fail because too much of their context is occupied by accumulated execution history.
+
+**Use smaller models for longer tasks.**
+
+> This improves continuity and reduces repeated orientation work. It does not make a weaker model equivalent to a stronger one, and it does not remove the need for context on the current task.
+
+---
+
+## Source of truth
+
+The task store is a navigation aid, not an authoritative record.
+
+```
+repository / tests
+      >
+   git state
+      >
+  task-store
+      >
+ model memory
+```
+
+If the task store claims something is complete but the repository or tests disagree, repository reality wins. Before acting on a consequential claim — task complete, test passing, file modified — verify against the repository.
 
 ---
 
 ## Validated results
 
-Measured across automated test scenarios (122 checks pass):
+Measured across 122 automated test scenarios:
 
 | Scenario | Resume context |
 |----------|---------------:|
@@ -104,6 +169,8 @@ Measured across automated test scenarios (122 checks pass):
 | 30+ completed tasks (decay test) | 267 tokens |
 | Claude → Codex handoff | 299 tokens |
 | Codex → Claude handoff | ~190 tokens |
+
+**Design constraint:** default resume projection must remain below 400 tokens. As state accumulates, older completed tasks and historical detail stay outside the default projection and load only on explicit request. Context is treated as an expensive resource.
 
 In every validated handoff scenario:
 - no completed work was repeated
@@ -246,7 +313,7 @@ Validated: Claude Code ↔ Codex handoffs in both directions. See [`docs/phase3-
 
 ---
 
-## What this is not
+## Not another memory system
 
 `claude-task-store` is intentionally not:
 
@@ -259,8 +326,9 @@ Validated: Claude Code ↔ Codex handoffs in both directions. See [`docs/phase3-
 - **Workflow framework** — does not drive sequences of agent actions
 - **Cloud service** — everything stays on your local filesystem
 
-Conversation memory asks: *"What happened before?"*  
-`claude-task-store` asks: *"What is the minimum state required to keep working?"*
+**Execution continuity without the workflow system.**
+
+If you do not need a workspace manager, do not create one. claude-task-store is a checkpoint underneath your existing workflow — not a replacement for it.
 
 | | claude-memory / context-memory | **claude-task-store** |
 |--|--|--|
@@ -291,7 +359,7 @@ Several projects solve adjacent problems. This is a known area with multiple act
 
 - [**jonmmease/jons-plan**](https://github.com/jonmmease/jons-plan) — A full workflow engine with typed phases, artifact systems, parallel subagents (Opus + Codex CLI), and a `/jons-plan` slash interface. Better suited for sophisticated multi-session planning workflows.
 
-**claude-task-store** targets a different point in this space: a small, drop-in execution checkpoint that requires no workflow adoption, no worktree setup, and no GitHub integration — just a file that keeps any coding agent oriented across session boundaries.
+**claude-task-store** targets a different point in this space: execution continuity without workflow adoption. It requires no worktree setup, no GitHub integration, no new process model — just a small durable checkpoint that keeps any coding agent oriented across session boundaries.
 
 ---
 
@@ -376,4 +444,10 @@ bash tests/phase3/handoff_test.sh  # Cross-agent handoff test
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE)
+[Mozilla Public License 2.0](LICENSE) — see [`LICENSE`](LICENSE)
+
+- **Commercial use is allowed.** You may use and integrate claude-task-store in commercial and proprietary projects without restriction.
+- **Proprietary projects are not affected.** If you use claude-task-store as a tool or integrate it into a Larger Work, your proprietary code is not subject to MPL-2.0.
+- **Source file modifications remain MPL-2.0.** If you modify any MPL-covered source files in this repository, those modified files must be made available under MPL-2.0.
+
+See the [MPL 2.0 FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/) for details.
