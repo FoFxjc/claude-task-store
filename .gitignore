@@ -3,8 +3,9 @@ dist/
 *.js.map
 *.d.ts.map
 
-# Test artifacts
-.claude-task/
+# claude-task-store state: state.json is committable (cross-session handoff)
+# history.jsonl is verbose — ignored by default
+.claude-task/history.jsonl
 
 # Editor
 .DS_Store

@@ -14,6 +14,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
 fi
 
 INPUT=$(cat)
+export PROJECT_DIR
 
 python3 - <<'PYEOF'
 import json, os, sys

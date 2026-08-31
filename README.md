@@ -1,12 +1,16 @@
 # claude-task-store
 
-> Persistent execution checkpoint for Claude Code — durable working memory for small-context models
+**Persistent execution checkpoints for Claude Code.**  
+Resume long coding tasks across sessions and models without replaying the full conversation.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+**Plain JSON · Local-first · <400-token resume state · No cloud · No embeddings · Model-neutral**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/FoFxjc/claude-task-store/actions/workflows/ci.yml/badge.svg)](https://github.com/FoFxjc/claude-task-store/actions/workflows/ci.yml)
 
 Claude Code and smaller-context models often lose execution state during context compaction, session restarts, model switching, or long multi-step implementations. `claude-task-store` is a lightweight external process store that acts as a **durable working memory checkpoint**.
 
-This is **not** a general-purpose long-term memory system. It answers exactly six questions:
+This is **not** a general-purpose long-term memory system, not a vector database, and not a project management tool. It answers exactly six questions:
 
 1. What am I trying to achieve?
 2. What has already been done?
@@ -136,7 +140,16 @@ NEXT ACTION: Clarify JWT rotation with team, then implement /auth/login
 | `task-store history [--tail N]` | Show history log |
 | `task-store archive` | Archive completed state |
 | `task-store repair` | Recover from corrupted state |
+| `task-store stale` | Detect tasks stuck in-progress >48h |
 | `task-store token-estimate` | Estimate injected token count |
+
+### Cross-agent flags
+
+```bash
+task-store start T1 --by claude-code      # record which agent is writing
+task-store done T1 --by codex -e proof    # handoff provenance (informational only)
+task-store next "action" --expect-rev 14  # reject write if another agent wrote first
+```
 
 ## Claude Code Skill
 
@@ -163,6 +176,7 @@ Three hooks are installed automatically:
 ```json
 {
   "version": "1",
+  "revision": 5,
   "goal": "Build X",
   "status": "active | blocked | completed | archived",
   "current_task": "T2",
@@ -181,6 +195,7 @@ Three hooks are installed automatically:
   "decisions": [{ "summary": "Use JWT over sessions", "rationale": "..." }],
   "blockers": [{ "description": "...", "task_id": "T2" }],
   "next_action": "Implement /auth/login endpoint",
+  "updated_by": "claude-code",
   "created_at": "2024-01-01T00:00:00Z",
   "updated_at": "2024-01-02T00:00:00Z"
 }
@@ -239,8 +254,10 @@ See [`DESIGN.md`](DESIGN.md) for full analysis.
 ```bash
 npm install
 npm run build
-npm test                    # Unit tests
-bash tests/acceptance.sh    # Acceptance test (simulates cross-session recovery)
+npm test                           # Unit tests (31)
+bash tests/acceptance.sh           # Cross-session recovery test
+bash tests/phase2/pressure_test.sh # 22-session pressure test
+bash tests/phase3/handoff_test.sh  # Cross-agent handoff test
 ```
 
 ## Security

@@ -20,6 +20,7 @@ rm -f "$CLAUDE_DIR/hooks/scripts/session-end.sh"
 # Remove task-store hooks from settings.json
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 if [[ -f "$SETTINGS_FILE" ]]; then
+  export SETTINGS_FILE
   python3 - <<'PYEOF'
 import json, os
 
@@ -46,7 +47,6 @@ with open(settings_file, 'w') as f:
     f.write('\n')
 print('  ✓ Removed task-store hooks from .claude/settings.json')
 PYEOF
-  export SETTINGS_FILE
 fi
 
 echo "  ✓ claude-task-store removed"

@@ -38,6 +38,7 @@ fi
 
 if [[ -z "$TASK_STORE_CMD" ]]; then
   # Fallback: generate basic context from raw JSON using python3
+  export STATE_FILE
   RESUME_CONTEXT=$(python3 - <<'PYEOF'
 import json, sys, os
 
@@ -80,9 +81,17 @@ if in_progress:
     lines.append('')
 
 if done:
-    lines.append('DONE:')
-    for t in done:
-        lines.append(f"  ✓ [{t['id']}] {t['title']}")
+    MAX_DONE = 5
+    if len(done) <= MAX_DONE:
+        lines.append('DONE:')
+        for t in done:
+            lines.append(f"  ✓ [{t['id']}] {t['title']}")
+    else:
+        older = len(done) - MAX_DONE
+        lines.append(f"DONE ({len(done)} total, last {MAX_DONE} shown):")
+        lines.append(f"  ✓ [+{older} older tasks — use `task-store status` to see all]")
+        for t in done[-MAX_DONE:]:
+            lines.append(f"  ✓ [{t['id']}] {t['title']}")
     lines.append('')
 
 if remaining:
@@ -95,6 +104,8 @@ if blocked:
     lines.append('BLOCKED:')
     for t in blocked:
         lines.append(f"  ✗ [{t['id']}] {t.get('notes', t['title'])}")
+        for a in (t.get('attempts') or [])[-2:]:
+            lines.append(f"    ✗ tried: {a.get('description','')} → {a.get('outcome','')}")
     lines.append('')
 
 if decisions:
@@ -111,7 +122,6 @@ lines.append('─── /task-status for details | /task-history for audit ─�
 print('\n'.join(lines))
 PYEOF
   )
-  export STATE_FILE
 else
   RESUME_CONTEXT=$($TASK_STORE_CMD resume --root "$PROJECT_DIR" 2>/dev/null || echo "")
 fi
