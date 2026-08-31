@@ -48,6 +48,8 @@ export interface Blocker {
 
 export interface TaskState {
   version: string;
+  /** Monotonically increasing integer. Incremented on every write. Used for optimistic concurrency. */
+  revision: number;
   goal: string;
   status: 'active' | 'blocked' | 'completed' | 'archived';
   current_task: string | null;
@@ -57,6 +59,8 @@ export interface TaskState {
   next_action: string | null;
   created_at: string;
   updated_at: string;
+  /** Optional agent/tool that last wrote this state. Never affects execution semantics. */
+  updated_by?: string | null;
 }
 
 // ─── Store path resolution ────────────────────────────────────────────────────
@@ -130,6 +134,10 @@ export function validateState(data: unknown): TaskState {
   if (unique.size !== ids.length) {
     throw new StateError('Duplicate task IDs found in state');
   }
+  // Backfill revision for states created before it was added
+  if (typeof s.revision !== 'number') {
+    s.revision = 0;
+  }
   return data as TaskState;
 }
 
@@ -156,13 +164,17 @@ export function readState(projectRoot?: string): TaskState | null {
   return validateState(parsed);
 }
 
-export function writeState(state: TaskState, projectRoot?: string): void {
+export function writeState(state: TaskState, projectRoot?: string, updatedBy?: string): void {
   const dir = storePath(projectRoot);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
 
   state.updated_at = new Date().toISOString();
+  state.revision = (state.revision ?? 0) + 1;
+  if (updatedBy !== undefined) {
+    state.updated_by = updatedBy || null;
+  }
   const content = JSON.stringify(state, null, 2) + '\n';
   atomicWrite(stateFilePath(projectRoot), content);
   appendHistory({ event: 'state_updated', snapshot: state }, projectRoot);
@@ -187,6 +199,7 @@ export function initState(goal: string, tasks: string[], projectRoot?: string): 
   const now = new Date().toISOString();
   const state: TaskState = {
     version: SCHEMA_VERSION,
+    revision: 0,
     goal,
     status: 'active',
     current_task: null,
@@ -220,7 +233,7 @@ function getTask(state: TaskState, taskId: string): Task {
   return task;
 }
 
-export function startTask(taskId: string, projectRoot?: string): TaskState {
+export function startTask(taskId: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found. Run `task-store init` first.');
 
@@ -238,11 +251,11 @@ export function startTask(taskId: string, projectRoot?: string): TaskState {
   state.current_task = taskId;
   state.status = 'active';
 
-  writeState(state, projectRoot);
+  writeState(state, projectRoot, updatedBy);
   return state;
 }
 
-export function completeTask(taskId: string, evidence: string[], notes?: string, projectRoot?: string): TaskState {
+export function completeTask(taskId: string, evidence: string[], notes?: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
 
@@ -273,12 +286,12 @@ export function completeTask(taskId: string, evidence: string[], notes?: string,
     state.next_action = 'All tasks completed. Consider archiving with `task-store archive`.';
   }
 
-  writeState(state, projectRoot);
+  writeState(state, projectRoot, updatedBy);
   appendHistory({ event: 'task_completed', taskId, evidence }, projectRoot);
   return state;
 }
 
-export function blockTask(taskId: string, reason: string, projectRoot?: string): TaskState {
+export function blockTask(taskId: string, reason: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
 
@@ -294,11 +307,11 @@ export function blockTask(taskId: string, reason: string, projectRoot?: string):
     since: new Date().toISOString(),
   });
 
-  writeState(state, projectRoot);
+  writeState(state, projectRoot, updatedBy);
   return state;
 }
 
-export function resumeTask(taskId: string, projectRoot?: string): TaskState {
+export function resumeTask(taskId: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
 
@@ -311,11 +324,11 @@ export function resumeTask(taskId: string, projectRoot?: string): TaskState {
   // Unblock overall status if no blockers remain
   state.status = state.blockers.length === 0 ? 'active' : 'blocked';
 
-  writeState(state, projectRoot);
+  writeState(state, projectRoot, updatedBy);
   return state;
 }
 
-export function addTask(title: string, notes?: string, projectRoot?: string): TaskState {
+export function addTask(title: string, notes?: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
 
@@ -335,11 +348,11 @@ export function addTask(title: string, notes?: string, projectRoot?: string): Ta
     completed_at: null,
   });
 
-  writeState(state, projectRoot);
+  writeState(state, projectRoot, updatedBy);
   return state;
 }
 
-export function recordAttempt(taskId: string, description: string, outcome: string, projectRoot?: string): TaskState {
+export function recordAttempt(taskId: string, description: string, outcome: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
 
@@ -347,36 +360,36 @@ export function recordAttempt(taskId: string, description: string, outcome: stri
   task.attempts = task.attempts ?? [];
   task.attempts.push({ description, outcome, at: new Date().toISOString() });
 
-  writeState(state, projectRoot);
+  writeState(state, projectRoot, updatedBy);
   return state;
 }
 
-export function recordDecision(summary: string, rationale?: string, projectRoot?: string): TaskState {
+export function recordDecision(summary: string, rationale?: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
 
   state.decisions = state.decisions ?? [];
   state.decisions.push({ summary, rationale: rationale ?? null, at: new Date().toISOString() });
 
-  writeState(state, projectRoot);
+  writeState(state, projectRoot, updatedBy);
   return state;
 }
 
-export function setNextAction(nextAction: string, projectRoot?: string): TaskState {
+export function setNextAction(nextAction: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
 
   state.next_action = nextAction;
-  writeState(state, projectRoot);
+  writeState(state, projectRoot, updatedBy);
   return state;
 }
 
-export function archiveState(projectRoot?: string): void {
+export function archiveState(projectRoot?: string, updatedBy?: string): void {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
 
   state.status = 'archived';
-  writeState(state, projectRoot);
+  writeState(state, projectRoot, updatedBy);
   appendHistory({ event: 'archived', goal: state.goal }, projectRoot);
 }
 
@@ -441,7 +454,14 @@ export function buildResumeContext(state: TaskState): string {
 
   if (blocked.length > 0) {
     lines.push('BLOCKED:');
-    for (const t of blocked) lines.push(`  ✗ [${t.id}] ${t.notes ?? t.title}`);
+    for (const t of blocked) {
+      lines.push(`  ✗ [${t.id}] ${t.notes ?? t.title}`);
+      if (t.attempts && t.attempts.length > 0) {
+        for (const a of t.attempts.slice(-2)) {
+          lines.push(`    ✗ tried: ${a.description} → ${a.outcome}`);
+        }
+      }
+    }
     lines.push('');
   }
 
@@ -460,7 +480,45 @@ export function buildResumeContext(state: TaskState): string {
   return lines.join('\n');
 }
 
-// ─── Repair ───────────────────────────────────────────────────────────────────
+// ─── Optimistic concurrency ───────────────────────────────────────────────────
+
+export class ConflictError extends Error {
+  public readonly currentRevision: number;
+  constructor(message: string, currentRevision: number) {
+    super(message);
+    this.name = 'ConflictError';
+    this.currentRevision = currentRevision;
+  }
+}
+
+/**
+ * Write state only if the current on-disk revision matches expectedRevision.
+ * Throws ConflictError if another agent has written since the state was read.
+ *
+ * Use this when concurrent agents are possible and last-writer-wins is unacceptable.
+ */
+export function compareAndWriteState(
+  state: TaskState,
+  expectedRevision: number,
+  projectRoot?: string,
+  updatedBy?: string,
+): void {
+  // Read current on-disk revision
+  const current = readState(projectRoot);
+  const currentRev = current?.revision ?? 0;
+
+  if (currentRev !== expectedRevision) {
+    throw new ConflictError(
+      `State conflict: expected revision ${expectedRevision}, found ${currentRev}. ` +
+      `Another agent has written since you read. Re-read state before retrying.`,
+      currentRev,
+    );
+  }
+
+  writeState(state, projectRoot, updatedBy);
+}
+
+
 
 /** Stale threshold: tasks in_progress for more than this many hours trigger a warning. */
 const STALE_TASK_HOURS = 48;

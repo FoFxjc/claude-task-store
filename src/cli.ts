@@ -8,6 +8,7 @@ import {
   initState, readState, writeState, startTask, completeTask, blockTask,
   resumeTask, addTask, recordAttempt, recordDecision, setNextAction,
   archiveState, buildResumeContext, repairState, detectStaleTasks,
+  compareAndWriteState, ConflictError,
   stateFilePath, historyFilePath, StateError, findProjectRoot,
 } from './core.js';
 import { readFileSync, existsSync } from 'fs';
@@ -33,8 +34,10 @@ COMMANDS:
   stale                             Detect tasks in_progress for >48h
 
 FLAGS:
-  --root <path>   Use a specific project root (default: auto-detect from cwd)
-  --help, -h      Show this help
+  --root <path>         Use a specific project root (default: auto-detect from cwd)
+  --by <agent>          Record who/what is writing (e.g. --by claude-code, --by codex)
+  --expect-rev <N>      Optimistic concurrency: fail if on-disk revision != N
+  --help, -h            Show this help
 `;
 
 function parseArgs(argv: string[]): { command: string; args: string[]; flags: Record<string, string | boolean> } {
@@ -54,6 +57,8 @@ function parseArgs(argv: string[]): { command: string; args: string[]; flags: Re
       }
       flags.evidence = evidence.join(',');
     } else if (a === '--tail') { flags.tail = argv[++i] ?? '20'; }
+    else if (a === '--by') { flags.by = argv[++i] ?? ''; }
+    else if (a === '--expect-rev') { flags['expect-rev'] = argv[++i] ?? ''; }
     else if (!command) { command = a; }
     else { args.push(a); }
   }
@@ -106,7 +111,7 @@ function printState(projectRoot?: string): void {
   }
 
   console.log(`\nState file: ${stateFilePath(projectRoot)}`);
-  console.log(`Updated: ${state.updated_at}`);
+  console.log(`Updated: ${state.updated_at}${state.updated_by ? ` by ${state.updated_by}` : ''} (rev ${state.revision ?? 0})`);
 }
 
 async function main(): Promise<void> {
@@ -119,6 +124,22 @@ async function main(): Promise<void> {
   }
 
   try {
+    const by = flags.by ? String(flags.by) : undefined;
+    const expectRev = flags['expect-rev'] !== undefined ? parseInt(String(flags['expect-rev']), 10) : undefined;
+
+    // Validate --expect-rev before mutation if provided
+    if (expectRev !== undefined) {
+      const current = readState(projectRoot);
+      const currentRev = current?.revision ?? 0;
+      if (currentRev !== expectRev) {
+        console.error(
+          `Error: Revision conflict. Expected rev ${expectRev}, found rev ${currentRev}.\n` +
+          `Re-read state with \`task-store status\` before retrying.`
+        );
+        process.exit(2);
+      }
+    }
+
     switch (command) {
       case 'init': {
         const goal = args[0];
@@ -151,7 +172,7 @@ async function main(): Promise<void> {
       case 'start': {
         const taskId = args[0]?.toUpperCase();
         if (!taskId) { console.error('Error: taskId required (e.g. T1)'); process.exit(1); }
-        const state = startTask(taskId, projectRoot);
+        const state = startTask(taskId, projectRoot, by);
         console.log(`▶ Started [${taskId}]`);
         console.log(`  State: ${stateFilePath(projectRoot)}`);
         break;
@@ -165,7 +186,7 @@ async function main(): Promise<void> {
           console.error('Error: evidence required. Use: task-store done T1 -e src/foo.ts -e "tests pass"');
           process.exit(1);
         }
-        const state = completeTask(taskId, evidence, undefined, projectRoot);
+        const state = completeTask(taskId, evidence, undefined, projectRoot, by);
         console.log(`✓ Completed [${taskId}]`);
         if (state.next_action) console.log(`  Next: ${state.next_action}`);
         break;
@@ -174,14 +195,14 @@ async function main(): Promise<void> {
         const taskId = args[0]?.toUpperCase();
         const reason = args.slice(1).join(' ');
         if (!taskId || !reason) { console.error('Usage: task-store block T1 "reason"'); process.exit(1); }
-        blockTask(taskId, reason, projectRoot);
+        blockTask(taskId, reason, projectRoot, by);
         console.log(`✗ Blocked [${taskId}]: ${reason}`);
         break;
       }
       case 'resume-task': {
         const taskId = args[0]?.toUpperCase();
         if (!taskId) { console.error('Error: taskId required'); process.exit(1); }
-        resumeTask(taskId, projectRoot);
+        resumeTask(taskId, projectRoot, by);
         console.log(`▶ Resumed [${taskId}]`);
         break;
       }
@@ -193,7 +214,7 @@ async function main(): Promise<void> {
           console.error('Usage: task-store attempt T1 "what was tried" "why it failed"');
           process.exit(1);
         }
-        recordAttempt(taskId, desc, outcome, projectRoot);
+        recordAttempt(taskId, desc, outcome, projectRoot, by);
         console.log(`✓ Recorded failed attempt on [${taskId}]`);
         break;
       }
@@ -201,14 +222,14 @@ async function main(): Promise<void> {
         const summary = args[0];
         const rationale = args.slice(1).join(' ') || undefined;
         if (!summary) { console.error('Error: summary required'); process.exit(1); }
-        recordDecision(summary, rationale, projectRoot);
+        recordDecision(summary, rationale, projectRoot, by);
         console.log(`✓ Decision recorded: ${summary}`);
         break;
       }
       case 'next': {
         const action = args.join(' ');
         if (!action) { console.error('Error: action text required'); process.exit(1); }
-        setNextAction(action, projectRoot);
+        setNextAction(action, projectRoot, by);
         console.log(`✓ Next action: ${action}`);
         break;
       }
@@ -275,10 +296,15 @@ async function main(): Promise<void> {
         process.exit(1);
       }
     }
+
   } catch (err) {
     if (err instanceof StateError) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
+    }
+    if (err instanceof ConflictError) {
+      console.error(`Error: ${err.message}`);
+      process.exit(2);
     }
     throw err;
   }

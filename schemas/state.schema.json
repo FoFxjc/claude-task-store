@@ -12,6 +12,11 @@
       "description": "Schema version for migration support",
       "enum": ["1"]
     },
+    "revision": {
+      "type": "integer",
+      "description": "Monotonically increasing write counter. Used for optimistic concurrency detection.",
+      "minimum": 0
+    },
     "goal": {
       "type": "string",
       "description": "One-sentence description of what this session/project is trying to achieve",
@@ -52,6 +57,11 @@
     "updated_at": {
       "type": "string",
       "format": "date-time"
+    },
+    "updated_by": {
+      "type": ["string", "null"],
+      "description": "Optional: agent or tool that last wrote this state (e.g. 'claude-code', 'codex', 'human'). Never affects execution semantics.",
+      "maxLength": 100
     }
   },
   "definitions": {
