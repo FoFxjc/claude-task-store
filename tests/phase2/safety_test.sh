@@ -121,14 +121,23 @@ SKILL_FILE="$ROOT/skills/task-store/SKILL.md"
 
 check "SKILL.md exists" "$( [[ -f "$SKILL_FILE" ]] && echo true || echo false )"
 
-# Check if trust hierarchy is documented
-HAS_TRUST=$(grep -q "trust\|verify\|repository\|authoritative\|evidence" "$SKILL_FILE" && echo true || echo false)
-echo "  Current SKILL.md mentions evidence/verify: $HAS_TRUST"
+# The trust hierarchy is a BEHAVIORAL guarantee enforced only by what SKILL.md
+# tells the model, so assert on its actual content. This check previously
+# incremented PASS unconditionally, which meant the hierarchy could silently
+# regress out of SKILL.md while this suite still reported 8/8.
+HAS_SECTION=$(grep -qi "^## Trust Hierarchy" "$SKILL_FILE" && echo true || echo false)
+HAS_NOT_AUTHORITATIVE=$(grep -qi "NOT authoritative" "$SKILL_FILE" && echo true || echo false)
+HAS_ORDER=$(grep -qi "Repository state" "$SKILL_FILE" && grep -qi "Model memory" "$SKILL_FILE" && echo true || echo false)
+HAS_VERIFY=$(grep -qi "Run the tests yourself\|verify" "$SKILL_FILE" && echo true || echo false)
 
-# We will add explicit trust hierarchy guidance
-echo ""
-echo "  → Adding explicit trust hierarchy to SKILL.md"
-PASS=$((PASS+1))  # Will be fixed in skill update below
+# Absolutist phrasing contradicts the hierarchy in the same file; a model told
+# to "trust it" outright will not verify a stale done claim.
+NO_ABSOLUTIST=$(grep -qiE "The task store IS the state\. Trust it\.|Trust the NEXT ACTION field completely|This context is authoritative" "$SKILL_FILE" && echo false || echo true)
+
+echo "  section=$HAS_SECTION not-authoritative=$HAS_NOT_AUTHORITATIVE order=$HAS_ORDER verify=$HAS_VERIFY no-absolutist=$NO_ABSOLUTIST"
+
+check "SKILL.md documents the trust hierarchy and does not overclaim authority" \
+  "$( [[ "$HAS_SECTION" == "true" && "$HAS_NOT_AUTHORITATIVE" == "true" && "$HAS_ORDER" == "true" && "$HAS_VERIFY" == "true" && "$NO_ABSOLUTIST" == "true" ]] && echo true || echo false )"
 
 # ─── Test 4: Git state vs task state ─────────────────────────────────────────
 echo ""
@@ -175,7 +184,6 @@ echo "  3. Git divergence is not auto-detected"
 echo "  4. Trust hierarchy enforcement is a BEHAVIORAL requirement, not"
 echo "     a technical one — it must be documented in SKILL.md"
 echo ""
-echo "  ACTIONS REQUIRED:"
-echo "  - Add explicit trust hierarchy section to SKILL.md"
-echo "  - Add 'verify before trust' guidance for consequential tasks"
+echo "  SKILL.md is asserted above to document the hierarchy explicitly and to"
+echo "  carry 'verify before trust' guidance for consequential tasks."
 [[ $FAIL -eq 0 ]] && { echo "  ✓ All safety tests passed"; exit 0; } || { echo "  ✗ $FAIL failure(s)"; exit 1; }

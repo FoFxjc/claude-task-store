@@ -54,7 +54,9 @@ task-store resume
    - Recording a key architectural decision
    - Before ending the session
 
-6. **Do not reload historical transcripts.** The task store IS the state. Trust it.
+6. **Do not reload historical transcripts.** The task store is the execution
+   state — use it to orient instead of replaying prior conversation. It is not
+   a substitute for checking the repository; see **Trust Hierarchy** below.
 
 ## Trust Hierarchy
 
@@ -177,7 +179,7 @@ Verify consequential claims against repository and test state — see
 ## Token Budget Awareness
 
 The injected context is designed to stay under 400 tokens. If you're working with a very constrained context window:
-- Trust the NEXT ACTION field completely
+- Start from the NEXT ACTION field rather than re-deriving a plan
 - Only read the CURRENT task details
 - Avoid re-reading files already evidenced as complete
 

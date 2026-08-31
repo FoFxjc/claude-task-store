@@ -45,9 +45,10 @@ SHIM
     }
   else
     echo "  ℹ  Skipping global npm install (opt-in only)."
-    echo "     The CLI works via bin/task-store.js and hook fallback detection without it."
-    echo "     To put \`task-store\` on PATH globally, run:"
-    echo "       TASK_STORE_INSTALL_GLOBAL=1 ./install.sh"
+    echo "     Not needed: the built runtime is copied into the target project at"
+    echo "     .claude/task-store/, and the hooks run it from there."
+    echo "     Install globally only if you also want \`task-store\` on your PATH"
+    echo "     for manual use: TASK_STORE_INSTALL_GLOBAL=1 ./install.sh"
     echo "     or manually: npm install -g ."
   fi
 else
@@ -86,6 +87,64 @@ cp "$SCRIPT_DIR/hooks/scripts/pre-compact.sh" "$CLAUDE_DIR/hooks/scripts/pre-com
 cp "$SCRIPT_DIR/hooks/scripts/session-end.sh" "$CLAUDE_DIR/hooks/scripts/session-end.sh"
 chmod +x "$CLAUDE_DIR/hooks/scripts/"*.sh
 echo "  ✓ Installed hooks: session-start, pre-compact, session-end"
+
+# ── Project-local CLI runtime ───────────────────────────────────────────────
+# The hooks need to run the canonical TypeScript resume renderer
+# (buildResumeContext in src/core.ts, exposed as `task-store resume`). Copying
+# the already-built runtime into the target project makes the install
+# self-contained: no global npm install, no PATH shim, no dependency added to
+# the target's package.json, and no requirement that this source checkout
+# still exist afterwards.
+#
+# The CLI has no runtime dependencies (package.json declares devDependencies
+# only), so the built .js files plus the bin entry point are the whole runtime.
+RUNTIME_DIR="$CLAUDE_DIR/task-store"
+
+if [[ ! -f "$SCRIPT_DIR/dist/cli.js" ]] || [[ ! -f "$SCRIPT_DIR/dist/core.js" ]]; then
+  echo "  ✗ Build output missing at $SCRIPT_DIR/dist/."
+  echo "    Run 'npm install && npm run build' in the claude-task-store checkout first."
+  exit 1
+fi
+
+# Replace any previous runtime wholesale so an upgrade cannot leave stale
+# files behind. Only this task-store-owned directory is ever touched.
+rm -rf "$RUNTIME_DIR"
+mkdir -p "$RUNTIME_DIR/bin" "$RUNTIME_DIR/dist"
+cp "$SCRIPT_DIR"/dist/*.js "$RUNTIME_DIR/dist/"
+cp "$SCRIPT_DIR/bin/task-store.js" "$RUNTIME_DIR/bin/task-store.js"
+chmod +x "$RUNTIME_DIR/bin/task-store.js"
+
+# This package.json marks the runtime as ESM. It is REQUIRED, not cosmetic:
+# Node resolves module type from the nearest package.json, so without it the
+# target project's own package.json (or absence of one) decides. On Node 18 a
+# .js file resolved as CommonJS fails outright on dist/cli.js's static
+# imports; on newer Node it only survives via a reparse heuristic that also
+# prints a warning to stderr. This file is scoped to .claude/task-store/ and
+# does NOT touch the target project's own package.json. Its name/version also
+# serve as the ownership marker uninstall.sh checks before removing anything.
+# The version is read from the source package.json rather than hardcoded, so
+# it cannot drift as the project is released.
+export RUNTIME_DIR SCRIPT_DIR
+python3 <<'RUNTIME_PKG'
+import json, os
+
+script_dir = os.environ['SCRIPT_DIR']
+runtime_dir = os.environ['RUNTIME_DIR']
+
+with open(os.path.join(script_dir, 'package.json')) as f:
+    version = json.load(f).get('version', '0.0.0')
+
+with open(os.path.join(runtime_dir, 'package.json'), 'w') as f:
+    json.dump({
+        'name': 'claude-task-store-runtime',
+        'version': version,
+        'private': True,
+        'type': 'module',
+    }, f, indent=2)
+    f.write('\n')
+RUNTIME_PKG
+
+echo "  ✓ Installed project-local CLI runtime: .claude/task-store/"
 
 # Merge hooks into .claude/settings.json
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
@@ -188,6 +247,9 @@ else
 .claude-task/.lock
 # settings.json.bak is written by install.sh/uninstall.sh before each rewrite
 .claude/settings.json.bak
+# .claude/task-store/ is build output copied in by install.sh; re-created by
+# re-running the installer, so it does not belong in version control
+.claude/task-store/
 EOF
   echo "  ✓ Updated .gitignore (history.jsonl ignored, state.json committable)"
 fi

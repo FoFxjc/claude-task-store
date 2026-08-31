@@ -50,3 +50,6 @@ jobs:
 
       - name: Path safety regression suite
         run: bash tests/path_safety_test.sh
+
+      - name: Project-local runtime suite
+        run: bash tests/local_runtime_test.sh

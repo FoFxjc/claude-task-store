@@ -17,6 +17,39 @@ rm -f "$CLAUDE_DIR/hooks/scripts/session-start.sh"
 rm -f "$CLAUDE_DIR/hooks/scripts/pre-compact.sh"
 rm -f "$CLAUDE_DIR/hooks/scripts/session-end.sh"
 
+# Remove the project-local CLI runtime installed by install.sh — but only
+# after confirming the directory is actually ours. Ownership is proven by the
+# marker package.json install.sh writes; without that check this would be an
+# unguarded `rm -rf` against a path the user could have repurposed. Nothing
+# else under .claude/ is touched.
+RUNTIME_DIR="$CLAUDE_DIR/task-store"
+if [[ -d "$RUNTIME_DIR" ]]; then
+  RUNTIME_MARKER="$RUNTIME_DIR/package.json"
+  RUNTIME_OWNED=no
+  if [[ -f "$RUNTIME_MARKER" ]]; then
+    export RUNTIME_MARKER
+    RUNTIME_OWNED=$(python3 <<'PYEOF'
+import json, os
+
+try:
+    with open(os.environ['RUNTIME_MARKER']) as f:
+        owned = json.load(f).get('name') == 'claude-task-store-runtime'
+except Exception:
+    owned = False
+print('yes' if owned else 'no')
+PYEOF
+) || RUNTIME_OWNED=no
+  fi
+
+  if [[ "$RUNTIME_OWNED" == "yes" ]]; then
+    rm -rf "$RUNTIME_DIR"
+    echo "  ✓ Removed project-local CLI runtime: .claude/task-store/"
+  else
+    echo "  ⚠  Left $RUNTIME_DIR in place — no claude-task-store-runtime marker found."
+    echo "     Remove it by hand if you meant to."
+  fi
+fi
+
 # Remove task-store hooks from settings.json
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 if [[ -f "$SETTINGS_FILE" ]]; then

@@ -57,15 +57,22 @@ fi
 # we degrade to a minimal GOAL / NEXT ACTION fallback rather than
 # duplicating the full format.
 #
+# Resolution order is deliberately short and deterministic:
+#   1. the project-local runtime install.sh copies into .claude/task-store/
+#   2. `task-store` on PATH (global install — an optional convenience)
+#   3. the minimal fallback below
+# (1) is what makes a default `./install.sh <project>` self-contained: it does
+# not depend on the original source checkout still existing, on a global npm
+# install, or on a PATH shim.
+#
 # TASK_STORE_CMD is an array, not a word-split string, so it invokes
-# correctly even when $PROJECT_DIR contains spaces.
+# correctly even when $PROJECT_DIR contains spaces or apostrophes.
+LOCAL_RUNTIME="$PROJECT_DIR/.claude/task-store/bin/task-store.js"
 TASK_STORE_CMD=()
-if command -v task-store &>/dev/null; then
+if [[ -f "$LOCAL_RUNTIME" ]] && command -v node &>/dev/null; then
+  TASK_STORE_CMD=(node "$LOCAL_RUNTIME")
+elif command -v task-store &>/dev/null; then
   TASK_STORE_CMD=(task-store)
-elif [[ -f "$PROJECT_DIR/bin/task-store.js" ]]; then
-  TASK_STORE_CMD=(node "$PROJECT_DIR/bin/task-store.js")
-elif [[ -f "$PROJECT_DIR/node_modules/.bin/task-store" ]]; then
-  TASK_STORE_CMD=("$PROJECT_DIR/node_modules/.bin/task-store")
 fi
 
 if [[ ${#TASK_STORE_CMD[@]} -gt 0 ]]; then

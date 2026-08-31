@@ -10,6 +10,9 @@ dist/
 .claude-task/.lock
 # settings.json.bak is written by install.sh/uninstall.sh before each rewrite
 .claude/settings.json.bak
+# .claude/task-store/ is build output copied in by install.sh; re-created by
+# re-running the installer, so it does not belong in version control
+.claude/task-store/
 
 # Editor
 .DS_Store

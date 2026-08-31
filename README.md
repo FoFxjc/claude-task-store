@@ -161,7 +161,7 @@ If the task store claims something is complete but the repository or tests disag
 
 ## Validated results
 
-Measured across 122 automated test scenarios:
+Measured across 203 automated test scenarios:
 
 | Scenario | Resume context |
 |----------|---------------:|
@@ -209,30 +209,43 @@ npm install && npm run build
 ./install.sh /path/to/your/project
 ```
 
-By default `install.sh` does **not** put `task-store` on your global PATH — the CLI works without it, since hooks already fall back to `node bin/task-store.js` / `node_modules/.bin/task-store` when `task-store` isn't found. To also install it globally:
+That is the whole installation. The installer copies the built CLI runtime into
+`.claude/task-store/` inside your project, so the hooks can run the canonical
+resume renderer without anything else on your machine — no global npm install,
+no PATH shim, and no changes to your project's `package.json`. The installed
+project is self-contained: you can delete this checkout afterwards.
 
-```bash
-TASK_STORE_INSTALL_GLOBAL=1 ./install.sh /path/to/your/project
-```
-
-Or manually, any time:
-
-```bash
-npm install -g .
-```
+Start Claude Code in that project and the full resume projection is injected at
+session start.
 
 The installer:
 1. Builds the TypeScript CLI
-2. Copies the skill to `.claude/skills/task-store/SKILL.md`
-3. Copies hook scripts to `.claude/hooks/scripts/`
-4. Merges hook config into `.claude/settings.json` — only claude-task-store's own hook entries are ever added or removed (matched by exact command path, not substring), so any other hooks you or another plugin registered for `SessionStart`/`PreCompact`/`SessionEnd` are left untouched. A backup is written to `.claude/settings.json.bak` before each rewrite.
-5. Updates `.gitignore`
+2. Copies the built runtime to `.claude/task-store/` (the CLI has no runtime dependencies)
+3. Copies the skill to `.claude/skills/task-store/SKILL.md`
+4. Copies hook scripts to `.claude/hooks/scripts/`
+5. Merges hook config into `.claude/settings.json` — only claude-task-store's own hook entries are ever added or removed (matched by exact command path, not substring), so any other hooks you or another plugin registered for `SessionStart`/`PreCompact`/`SessionEnd` are left untouched. A backup is written to `.claude/settings.json.bak` before each rewrite.
+6. Updates `.gitignore`
+
+The `SessionStart` hook resolves the CLI in this order:
+
+1. the project-local runtime at `.claude/task-store/` (installed above)
+2. `task-store` on `PATH`
+3. a minimal goal/next-action fallback, used only when neither is available
+   (for example, if Node is missing) and clearly labelled as such
+
+**Optional — `task-store` on your PATH.** Only needed if you want to run the CLI
+by hand from any directory; the hooks never require it:
+
+```bash
+TASK_STORE_INSTALL_GLOBAL=1 ./install.sh /path/to/your/project
+# or, any time:  npm install -g .
+```
 
 **Uninstall:**
 ```bash
 ./uninstall.sh /path/to/your/project
 ```
-Uninstalling backs up `.claude/settings.json` to `.claude/settings.json.bak` first and removes only claude-task-store's own hook entries, in the same exact-match-safe way as install.
+Uninstalling backs up `.claude/settings.json` to `.claude/settings.json.bak` first and removes only claude-task-store's own hook entries, in the same exact-match-safe way as install. It also removes the project-local runtime at `.claude/task-store/`, but only after confirming that directory carries claude-task-store's own marker. Your task state in `.claude-task/` is left in place.
 
 ---
 
@@ -450,7 +463,10 @@ bash tests/phase2/pressure_test.sh # 22-session pressure test
 bash tests/phase3/handoff_test.sh  # Cross-agent handoff test
 ```
 
-122 automated checks pass across unit, acceptance, and integration test suites.
+203 automated checks pass across unit, acceptance, and integration test suites
+(unit 31, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22, installer
+regression 17, path safety 32, project-local runtime 32). CI runs all of them
+on Node 18/20/22.
 
 ---
 
