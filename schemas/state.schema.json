@@ -1,0 +1,162 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/FoFxjc/claude-task-store/schemas/state.schema.json",
+  "title": "ClaudeTaskState",
+  "description": "Persistent execution state for claude-task-store. Represents current task checkpoint.",
+  "type": "object",
+  "required": ["version", "goal", "status", "tasks", "updated_at"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version for migration support",
+      "enum": ["1"]
+    },
+    "goal": {
+      "type": "string",
+      "description": "One-sentence description of what this session/project is trying to achieve",
+      "maxLength": 300
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "blocked", "completed", "archived"],
+      "description": "Overall goal status"
+    },
+    "current_task": {
+      "type": ["string", "null"],
+      "description": "ID of the task currently in progress. Null if none in progress."
+    },
+    "tasks": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/Task" }
+    },
+    "decisions": {
+      "type": "array",
+      "description": "Key architectural or implementation decisions made",
+      "items": { "$ref": "#/definitions/Decision" }
+    },
+    "blockers": {
+      "type": "array",
+      "description": "Current blockers preventing progress",
+      "items": { "$ref": "#/definitions/Blocker" }
+    },
+    "next_action": {
+      "type": ["string", "null"],
+      "description": "Single concrete action the next session should take to continue. Always set before ending work.",
+      "maxLength": 500
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "definitions": {
+    "Task": {
+      "type": "object",
+      "required": ["id", "title", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^T[0-9]+$",
+          "description": "Unique task identifier, e.g. T1, T2"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "in_progress", "blocked", "done", "skipped"]
+        },
+        "notes": {
+          "type": ["string", "null"],
+          "description": "Current notes on this task",
+          "maxLength": 1000
+        },
+        "evidence": {
+          "type": "array",
+          "description": "Proof of completion: file paths, test output, etc. Required before marking done.",
+          "items": { "type": "string" }
+        },
+        "attempts": {
+          "type": "array",
+          "description": "Failed approaches, briefly recorded to avoid repetition",
+          "items": { "$ref": "#/definitions/Attempt" }
+        },
+        "started_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    },
+    "Attempt": {
+      "type": "object",
+      "required": ["description", "outcome"],
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "What was tried",
+          "maxLength": 300
+        },
+        "outcome": {
+          "type": "string",
+          "description": "Why it failed or was abandoned",
+          "maxLength": 300
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "Decision": {
+      "type": "object",
+      "required": ["summary"],
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "type": "string",
+          "description": "One-line decision statement",
+          "maxLength": 300
+        },
+        "rationale": {
+          "type": ["string", "null"],
+          "maxLength": 500
+        },
+        "at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    },
+    "Blocker": {
+      "type": "object",
+      "required": ["description"],
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "task_id": {
+          "type": ["string", "null"],
+          "description": "Task this blocker is associated with"
+        },
+        "since": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "name": "claude-task-store",
+  "version": "1.0.0",
+  "description": "Persistent external task state for Claude Code — durable execution checkpoints for small-context models",
+  "type": "module",
+  "bin": {
+    "task-store": "./bin/task-store.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "claude-skill",
+    "task-management",
+    "ai-agent",
+    "execution-state",
+    "context-persistence"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "jest": "^29.0.0",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0",
+    "@jest/globals": "^29.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist/",
+    "bin/",
+    "skills/",
+    "hooks/",
+    "commands/",
+    "schemas/",
+    "DESIGN.md",
+    "README.md",
+    "SECURITY.md",
+    "install.sh"
+  ],
+  "jest": {
+    "preset": "ts-jest/presets/default-esm",
+    "testEnvironment": "node",
+    "extensionsToTreatAsEsm": [".ts"],
+    "moduleNameMapper": {
+      "^(\\.{1,2}/.*)\\.js$": "$1"
+    },
+    "transform": {
+      "^.+\\.tsx?$": [
+        "ts-jest",
+        {
+          "useESM": true
+        }
+      ]
+    }
+  }
+}

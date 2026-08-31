@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts.map
+
+# Test artifacts
+.claude-task/
+
+# Editor
+.DS_Store
+.vscode/
+*.swp
