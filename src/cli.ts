@@ -7,8 +7,8 @@
 import {
   initState, readState, writeState, startTask, completeTask, blockTask,
   resumeTask, addTask, recordAttempt, recordDecision, setNextAction,
-  archiveState, buildResumeContext, repairState, stateFilePath, historyFilePath,
-  StateError, findProjectRoot,
+  archiveState, buildResumeContext, repairState, detectStaleTasks,
+  stateFilePath, historyFilePath, StateError, findProjectRoot,
 } from './core.js';
 import { readFileSync, existsSync } from 'fs';
 
@@ -30,7 +30,7 @@ COMMANDS:
   history [--tail N]                Show history log
   archive                           Archive the current state
   repair                            Attempt to recover from corrupted state.json
-  token-estimate                    Estimate tokens in resume context
+  stale                             Detect tasks in_progress for >48h
 
 FLAGS:
   --root <path>   Use a specific project root (default: auto-detect from cwd)
@@ -94,6 +94,17 @@ function printState(projectRoot?: string): void {
   }
 
   console.log(`\nNEXT ACTION: ${state.next_action ?? '(not set)'}`);
+
+  // Show stale task warnings
+  const stale = detectStaleTasks(projectRoot);
+  if (stale.length > 0) {
+    console.log(`\n⚠  STALE TASKS (in_progress > 48h):`);
+    for (const s of stale) {
+      console.log(`   [${s.taskId}] ${s.title} — ${s.hoursElapsed}h elapsed`);
+      console.log(`   Consider: block it, complete it, or reset to pending`);
+    }
+  }
+
   console.log(`\nState file: ${stateFilePath(projectRoot)}`);
   console.log(`Updated: ${state.updated_at}`);
 }
@@ -234,8 +245,23 @@ async function main(): Promise<void> {
         }
         break;
       }
-      case 'token-estimate': {
-        const state = readState(projectRoot);
+      case 'stale': {
+        const warnings = detectStaleTasks(projectRoot);
+        if (warnings.length === 0) {
+          console.log('✓ No stale in_progress tasks detected.');
+        } else {
+          console.log(`⚠  ${warnings.length} stale task(s) detected:`);
+          for (const w of warnings) {
+            console.log(`  [${w.taskId}] ${w.title}`);
+            console.log(`    Started: ${w.startedAt}`);
+            console.log(`    Elapsed: ${w.hoursElapsed}h`);
+            console.log(`    Action: block, complete, or reset to pending`);
+          }
+          process.exit(1);
+        }
+        break;
+      }
+      case 'token-estimate': {        const state = readState(projectRoot);
         if (!state) { console.log('No state found.'); break; }
         const ctx = buildResumeContext(state);
         // Rough estimate: ~4 chars per token

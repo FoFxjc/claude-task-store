@@ -56,7 +56,36 @@ task-store resume
 
 6. **Do not reload historical transcripts.** The task store IS the state. Trust it.
 
-## Workflow
+## Trust Hierarchy
+
+**Critical**: The task store is an execution checkpoint, NOT authoritative project truth.
+
+```
+AUTHORITATIVE ORDER:
+  1. Repository state (actual files, passing tests)
+  2. Git history (what was committed)  
+  3. task-store state (what the model claimed it did)
+  4. Model memory (ephemeral, unreliable)
+```
+
+When resuming work on a **consequential task** (deploys, migrations, security changes):
+- **Do NOT** treat `done` status as authoritative without verifying
+- Run the tests yourself before claiming work is correct
+- Check that evidenced files actually exist: `ls <evidence-path>`
+- Treat `evidence: []` as claims the model recorded, not proven facts
+
+When resuming **non-consequential work** (scaffolding, docs, refactors):
+- Trust the task store for orientation
+- Spot-check evidence files if something seems off
+
+Example of responsible resumption:
+```bash
+# State says T1 done with evidence: src/auth.ts
+ls src/auth.ts        # verify file exists
+git log -- src/auth.ts  # verify it was committed
+npm test             # if tests exist, run them
+# THEN proceed to T2
+```
 
 ### Starting a new project/goal
 

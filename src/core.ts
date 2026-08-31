@@ -417,8 +417,19 @@ export function buildResumeContext(state: TaskState): string {
   }
 
   if (done.length > 0) {
-    lines.push('DONE:');
-    for (const t of done) lines.push(`  ✓ [${t.id}] ${t.title}`);
+    // Cap done tasks to avoid flooding context with historical work.
+    // Show count summary + only last 5 completed (most recent progress).
+    const MAX_DONE_DETAIL = 5;
+    if (done.length <= MAX_DONE_DETAIL) {
+      lines.push('DONE:');
+      for (const t of done) lines.push(`  ✓ [${t.id}] ${t.title}`);
+    } else {
+      const recent = done.slice(-MAX_DONE_DETAIL);
+      const older = done.length - MAX_DONE_DETAIL;
+      lines.push(`DONE (${done.length} total, last ${MAX_DONE_DETAIL} shown):`);
+      lines.push(`  ✓ [+${older} older tasks — use \`task-store status\` to see all]`);
+      for (const t of recent) lines.push(`  ✓ [${t.id}] ${t.title}`);
+    }
     lines.push('');
   }
 
@@ -450,6 +461,45 @@ export function buildResumeContext(state: TaskState): string {
 }
 
 // ─── Repair ───────────────────────────────────────────────────────────────────
+
+/** Stale threshold: tasks in_progress for more than this many hours trigger a warning. */
+const STALE_TASK_HOURS = 48;
+
+export interface StaleTaskWarning {
+  taskId: string;
+  title: string;
+  startedAt: string;
+  hoursElapsed: number;
+}
+
+/**
+ * Detect tasks that have been in_progress for an abnormally long time.
+ * Returns warnings, does NOT modify state — the model decides what to do.
+ */
+export function detectStaleTasks(projectRoot?: string): StaleTaskWarning[] {
+  const state = readState(projectRoot);
+  if (!state) return [];
+
+  const now = Date.now();
+  const warnings: StaleTaskWarning[] = [];
+
+  for (const task of state.tasks) {
+    if (task.status === 'in_progress' && task.started_at) {
+      const startMs = new Date(task.started_at).getTime();
+      const hoursElapsed = (now - startMs) / (1000 * 60 * 60);
+      if (hoursElapsed > STALE_TASK_HOURS) {
+        warnings.push({
+          taskId: task.id,
+          title: task.title,
+          startedAt: task.started_at,
+          hoursElapsed: Math.round(hoursElapsed),
+        });
+      }
+    }
+  }
+
+  return warnings;
+}
 
 /**
  * Attempt to recover the last valid state from history.jsonl
