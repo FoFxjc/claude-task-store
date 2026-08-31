@@ -1,56 +1,215 @@
 # claude-task-store
 
-**Persistent execution checkpoints for Claude Code.**  
-Resume long coding tasks across sessions and models without replaying the full conversation.
+Persistent execution checkpoints for Claude Code and coding agents.
 
-**Plain JSON · Local-first · <400-token resume state · No cloud · No embeddings · Model-neutral**
+**Your context window should not be your task lifetime.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+Long coding tasks often outlive a single model session. When a session restarts, compacts, or switches models, the next agent should not have to reconstruct the entire execution history.
+
+claude-task-store keeps only the small amount of state required to continue:
+what is done, what failed, what is active, and what should happen next.
+
+Typical validated resume context: ~100–300 tokens.
+
+Plain JSON · Local-first · No cloud · No embeddings · No database · No workflow framework
+
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](LICENSE)
 [![CI](https://github.com/FoFxjc/claude-task-store/actions/workflows/ci.yml/badge.svg)](https://github.com/FoFxjc/claude-task-store/actions/workflows/ci.yml)
 
-Claude Code and smaller-context models often lose execution state during context compaction, session restarts, model switching, or long multi-step implementations. `claude-task-store` is a lightweight external process store that acts as a **durable working memory checkpoint**.
+---
 
-This is **not** a general-purpose long-term memory system, not a vector database, and not a project management tool. It answers exactly six questions:
+## Why this exists
 
-1. What am I trying to achieve?
-2. What has already been done?
-3. What am I doing now?
-4. What remains?
-5. What failed or was tried already?
-6. What should the next model/session do next?
+This project came from repeatedly encountering the same failure mode while using coding agents with constrained-context models: the implementation survived in the repository, but the execution state did not.
 
-## How It Works
+A typical failure sequence:
 
-State lives in two plain files in your project:
+1. A coding agent works through a long implementation.
+2. It reaches 70–90% completion.
+3. The session approaches the model's context limit.
+4. A new session must be started.
+5. The new session has no compact, reliable record of:
+   - the original goal
+   - what is already done
+   - what failed and why
+   - what decisions were made
+   - what is currently in progress
+   - what should happen next
+6. The human ends up manually copying fragments from the old session and reconstructing task state.
+
+After the restart:
+- **The code is still there.** Git is still there. Tests are still there.
+- **What is missing is the tiny amount of process state needed to continue efficiently.**
+
+This is not a memory problem. It is an execution continuity problem.
+
+Human users were acting as the state synchronization layer between coding-agent sessions. claude-task-store externalizes that state.
+
+**Without task-store:**
+```
+Long task
+→ context fills up
+→ new session
+→ reread repository
+→ reconstruct prior work
+→ repeat failed approaches
+→ human manually copies old output
+→ continue
+```
+
+**With task-store:**
+```
+Long task
+→ checkpoint
+→ new session
+→ read one state file
+→ ~100–300 token resume projection
+→ continue from next_action
+```
+
+---
+
+## 30-second example
+
+A resume context injected at session start looks like this:
+
+```
+GOAL: Add OAuth support to the API
+
+CURRENT:
+  ▶ [T4] Write integration tests
+    ✗ tried: mocked fetch → does not support streaming responses
+
+DONE:
+  ✓ [T1] Database schema migration
+  ✓ [T2] Callback route
+  ✓ [T3] Token validation
+
+REMAINING:
+  ○ [T5] Update API documentation
+
+KEY DECISIONS:
+  • Use PKCE flow — implicit flow deprecated in OAuth 2.1
+
+NEXT ACTION: Replace mock with local HTTP fixture, then complete streaming test
+```
+
+Typical size: 100–300 tokens. One file. No transcript replay.
+
+The <400-token resume ceiling is a **design constraint**: as state accumulates, older completed tasks and historical details stay out of the default projection and are only loaded on explicit request.
+
+---
+
+## Execution state vs. conversation memory
+
+These are different problems.
+
+**Conversation memory** asks: *"What happened before?"*  
+It stores dialogue, facts, and learnings accumulated over time.
+
+**Execution state** asks: *"What is the minimum state required to keep working?"*  
+It stores only the navigation data needed to continue: goal, current task, completed work, failed attempts, decisions, next action.
+
+claude-task-store stores the latter. It does not record conversation history. It does not summarize sessions. It preserves only what cannot be cheaply derived from the repository — the process state that disappears when a session ends.
+
+---
+
+## For constrained-context models
+
+Many development environments cannot simply use the largest frontier model with effectively unlimited context. Relevant constraints include:
+
+- private or on-prem models (14B / 27B / 32B / 70B)
+- internal inference gateways
+- privacy or compliance restrictions
+- limited GPU capacity
+- smaller practical context windows
+- agent frameworks that consume substantial context through system prompts, tool definitions, repository files, diffs, test output, and prior conversation
+
+For constrained-context models, execution history competes directly with the code and reasoning needed for the current step.
+
+Externalizing execution state allows:
+- fresh sessions with shorter prompts
+- cleaner local reasoning on the current task
+- lower reorientation cost after context loss
+- model switching without transcript replay
+
+Smaller models often do not fail because they cannot perform the next coding step. They fail because too much of their context is occupied by accumulated execution history.
+
+**Use smaller models for longer tasks.**
+
+> This improves continuity and reduces repeated orientation work. It does not make a weaker model equivalent to a stronger one, and it does not remove the need for context on the current task.
+
+---
+
+## Source of truth
+
+The task store is a navigation aid, not an authoritative record.
+
+```
+repository / tests
+      >
+   git state
+      >
+  task-store
+      >
+ model memory
+```
+
+If the task store claims something is complete but the repository or tests disagree, repository reality wins. Before acting on a consequential claim — task complete, test passing, file modified — verify against the repository.
+
+---
+
+## Validated results
+
+Measured across 122 automated test scenarios:
+
+| Scenario | Resume context |
+|----------|---------------:|
+| 22-session pressure test (max) | 148 tokens |
+| 30+ completed tasks (decay test) | 267 tokens |
+| Claude → Codex handoff | 299 tokens |
+| Codex → Claude handoff | ~190 tokens |
+
+**Design constraint:** default resume projection must remain below 400 tokens. As state accumulates, older completed tasks and historical detail stay outside the default projection and load only on explicit request. Context is treated as an expensive resource.
+
+In every validated handoff scenario:
+- no completed work was repeated
+- no failed approaches were retried
+- correct next task was selected
+- only one file was read to resume
+
+See [`docs/phase2-reliability-report.md`](docs/phase2-reliability-report.md) and [`docs/phase3-cross-agent-handoff.md`](docs/phase3-cross-agent-handoff.md) for full experiment details.
+
+---
+
+## How it works
+
+State lives in two plain files inside your project:
 
 ```
 .claude-task/
 ├── state.json      ← Human-readable, git-committable execution checkpoint
-└── history.jsonl   ← Append-only audit trail (optional to commit)
+└── history.jsonl   ← Append-only audit trail (gitignored by default)
 ```
 
-At session start, a compact summary (normally < 400 tokens) is automatically injected into Claude's context. Claude reads the current task, done work, and the explicit next action — and continues without re-reading transcripts.
+At session start, a compact summary is automatically injected into Claude's context via a `SessionStart` hook. Claude reads the current task, completed work, failed approaches, and the explicit next action — and continues without re-reading transcripts.
+
+---
 
 ## Installation
 
-### Prerequisites
-- Node.js ≥ 18
-- Claude Code (latest)
-- `python3` (for fallback hooks if Node.js CLI unavailable)
-
-### Install
+**Prerequisites:** Node.js ≥ 18, Claude Code, `python3`
 
 ```bash
 git clone https://github.com/FoFxjc/claude-task-store.git
 cd claude-task-store
-npm install
-npm run build
+npm install && npm run build
 
-# Install into your project (pass project root as argument)
+# Install into your project
 ./install.sh /path/to/your/project
 ```
 
-Or install globally:
+Or globally:
 
 ```bash
 npm install -g .
@@ -63,64 +222,43 @@ The installer:
 4. Merges hook config into `.claude/settings.json`
 5. Updates `.gitignore`
 
-### Uninstall
-
+**Uninstall:**
 ```bash
 ./uninstall.sh /path/to/your/project
 ```
 
-## Quick Start
+---
+
+## Quick start
 
 ```bash
 # Initialize with a goal and tasks
-task-store init "Implement authentication for the web app" \
-  "Create User model with password hashing" \
-  "Implement JWT token generation" \
-  "Add login/logout endpoints" \
-  "Write integration tests"
+task-store init "Implement OAuth for the API" \
+  "Database schema migration" \
+  "Callback route" \
+  "Token validation" \
+  "Integration tests" \
+  "Update API docs"
 
-# Start working on the first task
+# Start working
 task-store start T1
 
-# ... do the work ...
+# Mark done with evidence (required — prevents false completions)
+task-store done T1 -e db/migrations/001_oauth.sql -e "npm test: 8/8 pass"
 
-# Mark done with evidence (evidence is required)
-task-store done T1 -e src/models/user.ts -e "npm test: 15/15 pass"
-
-# Record a failed approach to prevent future repetition
-task-store attempt T2 "express-session" "conflicts with JWT stateless design"
+# Record a failed approach so future sessions don't repeat it
+task-store attempt T4 "mocked fetch" "does not support streaming responses"
 
 # Mark blocked
-task-store block T2 "JWT secret rotation policy needs team clarification"
+task-store block T4 "need local HTTP fixture before streaming test works"
 
 # Always set next action before ending a session
-task-store next "Clarify JWT rotation with team, then implement /auth/login"
+task-store next "Replace mock with local HTTP fixture, then complete T4"
 ```
 
-On next session start, Claude receives:
+On next session start (or in a fresh model session), Claude automatically receives the compact resume context shown above.
 
-```
-╔══════════════════════════════════════╗
-║  TASK STORE — RESUME CONTEXT         ║
-╚══════════════════════════════════════╝
-
-GOAL: Implement authentication for the web app
-STATUS: BLOCKED
-
-CURRENT:
-  ▶ [T2] Implement JWT token generation
-    NOTE: JWT secret rotation policy needs team clarification
-    ✗ tried: express-session → conflicts with JWT stateless design
-
-DONE:
-  ✓ [T1] Create User model with password hashing
-
-REMAINING:
-  ○ [T3] Add login/logout endpoints
-  ○ [T4] Write integration tests
-
-NEXT ACTION: Clarify JWT rotation with team, then implement /auth/login
-```
+---
 
 ## Commands
 
@@ -146,55 +284,109 @@ NEXT ACTION: Clarify JWT rotation with team, then implement /auth/login
 ### Cross-agent flags
 
 ```bash
-task-store start T1 --by claude-code      # record which agent is writing
-task-store done T1 --by codex -e proof    # handoff provenance (informational only)
-task-store next "action" --expect-rev 14  # reject write if another agent wrote first
+task-store start T1 --by claude-code       # record which agent is writing
+task-store done T1 --by codex -e proof     # handoff provenance (informational)
+task-store next "action" --expect-rev 14   # reject write if another agent wrote first
 ```
 
-## Claude Code Skill
+---
 
-The `/task-store` skill is automatically available after installation. Claude uses it when:
-- Starting a long-running task
-- After meaningful milestones
-- When encountering blockers
-- Before ending a session
+## Claude Code integration
 
-You can invoke it directly: `/task-store`
-
-## Hooks
-
-Three hooks are installed automatically:
+After installation, three hooks run automatically:
 
 | Hook | Event | Action |
 |------|-------|--------|
 | `session-start.sh` | `SessionStart` | Injects compact resume context if state exists |
-| `pre-compact.sh` | `PreCompact` | Saves a compaction checkpoint to history |
+| `pre-compact.sh` | `PreCompact` | Saves a checkpoint to history before compaction |
 | `session-end.sh` | `SessionEnd` | Warns if `next_action` is not set |
 
-## State Schema
+The `/task-store` skill is also installed. Claude uses it when starting long-running tasks, after milestones, and before ending sessions. Invoke directly with `/task-store`.
+
+---
+
+## Cross-agent use
+
+The state format is model-neutral. Any agent that can run shell commands can read and update the checkpoint using the CLI alone — no Claude Code skills or hooks required.
+
+Validated: Claude Code ↔ Codex handoffs in both directions. See [`docs/phase3-cross-agent-handoff.md`](docs/phase3-cross-agent-handoff.md).
+
+---
+
+## Not another memory system
+
+`claude-task-store` is intentionally not:
+
+- **Conversation memory** — it does not store what was said
+- **RAG or semantic search** — no embeddings, no vector database
+- **Long-term knowledge base** — not designed for "what do I know about X?"
+- **Project management** — no kanban, no sprint planning, no issue tracker
+- **Workspace manager** — does not create worktrees or isolated task environments
+- **Agent orchestration** — no multi-agent coordination or routing
+- **Workflow framework** — does not drive sequences of agent actions
+- **Cloud service** — everything stays on your local filesystem
+
+**Execution continuity without the workflow system.**
+
+If you do not need a workspace manager, do not create one. claude-task-store is a checkpoint underneath your existing workflow — not a replacement for it.
+
+| | claude-memory / context-memory | **claude-task-store** |
+|--|--|--|
+| Question answered | "What do I know about X?" | "Where am I in this task?" |
+| Storage | SQLite + vector embeddings | Plain JSON files |
+| Retrieval | Semantic search | Direct file read |
+| Dependencies | sqlite-vec, embeddings | Node.js only |
+| Token injection | Variable (relevant facts) | Compact fixed-structure summary |
+| Update trigger | Session end (all turns) | Meaningful milestones only |
+| Task tracking | ✗ | ✓ |
+| Failure recording | ✗ | ✓ |
+| Evidence required | ✗ | ✓ |
+| Git-committable | Awkward | Native |
+
+See [`DESIGN.md`](DESIGN.md) for full analysis.
+
+---
+
+## Related projects
+
+Several projects solve adjacent problems. This is a known area with multiple active approaches:
+
+- [**ddaanet/handoff**](https://github.com/ddaanet/handoff) — A minimal task-frame bridge for Claude Code. Best suited when the core need is preserving the active task context across `/clear` or `/compact` within a single Claude Code project. No per-project setup required.
+
+- [**joeeeeey/task-workspace**](https://github.com/joeeeeey/task-workspace) — Isolated task environments with dedicated worktrees, `AGENTS.md`, `goal.md`, `decisions.md`, and `status.md`. Better suited when the work requires per-task isolation, artifact tracking, and structured multi-day agent sessions.
+
+- [**stefan-jansen/coding-agent-toolkit**](https://github.com/stefan-jansen/coding-agent-toolkit) — A structured idea-to-PR workflow using GitHub issues/milestones as the canonical state machine. Better suited when adopting a spec-first engineering process with explicit handoff assertions and GitHub integration.
+
+- [**jonmmease/jons-plan**](https://github.com/jonmmease/jons-plan) — A full workflow engine with typed phases, artifact systems, parallel subagents (Opus + Codex CLI), and a `/jons-plan` slash interface. Better suited for sophisticated multi-session planning workflows.
+
+**claude-task-store** targets a different point in this space: execution continuity without workflow adoption. It requires no worktree setup, no GitHub integration, no new process model — just a small durable checkpoint that keeps any coding agent oriented across session boundaries.
+
+---
+
+## State schema
 
 ```json
 {
   "version": "1",
   "revision": 5,
-  "goal": "Build X",
+  "goal": "Add OAuth support",
   "status": "active | blocked | completed | archived",
-  "current_task": "T2",
+  "current_task": "T4",
   "tasks": [
     {
-      "id": "T1",
-      "title": "...",
-      "status": "pending | in_progress | blocked | done | skipped",
-      "notes": "...",
-      "evidence": ["src/file.ts", "tests pass"],
+      "id": "T4",
+      "title": "Write integration tests",
+      "status": "blocked",
+      "notes": "need local HTTP fixture before streaming test works",
+      "evidence": [],
       "attempts": [
-        { "description": "tried X", "outcome": "failed because Y" }
+        { "description": "mocked fetch", "outcome": "does not support streaming" }
       ]
     }
   ],
-  "decisions": [{ "summary": "Use JWT over sessions", "rationale": "..." }],
-  "blockers": [{ "description": "...", "task_id": "T2" }],
-  "next_action": "Implement /auth/login endpoint",
+  "decisions": [{ "summary": "Use PKCE flow — implicit flow deprecated", "rationale": "..." }],
+  "blockers": [{ "description": "need local HTTP fixture", "task_id": "T4" }],
+  "next_action": "Replace mock with local HTTP fixture, then complete T4",
   "updated_by": "claude-code",
   "created_at": "2024-01-01T00:00:00Z",
   "updated_at": "2024-01-02T00:00:00Z"
@@ -203,51 +395,37 @@ Three hooks are installed automatically:
 
 Full JSON schema: [`schemas/state.schema.json`](schemas/state.schema.json)
 
-## Git Integration
+---
 
-**Recommended (cross-session handoff):**
+## Git integration
+
+**Recommended:** commit `state.json`, ignore `history.jsonl`.
+
 ```bash
-# Commit state.json so another model/developer can resume
 git add .claude-task/state.json
-git commit -m "chore: update task state"
-
-# Keep history.jsonl out of git (it's verbose)
-# Already added to .gitignore by the installer
+git commit -m "chore: update task checkpoint"
+# history.jsonl is already in .gitignore
 ```
 
+This enables another developer or model to resume the task from git alone.
+
 Options:
-- **A. Commit state.json** ← Recommended for team/cross-model handoffs
-- **B. Gitignore everything** — For private/noisy work
-- **C. Commit both** — Full audit trail in git
+- **Commit state.json** ← Recommended for cross-session/cross-model handoffs
+- **Gitignore everything** — For private or transient work
+- **Commit both** — Full audit trail in git (history.jsonl grows unbounded)
 
-## Token Budget
+---
 
-The injected resume context is designed to stay compact:
+## Security and limitations
 
-| Scenario | Chars | Tokens (est.) |
-|----------|-------|---------------|
-| Typical 5-task project | ~600 | ~150 |
-| 15-task project with history | ~1200 | ~300 |
-| Hard cap | 3200 | 800 |
+- State files are injected into Claude's context. Treat `.claude-task/state.json` with the same trust as other project config. A malicious state file could inject arbitrary text into the AI context (prompt injection).
+- No network requests are made. All state is local.
+- Concurrent agent sessions: last-writer-wins by default. Use `--expect-rev` for conflict detection.
+- Evidence paths in state.json are claims, not verified proofs. The trust hierarchy is: repository/tests > git state > task-store > model memory.
 
-Decisions: only the last 3 are injected. Attempts: only the last 2 per task.
+See [`SECURITY.md`](SECURITY.md) for full details.
 
-## Comparison with Existing Memory Plugins
-
-| | claude-memory / context-memory | **claude-task-store** |
-|--|--|--|
-| Question answered | "What do I know about X?" | "Where am I in this task?" |
-| Storage | SQLite + vector embeddings | Plain JSON files |
-| Retrieval | Semantic search | Direct file read |
-| Dependencies | sqlite-vec, embeddings | Node.js only (Python fallback) |
-| Token injection | Variable (relevant facts) | Compact fixed-structure summary |
-| Update trigger | Session end (all turns) | Meaningful milestones only |
-| Task tracking | ✗ | ✓ |
-| Failure recording | ✗ | ✓ |
-| Evidence required | ✗ | ✓ (prevents false completions) |
-| Git-committable | Awkward | Native |
-
-See [`DESIGN.md`](DESIGN.md) for full analysis.
+---
 
 ## Development
 
@@ -260,10 +438,16 @@ bash tests/phase2/pressure_test.sh # 22-session pressure test
 bash tests/phase3/handoff_test.sh  # Cross-agent handoff test
 ```
 
-## Security
+122 automated checks pass across unit, acceptance, and integration test suites.
 
-See [`SECURITY.md`](SECURITY.md).
+---
 
 ## License
 
-MIT
+[Mozilla Public License 2.0](LICENSE) — see [`LICENSE`](LICENSE)
+
+- **Commercial use is allowed.** You may use and integrate claude-task-store in commercial and proprietary projects without restriction.
+- **Proprietary projects are not affected.** If you use claude-task-store as a tool or integrate it into a Larger Work, your proprietary code is not subject to MPL-2.0.
+- **Source file modifications remain MPL-2.0.** If you modify any MPL-covered source files in this repository, those modified files must be made available under MPL-2.0.
+
+See the [MPL 2.0 FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/) for details.
