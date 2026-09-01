@@ -28,6 +28,14 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Explicit typecheck of BOTH TypeScript boundaries: tsconfig.json for
+      # src/ and tsconfig.opencode.json for the OpenCode adapter that ships
+      # into user projects. ts-jest type-checks the adapter at import time,
+      # but only tsconfig.json's compiler options apply there — this step is
+      # what actually exercises tsconfig.opencode.json.
+      - name: Typecheck (src + opencode-plugin)
+        run: npm run typecheck
+
       - name: Unit tests
         run: npm test
 

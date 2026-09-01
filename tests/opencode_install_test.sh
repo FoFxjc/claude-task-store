@@ -18,6 +18,9 @@
 #      check), not unrelated files at the same path
 #   7. .claude-task/ state files survive uninstall
 #   8. Plugin source in the target is byte-identical to the source repo
+#   9. .gitignore covers both adapter files and the transient pending
+#      reconciliation instruction, on fresh installs AND on upgrades of a
+#      project that already carries the v0.1.x marker block
 
 set -euo pipefail
 
@@ -222,6 +225,83 @@ check "uninstall refused to remove foreign plugin file" \
 
 check "uninstall log warns about missing ownership marker" \
   "$(grep -q 'no claude-task-store ownership marker found' /tmp/opencode_uninstall_foreign.log && echo true || echo false)"
+
+# ── Scenario 6: .gitignore covers every transient OpenCode artifact ──────
+#
+# Regression guard for the v0.2.0 install-hygiene gap: the OpenCode adapter
+# ships TWO files (task-store.ts plus the sibling task-store/injection.ts)
+# and the conservative auto-checkpoint path stages a third transient file
+# (.claude-task/.pending-reconcile-instruction.txt). All three must be
+# gitignored, on a FRESH install AND on an upgrade of a project whose
+# .gitignore already carries the v0.1.x marker block — the marker check in
+# install.sh short-circuits the fresh block, so the upgrade path needs its
+# own backfill. Without this, `git add -A` in a user's project silently
+# commits a machine-local ephemeral file.
+echo ""
+echo "═══ Scenario 6: .gitignore covers transient OpenCode artifacts ═══"
+
+GI_FRESH_DIR=$(mktemp -d)
+GI_UPGRADE_DIR=$(mktemp -d)
+trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR"' EXIT
+
+git init -q "$GI_FRESH_DIR"
+git init -q "$GI_UPGRADE_DIR"
+
+# The upgrade fixture reproduces a v0.1.1-era .gitignore: the marker line is
+# present, so install.sh takes the backfill branch rather than the fresh one.
+cat > "$GI_UPGRADE_DIR/.gitignore" <<'GIEOF'
+# claude-task-store
+.claude-task/history.jsonl
+.claude-task/.lock
+.claude-task/auto-checkpoint.json
+.claude/settings.json.bak
+.claude/task-store/
+GIEOF
+
+FORCE=1 bash "$ROOT/install.sh" "$GI_FRESH_DIR" > /tmp/opencode_install_gi_fresh.log 2>&1 || {
+  echo "install.sh (gitignore fresh) failed:"; cat /tmp/opencode_install_gi_fresh.log; exit 1;
+}
+FORCE=1 bash "$ROOT/install.sh" "$GI_UPGRADE_DIR" > /tmp/opencode_install_gi_upgrade.log 2>&1 || {
+  echo "install.sh (gitignore upgrade) failed:"; cat /tmp/opencode_install_gi_upgrade.log; exit 1;
+}
+
+# `git check-ignore` is the authority here rather than grepping .gitignore:
+# it answers the question that actually matters ("would git stage this?")
+# and is immune to how the entry happens to be spelled.
+ignored() {
+  git -C "$1" check-ignore -q "$2" && echo true || echo false
+}
+
+for scenario in fresh upgrade; do
+  if [[ "$scenario" == "fresh" ]]; then DIR="$GI_FRESH_DIR"; else DIR="$GI_UPGRADE_DIR"; fi
+
+  check "$scenario install: .opencode/plugin/task-store.ts is gitignored" \
+    "$(ignored "$DIR" ".opencode/plugin/task-store.ts")"
+
+  check "$scenario install: .opencode/plugin/task-store/injection.ts is gitignored" \
+    "$(ignored "$DIR" ".opencode/plugin/task-store/injection.ts")"
+
+  check "$scenario install: .claude-task/.pending-reconcile-instruction.txt is gitignored" \
+    "$(ignored "$DIR" ".claude-task/.pending-reconcile-instruction.txt")"
+
+  check "$scenario install: .claude-task/state.json is still committable" \
+    "$([[ "$(ignored "$DIR" ".claude-task/state.json")" == "false" ]] && echo true || echo false)"
+done
+
+# Re-running the installer must not append the same path twice.
+FORCE=1 bash "$ROOT/install.sh" "$GI_UPGRADE_DIR" > /tmp/opencode_install_gi_reupgrade.log 2>&1 || {
+  echo "install.sh (gitignore re-upgrade) failed:"; cat /tmp/opencode_install_gi_reupgrade.log; exit 1;
+}
+
+check "re-running install does not duplicate any .gitignore entry" \
+  "$(if [[ -z "$(grep -v '^#' "$GI_UPGRADE_DIR/.gitignore" | grep -v '^[[:space:]]*$' | sort | uniq -d)" ]]; then echo true; else echo false; fi)"
+
+# The upgrade branch must preserve every entry the project already had.
+check "upgrade install preserves the pre-existing .gitignore entries" \
+  "$(if grep -qxF '.claude-task/history.jsonl' "$GI_UPGRADE_DIR/.gitignore" \
+       && grep -qxF '.claude-task/.lock' "$GI_UPGRADE_DIR/.gitignore" \
+       && grep -qxF '.claude-task/auto-checkpoint.json' "$GI_UPGRADE_DIR/.gitignore" \
+       && grep -qxF '.claude/task-store/' "$GI_UPGRADE_DIR/.gitignore"; then echo true; else echo false; fi)"
 
 echo ""
 echo "═══ RESULTS ══════════════════════════════════════════════════"

@@ -132,7 +132,7 @@ PUSHED="$TEST_DIR/.claude-task/.smoke-pushed.txt"
 check "plugin's system.transform hook fired in a fresh OpenCode session" \
   "$([[ -s "$PUSHED" ]] && echo true || echo false)"
 
-check "injected projection matches the canonical `task-store resume` output" \
+check "injected projection matches the canonical \`task-store resume\` output" \
   "$(if [[ -s "$PUSHED" ]]; then
       if [[ "$(cat "$PUSHED")" == "$EXPECTED_RESUME" ]]; then echo true; else echo false; fi
     else
@@ -164,10 +164,10 @@ check "injected projection contains the key decision" \
 check "injected projection contains the NEXT ACTION" \
   "$(grep -q 'NEXT ACTION' "$PUSHED" 2>/dev/null && echo true || echo false)"
 
-check "OpenCode plugin loaded (no `failed to load plugin` error in log)" \
+check "OpenCode plugin loaded (no \`failed to load plugin\` error in log)" \
   "$(if grep -q 'failed to load plugin' /tmp/opencode_smoke.log; then echo false; else echo true; fi)"
 
-check "OpenCode plugin path was loaded by OpenCode (no `paths\[0\]` schema error)" \
+check "OpenCode plugin path was loaded by OpenCode (no \`paths[0]\` schema error)" \
   "$(if grep -q 'paths\[0\]' /tmp/opencode_smoke.log; then echo false; else echo true; fi)"
 
 # ── Test 2: paths with spaces and apostrophes ──────────────────────────

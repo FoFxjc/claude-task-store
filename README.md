@@ -418,7 +418,7 @@ Architecture:
 ```
 OpenCode session
   ↓
-.opencode/plugin/task-store.ts        (auto-discovered, ~115 LOC)
+.opencode/plugin/task-store.ts        (auto-discovered; 73 code lines)
   ↓
 experimental.chat.system.transform
   ↓
@@ -452,14 +452,18 @@ Both harnesses invoke the **same** `task-store auto mark-dirty`,
 window, the 120-second debounce, and the trust hierarchy embedded in
 `RECONCILE_INSTRUCTION` are identical.
 
-> **Compatibility note:** OpenCode support relies on a small set of plugin
-> hooks that OpenCode currently labels as experimental
-> (`experimental.chat.system.transform`,
-> `experimental.compaction.autocontinue`, the `event()` bus hook, and the
-> `tool.execute.after` callback). If a future OpenCode release changes any
-> of these, this adapter may need to be updated. The signature change is
-> contained to one file; the plugin source ships with the install so you
-> can patch locally if needed.
+> **Compatibility note:** verified against OpenCode 1.18.25. Support relies
+> on exactly four plugin hooks — two of which OpenCode currently labels
+> experimental: `experimental.chat.system.transform` and
+> `experimental.session.compacting`, plus the `event()` bus hook (filtered
+> to `session.idle`) and the `tool.execute.after` callback. These are not a
+> stable API and OpenCode compatibility is not guaranteed across future
+> OpenCode releases: if any of them changes, this adapter needs updating.
+> The change is contained to one file, and the plugin source ships with the
+> install so you can patch it locally.
+>
+> The plugin does **not** use `experimental.compaction.autocontinue`. That
+> is deliberate — see the compaction paragraph below.
 
 Around automatic compaction: the plugin intentionally does not mutate state
 at compaction time. `experimental.session.compacting` is registered as a
@@ -718,12 +722,16 @@ The OpenCode smoke tests need a working `opencode` binary on `PATH`. They
 skip cleanly (`exit 77`) if it isn't installed; the other suites are pure
 shell and run anywhere.
 
-403 automated checks pass across unit, acceptance, and integration test suites
-(unit 108, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
+413 automated checks pass across 11 suites (17 test files: 3 Jest, 14 shell)
+— unit 108, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
 installer regression 17, path safety 32, project-local runtime 32,
-auto-checkpoint 60, OpenCode install regression 27, OpenCode resume smoke 16,
-OpenCode auto-checkpoint smoke 20). CI runs the non-OpenCode suites on Node
-18/20/22.
+auto-checkpoint 60, OpenCode install regression 37, OpenCode resume smoke 16,
+OpenCode auto-checkpoint smoke 20.
+
+CI runs every suite on Node 18/20/22 **except** the two real-OpenCode smoke
+suites: GitHub runners have no `opencode` binary, so those two steps report
+themselves as skipped. The 36 checks they contribute are verified locally
+against an installed OpenCode, not by CI.
 
 ---
 

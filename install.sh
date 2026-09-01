@@ -254,16 +254,28 @@ GITIGNORE_MARKER="# claude-task-store"
 if [[ -f "$GITIGNORE" ]] && grep -q "$GITIGNORE_MARKER" "$GITIGNORE"; then
   echo "  ✓ .gitignore already has task-store entries"
   # Backfill entries added after the marker block was first written. Without
-  # this, upgrading a v0.1.0 project would leave the auto-checkpoint runtime
-  # marker showing up as an untracked file forever, because the marker check
-  # above short-circuits the whole block.
-  if ! grep -q '.claude-task/auto-checkpoint.json' "$GITIGNORE"; then
-    cat >> "$GITIGNORE" <<'EOF'
-# auto-checkpoint runtime marker (ephemeral dirty/debounce bookkeeping)
-.claude-task/auto-checkpoint.json
-EOF
-    echo "  ✓ Added .claude-task/auto-checkpoint.json to .gitignore"
-  fi
+  # this, upgrading an older project would leave newer ephemeral files showing
+  # up as untracked forever, because the marker check above short-circuits the
+  # whole block. Each entry is appended only if the exact path is not already
+  # present, so re-running the installer never duplicates a line.
+  backfill_gitignore() {
+    local path="$1" comment="$2"
+    grep -qxF "$path" "$GITIGNORE" && return 0
+    printf '%s\n%s\n' "$comment" "$path" >> "$GITIGNORE"
+    echo "  ✓ Added $path to .gitignore"
+  }
+  # v0.1.1: auto-checkpoint runtime marker.
+  backfill_gitignore '.claude-task/auto-checkpoint.json' \
+    '# auto-checkpoint runtime marker (ephemeral dirty/debounce bookkeeping)'
+  # v0.2.0: the OpenCode adapter (both files) and the pending reconciliation
+  # instruction the OpenCode boundary hook stages between session.idle and the
+  # next chat call.
+  backfill_gitignore '.claude-task/.pending-reconcile-instruction.txt' \
+    '# pending reconciliation instruction staged by the OpenCode plugin (consumed once)'
+  backfill_gitignore '.opencode/plugin/task-store.ts' \
+    '# .opencode/plugin/task-store*: OpenCode adapter, re-created by the installer'
+  backfill_gitignore '.opencode/plugin/task-store/injection.ts' \
+    '# (sibling helper module imported by the plugin above)'
 else
   echo "" >> "$GITIGNORE"
   cat >> "$GITIGNORE" <<'EOF'
@@ -281,9 +293,14 @@ else
 # .claude/task-store/ is build output copied in by install.sh; re-created by
 # re-running the installer, so it does not belong in version control
 .claude/task-store/
-# .opencode/plugin/task-store.ts is the auto-discovered OpenCode plugin;
-# like the Claude Code runtime above, it is re-created by the installer.
+# .pending-reconcile-instruction.txt is staged by the OpenCode plugin at a
+# session.idle boundary and consumed by the next chat call — purely transient
+.claude-task/.pending-reconcile-instruction.txt
+# .opencode/plugin/task-store.ts is the auto-discovered OpenCode plugin and
+# .opencode/plugin/task-store/injection.ts is the sibling helper it imports;
+# like the Claude Code runtime above, both are re-created by the installer.
 .opencode/plugin/task-store.ts
+.opencode/plugin/task-store/injection.ts
 EOF
   echo "  ✓ Updated .gitignore (history.jsonl ignored, state.json committable)"
 fi
