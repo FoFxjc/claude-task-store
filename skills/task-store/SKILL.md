@@ -58,6 +58,19 @@ task-store resume
    state — use it to orient instead of replaying prior conversation. It is not
    a substitute for checking the repository; see **Trust Hierarchy** below.
 
+7. **Responding to a reconciliation request.** If the project has opted in to
+   auto-checkpoint mode, you may receive a short `[task-store]` note at a
+   session boundary saying the checkpoint may be stale. It is a prompt to
+   check, not a claim that anything is wrong. When you get one:
+   - Compare the checkpoint against what the repository and tests actually show.
+   - Update only what you can point to evidence for, using the ordinary
+     commands (`start`, `done`, `attempt`, `block`, `decide`, `next`).
+   - Rule 1 still applies in full: **do not** mark a task done just because
+     files changed or a test passed. That is evidence that work happened, not
+     proof that a task is complete.
+   - Do not invent a `next_action`, decision, or blocker to satisfy the
+     request. If nothing material changed, say so in one line and move on.
+
 ## Trust Hierarchy
 
 **Critical**: The task store is an execution checkpoint, NOT authoritative project truth.
@@ -188,8 +201,10 @@ The injected context is designed to stay under 400 tokens. If you're working wit
 ```
 <project-root>/
 └── .claude-task/
-    ├── state.json    ← Human-readable, can be git-committed
-    └── history.jsonl ← Append-only audit trail
+    ├── state.json           ← Human-readable, can be git-committed
+    ├── history.jsonl        ← Append-only audit trail
+    ├── config.json          ← Optional settings (e.g. auto-checkpoint mode)
+    └── auto-checkpoint.json ← Ephemeral bookkeeping; ignore it, never edit it
 ```
 
 To add task store state to version control (enables cross-developer/model handoffs):

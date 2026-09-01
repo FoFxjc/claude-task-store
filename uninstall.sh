@@ -16,6 +16,8 @@ rmdir "$CLAUDE_DIR/skills/task-store" 2>/dev/null || true
 rm -f "$CLAUDE_DIR/hooks/scripts/session-start.sh"
 rm -f "$CLAUDE_DIR/hooks/scripts/pre-compact.sh"
 rm -f "$CLAUDE_DIR/hooks/scripts/session-end.sh"
+rm -f "$CLAUDE_DIR/hooks/scripts/post-tool-use.sh"
+rm -f "$CLAUDE_DIR/hooks/scripts/stop.sh"
 
 # Remove the project-local CLI runtime installed by install.sh — but only
 # after confirming the directory is actually ours. Ownership is proven by the
@@ -79,6 +81,8 @@ OWNED_COMMANDS = {
     'SessionStart': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-start.sh',
     'PreCompact': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/pre-compact.sh',
     'SessionEnd': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-end.sh',
+    'PostToolUse': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/post-tool-use.sh',
+    'Stop': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/stop.sh',
 }
 
 def is_owned(event, command):
@@ -109,4 +113,6 @@ fi
 echo "  ✓ claude-task-store removed"
 echo ""
 echo "Note: .claude-task/ state files were NOT removed."
+echo "      This includes config.json (your auto-checkpoint setting) and"
+echo "      auto-checkpoint.json (ephemeral dirty/debounce bookkeeping)."
 echo "To remove them: rm -rf .claude-task/"

@@ -11,6 +11,12 @@ import {
   compareAndWriteState, ConflictError, withStoreLock, LockError,
   stateFilePath, historyFilePath, StateError, findProjectRoot,
 } from './core.js';
+import {
+  readConfig, writeMode, markDirty, shouldReconcile, markReconcileRequested,
+  markReconciled, freshness, readRuntime, RECONCILE_INSTRUCTION,
+  DEFAULT_DEBOUNCE_SECONDS, debounceSeconds, configFilePath,
+  type AutoCheckpointMode,
+} from './autocheckpoint.js';
 import { readFileSync, existsSync } from 'fs';
 
 const HELP = `
@@ -22,7 +28,7 @@ COMMANDS:
   resume                            Print compact resume context (for session injection)
   add <title>                       Add a new task
   start <taskId>                    Mark task as in-progress (e.g. T1)
-  done <taskId> -e <evidence> ...   Mark task done with evidence
+  done <taskId> -e <evidence> ...   Mark task done with evidence (--evidence works too)
   block <taskId> <reason>           Mark task blocked with reason
   resume-task <taskId>              Resume a blocked task
   attempt <taskId> <desc> <outcome> Record a failed attempt
@@ -33,6 +39,20 @@ COMMANDS:
   repair                            Attempt to recover from corrupted state.json
   stale                             Detect tasks in_progress for >48h
   token-estimate                    Estimate the token size of the resume context
+
+CONFIG:
+  config                            Show project-local task-store configuration
+  config auto-checkpoint            Show the current auto-checkpoint mode
+  config auto-checkpoint <mode>     Set the mode: off (default) | conservative
+
+AUTO-CHECKPOINT (adapter plumbing — used by hooks/plugins, rarely by hand):
+  auto status                       Show dirty/freshness state and why
+  auto mark-dirty [signal]          Record that repository state may have changed
+  auto check [--instruction]        Exit 0 if reconciliation is warranted, else 1
+  auto reconciled                   Record that reconciliation completed
+
+  These commands never read or write task state. Checkpoint mutation stays
+  exclusive to the verbs above (start/done/attempt/block/decide/next).
 
 FLAGS:
   --root <path>         Use a specific project root (default: auto-detect from cwd)
@@ -56,15 +76,22 @@ function parseArgs(argv: string[]): { command: string; args: string[]; flags: Re
     const a = argv[i];
     if (a === '--help' || a === '-h') { flags.help = true; }
     else if (a === '--root') { flags.root = argv[++i] ?? ''; }
-    else if (a === '-e') {
+    else if (a === '-e' || a === '--evidence') {
       // Evidence flag: each `-e` takes exactly one following value, kept as
       // a single opaque string. Multiple `-e` flags accumulate into a plain
       // string[] — there is no delimiter-based join/split round trip, so
       // evidence text may safely contain commas, quotes, or any other
       // characters.
+      //
+      // `--evidence` is accepted as an alias because that is what an agent
+      // writing the command from memory actually types. Without it the flag
+      // fell through to the positional-args branch and `done` recorded the
+      // literal string "--evidence" as the first piece of evidence — observed
+      // in a real Claude Code session, and silently corrupting the one field
+      // whose whole purpose is to be trustworthy.
       const value = argv[++i];
       if (value === undefined) {
-        console.error('Error: -e requires a value');
+        console.error(`Error: ${a} requires a value`);
         process.exit(1);
       }
       evidence.push(value);
@@ -123,6 +150,23 @@ function printState(projectRoot?: string): void {
     }
   }
 
+  // Auto-checkpoint visibility. Always shown so a user can tell at a glance
+  // whether the feature is on — "is this thing enabled?" should never require
+  // reading a config file by hand.
+  const config = readConfig(projectRoot);
+  console.log(`\nAuto-checkpoint: ${config.auto_checkpoint}`);
+
+  if (config.auto_checkpoint === 'conservative') {
+    const fresh = freshness(projectRoot);
+    if (fresh.stale) {
+      // Deliberately hedged wording. All we actually know is that files or
+      // commands changed something and the checkpoint has not been written
+      // since — that is a hint, not proof that the checkpoint is wrong.
+      console.log(`⚠  task-store may be stale — ${fresh.signals} change signal(s) since the last checkpoint write.`);
+      console.log(`   Reconcile with: task-store start|done|attempt|block|decide|next`);
+    }
+  }
+
   console.log(`\nState file: ${stateFilePath(projectRoot)}`);
   console.log(`Updated: ${state.updated_at}${state.updated_by ? ` by ${state.updated_by}` : ''} (rev ${state.revision ?? 0})`);
 }
@@ -145,8 +189,11 @@ async function main(): Promise<void> {
     // acceptable — reject it explicitly instead (see
     // docs/pre-release-remediation.md item 6).
     const READ_ONLY_COMMANDS = new Set(['status', 'resume', 'history', 'stale', 'token-estimate']);
-    if (by !== undefined && READ_ONLY_COMMANDS.has(command)) {
-      console.error(`Error: --by is not supported on read-only command \`${command}\` (it never writes state).`);
+    // `config` and `auto` write files, but never task state — recording an
+    // author for them would be meaningless, so --by is rejected there too.
+    const NON_STATE_COMMANDS = new Set(['config', 'auto']);
+    if (by !== undefined && (READ_ONLY_COMMANDS.has(command) || NON_STATE_COMMANDS.has(command))) {
+      console.error(`Error: --by is not supported on \`${command}\` (it never writes task state).`);
       process.exit(1);
     }
 
@@ -334,6 +381,106 @@ async function main(): Promise<void> {
         const estimate = Math.ceil(ctx.length / 4);
         console.log(`Resume context: ${ctx.length} chars ≈ ${estimate} tokens`);
         console.log(`State file: ${readFileSync(stateFilePath(projectRoot), 'utf8').length} bytes`);
+        break;
+      }
+      case 'config': {
+        const key = args[0];
+        const value = args[1];
+
+        if (!key) {
+          const cfg = readConfig(projectRoot);
+          console.log(`auto-checkpoint: ${cfg.auto_checkpoint}`);
+          console.log(`auto-checkpoint debounce: ${debounceSeconds(projectRoot)}s`);
+          console.log(`config file: ${configFilePath(projectRoot)}`);
+          break;
+        }
+
+        if (key !== 'auto-checkpoint') {
+          console.error(`Error: unknown config key \`${key}\`. Supported: auto-checkpoint`);
+          process.exit(1);
+        }
+
+        if (value === undefined) {
+          console.log(readConfig(projectRoot).auto_checkpoint);
+          break;
+        }
+
+        // `aggressive` is rejected explicitly rather than falling into the
+        // generic error, so a user who tried it learns it is a deliberate
+        // non-feature rather than a typo.
+        if (value === 'aggressive') {
+          console.error('Error: `aggressive` mode is not implemented. Supported modes: off, conservative');
+          process.exit(1);
+        }
+        if (value !== 'off' && value !== 'conservative') {
+          console.error(`Error: invalid mode \`${value}\`. Supported modes: off, conservative`);
+          process.exit(1);
+        }
+
+        const cfg = writeMode(value as AutoCheckpointMode, projectRoot);
+        console.log(`✓ auto-checkpoint: ${cfg.auto_checkpoint}`);
+        if (cfg.auto_checkpoint === 'conservative') {
+          console.log(`  Reconciliation is requested at session boundaries, at most once per ${debounceSeconds(projectRoot)}s.`);
+          console.log(`  It never marks a task done and never invents a next action.`);
+        } else {
+          console.log('  Auto-checkpoint is off. No dirty tracking, no reconciliation prompts.');
+        }
+        break;
+      }
+      case 'auto': {
+        const sub = args[0];
+
+        switch (sub) {
+          case 'mark-dirty': {
+            // Hot path: called once per matched tool call by an adapter.
+            // No-ops silently when disabled or when no task store exists.
+            const runtime = markDirty(projectRoot, args[1]);
+            if (runtime) console.log(`dirty since ${runtime.dirty_since} (${runtime.signal_count} signal(s))`);
+            break;
+          }
+          case 'check': {
+            const decision = shouldReconcile(projectRoot);
+            if (!decision.reconcile) {
+              console.log(`no-reconcile: ${decision.reason}`);
+              process.exit(1);
+            }
+            // Requesting and reporting are one atomic step from the caller's
+            // point of view: an adapter that prints the instruction has, by
+            // definition, asked. Recording it here means no adapter can
+            // forget to, and therefore no adapter can nag in a loop.
+            markReconcileRequested(projectRoot);
+            if (args.includes('--instruction')) {
+              console.log(RECONCILE_INSTRUCTION);
+            } else {
+              console.log(`reconcile: ${decision.reason}`);
+            }
+            break;
+          }
+          case 'reconciled': {
+            markReconciled(projectRoot);
+            console.log('✓ reconciliation recorded');
+            break;
+          }
+          case 'status': {
+            const cfg = readConfig(projectRoot);
+            const runtime = readRuntime(projectRoot);
+            const decision = shouldReconcile(projectRoot);
+            console.log(`mode: ${cfg.auto_checkpoint}`);
+            console.log(`debounce: ${debounceSeconds(projectRoot)}s (default ${DEFAULT_DEBOUNCE_SECONDS}s)`);
+            console.log(`dirty_since: ${runtime.dirty_since ?? '(clean)'}`);
+            console.log(`last_signal_at: ${runtime.last_signal_at ?? '(none)'}`);
+            console.log(`signal_count: ${runtime.signal_count}`);
+            console.log(`last_reconcile_request_at: ${runtime.last_reconcile_request_at ?? '(never)'}`);
+            console.log(`last_reconcile_at: ${runtime.last_reconcile_at ?? '(never)'}`);
+            console.log(`stale: ${decision.freshness.stale}`);
+            console.log(`would_reconcile: ${decision.reconcile} (${decision.reason})`);
+            break;
+          }
+          default: {
+            console.error('Usage: task-store auto <status|mark-dirty|check|reconciled>');
+            process.exit(1);
+          }
+        }
         break;
       }
       default: {
