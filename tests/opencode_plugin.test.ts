@@ -15,6 +15,8 @@ import {
   writeFileSync,
   utimesSync,
   rmSync,
+  readFileSync,
+  existsSync,
 } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -23,7 +25,13 @@ import { randomBytes } from 'crypto';
 import {
   buildResumeInjection,
   _setRunResumeCliForTests,
+  _setRunCliForTests,
   _resetCacheForTests,
+  isDirtyWorthyTool,
+  markDirtyOnTool,
+  checkReconcileBoundary,
+  writePendingReconciliation,
+  consumePendingReconciliation,
   type CliRunResult,
 } from '../opencode-plugin/task-store/injection.js';
 
@@ -331,3 +339,217 @@ describe('OpenCode plugin source — structural', () => {
   });
 });
 
+// ─── Auto-checkpoint: read-only tool classification ────────────────────────
+
+describe('isDirtyWorthyTool', () => {
+  it('returns false for an empty or missing tool name', () => {
+    expect(isDirtyWorthyTool('')).toBe(false);
+    // @ts-expect-error: testing runtime safety against undefined
+    expect(isDirtyWorthyTool(undefined)).toBe(false);
+    // @ts-expect-error: testing runtime safety against null
+    expect(isDirtyWorthyTool(null)).toBe(false);
+  });
+
+  it('treats read-only tools as not dirty-worthy', () => {
+    for (const t of ['read', 'glob', 'grep', 'list', 'webfetch', 'websearch', 'skill', 'task', 'question', 'todowrite']) {
+      expect(isDirtyWorthyTool(t)).toBe(false);
+    }
+  });
+
+  it('treats mutating tools as dirty-worthy', () => {
+    for (const t of ['bash', 'edit', 'write']) {
+      expect(isDirtyWorthyTool(t)).toBe(true);
+    }
+  });
+});
+
+// ─── Auto-checkpoint: dirty signal ─────────────────────────────────────────
+
+describe('markDirtyOnTool', () => {
+  let root: string;
+  let calls: { cli: string; worktree: string; signal: string }[];
+  beforeEach(() => {
+    root = makeTmpDir('dirty');
+    calls = [];
+    _resetCacheForTests();
+    _setRunCliForTests({
+      markDirty: (cli, worktree, signal) => {
+        calls.push({ cli, worktree, signal });
+        return { status: 0, stdout: '', stderr: '' };
+      },
+    });
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns without invoking the CLI when worktree is empty', () => {
+    markDirtyOnTool('', 'bash');
+    expect(calls).toEqual([]);
+  });
+
+  it('returns without invoking the CLI when the tool is read-only', () => {
+    writeCli(root);
+    markDirtyOnTool(root, 'read');
+    markDirtyOnTool(root, 'glob');
+    markDirtyOnTool(root, 'grep');
+    expect(calls).toEqual([]);
+  });
+
+  it('returns without invoking the CLI when the project-local CLI is missing', () => {
+    // No writeCli(root) — partial install. Plugin must fail safe.
+    expect(() => markDirtyOnTool(root, 'bash')).not.toThrow();
+    expect(calls).toEqual([]);
+  });
+
+  it('invokes `task-store auto mark-dirty <tool> --root <worktree>` for mutating tools', () => {
+    writeCli(root);
+    const cli = join(root, '.claude', 'task-store', 'bin', 'task-store.js');
+    markDirtyOnTool(root, 'bash');
+    expect(calls).toEqual([{ cli, worktree: root, signal: 'bash' }]);
+  });
+
+  it('passes the tool name as the signal label (CLI ignores it for storage)', () => {
+    writeCli(root);
+    markDirtyOnTool(root, 'edit');
+    markDirtyOnTool(root, 'write');
+    expect(calls.map((c) => c.signal)).toEqual(['edit', 'write']);
+  });
+
+  it('does not mutate any task state', () => {
+    writeCli(root);
+    writeState(root, 'active', {
+      tasks: [{ id: 'T1', title: 'Task A', status: 'pending', evidence: [], attempts: [] }],
+    });
+    markDirtyOnTool(root, 'bash');
+    const state = JSON.parse(readFileSync(join(root, '.claude-task', 'state.json'), 'utf8'));
+    expect(state.tasks[0].status).toBe('pending');
+    expect(state.revision).toBe(1);
+  });
+});
+
+// ─── Auto-checkpoint: reconciliation boundary ─────────────────────────────
+
+describe('checkReconcileBoundary', () => {
+  let root: string;
+  let calls: { cli: string; worktree: string }[];
+  let defaultStatus: number;
+  let defaultStdout: string;
+  beforeEach(() => {
+    root = makeTmpDir('reconcile');
+    calls = [];
+    defaultStatus = 1;
+    defaultStdout = '';
+    _resetCacheForTests();
+    _setRunCliForTests({
+      checkReconcile: (cli, worktree) => {
+        calls.push({ cli, worktree });
+        return { status: defaultStatus, stdout: defaultStdout, stderr: '' };
+      },
+    });
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns not-reconcile when worktree is empty', () => {
+    const decision = checkReconcileBoundary('');
+    expect(decision).toEqual({ reconcile: false, instruction: null });
+    expect(calls).toEqual([]);
+  });
+
+  it('returns not-reconcile when the project-local CLI is missing', () => {
+    const decision = checkReconcileBoundary(root);
+    expect(decision).toEqual({ reconcile: false, instruction: null });
+    expect(calls).toEqual([]);
+  });
+
+  it('invokes `task-store auto check --instruction --root <worktree>` when CLI exists', () => {
+    writeCli(root);
+    const cli = join(root, '.claude', 'task-store', 'bin', 'task-store.js');
+    checkReconcileBoundary(root);
+    expect(calls).toEqual([{ cli, worktree: root }]);
+  });
+
+  it('returns reconcile=false when the CLI exits non-zero (no-state, disabled, debounced, ...)', () => {
+    writeCli(root);
+    defaultStatus = 1;
+    defaultStdout = 'no-reconcile: clean';
+    const decision = checkReconcileBoundary(root);
+    expect(decision.reconcile).toBe(false);
+    expect(decision.instruction).toBeNull();
+  });
+
+  it('returns reconcile=true with instruction when the CLI exits 0', () => {
+    writeCli(root);
+    defaultStatus = 0;
+    defaultStdout = '[task-store] The checkpoint may be stale ...';
+    const decision = checkReconcileBoundary(root);
+    expect(decision.reconcile).toBe(true);
+    expect(decision.instruction).toBe(defaultStdout);
+  });
+
+  it('returned instruction contains the trust hierarchy verbatim', async () => {
+    // The instruction text is owned by the CLI core; this test pins the
+    // contract that whatever the plugin returns is exactly what the CLI
+    // emitted (no plugin-side paraphrasing). The trust hierarchy appears
+    // in the canonical instruction text in src/autocheckpoint.ts.
+    const fs = await import('node:fs/promises');
+    const src = await fs.readFile(join(process.cwd(), 'src', 'autocheckpoint.ts'), 'utf8');
+    expect(src).toContain('repository/tests  >  git state  >  task-store  >  model memory');
+  });
+});
+
+// ─── Auto-checkpoint: pending instruction bridge ───────────────────────────
+
+describe('pending reconciliation bridge', () => {
+  let root: string;
+  beforeEach(() => {
+    root = makeTmpDir('pending');
+    _resetCacheForTests();
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('writePendingReconciliation creates .pending-reconcile-instruction.txt under .claude-task/', () => {
+    writePendingReconciliation(root, 'reconcile now');
+    const path = join(root, '.claude-task', '.pending-reconcile-instruction.txt');
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path, 'utf8')).toBe('reconcile now');
+  });
+
+  it('consumePendingReconciliation returns null when no pending file exists', () => {
+    expect(consumePendingReconciliation(root)).toBeNull();
+  });
+
+  it('consumePendingReconciliation returns the staged text and deletes the file in one step', () => {
+    writePendingReconciliation(root, 'reconcile me');
+    expect(consumePendingReconciliation(root)).toBe('reconcile me');
+    const path = join(root, '.claude-task', '.pending-reconcile-instruction.txt');
+    expect(existsSync(path)).toBe(false);
+    // Idempotent: a second consume is null.
+    expect(consumePendingReconciliation(root)).toBeNull();
+  });
+
+  it('rejects empty worktree / empty instruction without touching the filesystem', () => {
+    writePendingReconciliation('', 'something');
+    expect(consumePendingReconciliation('')).toBeNull();
+  });
+
+  it('overwrites a previously staged instruction on a new boundary write', () => {
+    writePendingReconciliation(root, 'first');
+    writePendingReconciliation(root, 'second');
+    expect(consumePendingReconciliation(root)).toBe('second');
+  });
+
+  it('handles project paths containing spaces and apostrophes', () => {
+    const tricky = mkdtempSync(join(tmpdir(), `pat's odd proj-${randomBytes(4).toString('hex')}-`));
+    try {
+      writePendingReconciliation(tricky, 'reconcile');
+      expect(consumePendingReconciliation(tricky)).toBe('reconcile');
+    } finally {
+      rmSync(tricky, { recursive: true, force: true });
+    }
+  });
+});

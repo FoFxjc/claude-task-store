@@ -418,7 +418,7 @@ Architecture:
 ```
 OpenCode session
   ↓
-.opencode/plugin/task-store.ts        (auto-discovered, ~75 LOC)
+.opencode/plugin/task-store.ts        (auto-discovered, ~115 LOC)
   ↓
 experimental.chat.system.transform
   ↓
@@ -434,6 +434,33 @@ by OpenCode as an "external skill" (OpenCode auto-loads SKILL.md files from
 both `~/.claude/skills/` and `.claude/skills/`), so no duplicate
 `.opencode/skills/` copy is needed.
 
+### OpenCode auto-checkpoint parity
+
+OpenCode supports the same conservative auto-checkpoint mode as Claude Code.
+The plugin wires the existing provider-neutral core (`src/autocheckpoint.ts`)
+through OpenCode's lifecycle hooks:
+
+| Phase | Claude Code | OpenCode |
+|---|---|---|
+| Tool activity → dirty | `PostToolUse` shell hook | `tool.execute.after` plugin hook |
+| Reconciliation boundary | `Stop` hook (`additionalContext`) | `event({type: "session.idle"})` plugin hook, staging the instruction to `.claude-task/.pending-reconcile-instruction.txt` |
+| Instruction delivery | Same call (the `Stop` output channel) | Next `experimental.chat.system.transform` (which consumes the pending file once) |
+| Compaction | `PreCompact` writes history marker | `experimental.session.compacting` registered as a deliberate no-op |
+
+Both harnesses invoke the **same** `task-store auto mark-dirty`,
+`task-store auto check`, and `task-store resume` commands, so the dirty
+window, the 120-second debounce, and the trust hierarchy embedded in
+`RECONCILE_INSTRUCTION` are identical.
+
+> **Compatibility note:** OpenCode support relies on a small set of plugin
+> hooks that OpenCode currently labels as experimental
+> (`experimental.chat.system.transform`,
+> `experimental.compaction.autocontinue`, the `event()` bus hook, and the
+> `tool.execute.after` callback). If a future OpenCode release changes any
+> of these, this adapter may need to be updated. The signature change is
+> contained to one file; the plugin source ships with the install so you
+> can patch locally if needed.
+
 Around automatic compaction: the plugin intentionally does not mutate state
 at compaction time. `experimental.session.compacting` is registered as a
 no-op — the task store is the source of truth for execution state, and the
@@ -444,10 +471,11 @@ To opt out of OpenCode integration in a future install, run
 `TASK_STORE_SKIP_OPENCODE=1 ./install.sh /path/to/project`. The Claude Code
 side is unaffected.
 
-The plugin's behavior is verified end-to-end by `tests/opencode_smoke_test.sh`,
-which runs the locally installed `opencode` binary against a temp project
-with state and asserts the resume projection is pushed into the system
-prompt.
+The plugin's behavior is verified end-to-end by two shell suites that run
+the locally installed `opencode` binary:
+
+- `tests/opencode_smoke_test.sh` — resume injection
+- `tests/opencode_autockpt_smoke_test.sh` — auto-checkpoint parity
 
 ---
 
@@ -683,17 +711,19 @@ bash tests/phase3/handoff_test.sh  # Cross-agent handoff test
 bash tests/autocheckpoint_test.sh  # Auto-checkpoint mode regression
 bash tests/opencode_install_test.sh     # OpenCode install/uninstall regression
 bash tests/opencode_smoke_test.sh       # Real OpenCode resume-injection smoke
+bash tests/opencode_autockpt_smoke_test.sh # Real OpenCode auto-checkpoint smoke
 ```
 
-The OpenCode smoke test needs a working `opencode` binary on `PATH`. It
-skips cleanly (`exit 77`) if it isn't installed; the other suites are pure
+The OpenCode smoke tests need a working `opencode` binary on `PATH`. They
+skip cleanly (`exit 77`) if it isn't installed; the other suites are pure
 shell and run anywhere.
 
-383 automated checks pass across unit, acceptance, and integration test suites
-(unit 87, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
+403 automated checks pass across unit, acceptance, and integration test suites
+(unit 108, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
 installer regression 17, path safety 32, project-local runtime 32,
-auto-checkpoint 60, OpenCode install regression 27, OpenCode resume smoke 16).
-CI runs the non-OpenCode suites on Node 18/20/22.
+auto-checkpoint 60, OpenCode install regression 27, OpenCode resume smoke 16,
+OpenCode auto-checkpoint smoke 20). CI runs the non-OpenCode suites on Node
+18/20/22.
 
 ---
 

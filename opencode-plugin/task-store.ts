@@ -1,9 +1,9 @@
 // claude-task-store: OpenCode plugin
 //
-// Thin adapter that reuses the existing task-store CLI to inject the canonical
-// `task-store resume` projection into every chat call. Runs as an
-// auto-discovered plugin from .opencode/plugin/task-store.{ts,js}; OpenCode
-// discovers it without any opencode.json change.
+// Thin adapter that reuses the existing task-store CLI and provider-neutral
+// auto-checkpoint core. Runs as an auto-discovered plugin from
+// .opencode/plugin/task-store.{ts,js}; OpenCode discovers it without any
+// opencode.json change.
 //
 // IMPORTANT: this file exports ONLY a default function. OpenCode's plugin
 // loader iterates over every export of a plugin file and treats each as a
@@ -11,14 +11,27 @@
 // module (`./task-store/injection.ts`) that this file imports.
 //
 // Lifecycle:
+//   - tool.execute.after
+//       Cheap, runs after every tool call. For tool names that are not in
+//       the read-only allow-list, the plugin calls the existing provider-
+//       neutral dirty marker via `task-store auto mark-dirty`. This is the
+//       OpenCode analog of Claude Code's `PostToolUse` hook.
+//
+//   - event()  (filter: session.idle)
+//       Fires when the agent finishes responding and the session goes idle.
+//       This is the OpenCode analog of Claude Code's `Stop` hook and is the
+//       smallest reliable boundary at which a reconciliation instruction
+//       can be staged for delivery on the next chat call. When the
+//       existing CLI decides reconciliation is warranted, the instruction
+//       text is staged to a pending file.
+//
 //   - experimental.chat.system.transform
-//       Read .claude-task/state.json in the project worktree. If present and
-//       not archived, shell out to the project-local CLI at
-//       .claude/task-store/bin/task-store.js resume --root <worktree> and
-//       append the output to the system prompt. This fires on the first user
-//       message of a fresh session, which is exactly when a Claude Code
-//       SessionStart hook would fire, so the resume lands without replaying
-//       the prior conversation.
+//       Fires on every chat call. Pushes:
+//         (a) the canonical `task-store resume` projection (always, when
+//             state exists and is not archived)
+//         (b) any pending reconciliation instruction staged by the
+//             boundary hook, consumed in one shot
+//       This is also the OpenCode analog of Claude Code's SessionStart.
 //
 //   - experimental.session.compacting
 //       Intentionally a no-op. The task store is the source of truth for
@@ -38,6 +51,16 @@
 //     never break a coding session — the resume is a navigation aid, not a
 //     requirement for the rest of OpenCode to function.
 //
+// Auto-checkpoint semantics:
+//   - Default OFF (same as Claude Code). When off, every code path here is
+//     a no-op because the underlying CLI core no-ops.
+//   - When conservative, dirty marking only records that work may have
+//     happened — it never infers completion, decides, blocks, or invents
+//     a next_action.
+//   - Reconciliation instruction text comes verbatim from the CLI core
+//     (src/autocheckpoint.ts:RECONCILE_INSTRUCTION); the plugin never
+//     paraphrases it.
+//
 // Ownership marker:
 //   The leading comment line is an exact-match identifier that install.sh
 //   writes and uninstall.sh greps for. Editing it silently disables
@@ -46,7 +69,14 @@
 // CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1
 // do not edit: ownership marker read by install.sh / uninstall.sh
 
-import { buildResumeInjection } from "./task-store/injection.js";
+import {
+  buildResumeInjection,
+  consumePendingReconciliation,
+  isDirtyWorthyTool,
+  markDirtyOnTool,
+  checkReconcileBoundary,
+  writePendingReconciliation,
+} from "./task-store/injection.js";
 
 interface PluginInput {
   // OpenCode's PluginInput exposes both worktree (project root) and
@@ -61,8 +91,72 @@ interface SystemTransformOutput {
   system: string[];
 }
 
+interface BusEvent {
+  type: string;
+  properties?: Record<string, unknown>;
+}
+
+interface EventInput {
+  event: BusEvent;
+}
+
+interface ToolExecuteAfterInput {
+  tool: string;
+  sessionID: string;
+  callID: string;
+  args: unknown;
+}
+
 const TaskStoreOpenCodePlugin = async ({ worktree }: PluginInput) => {
   return {
+    // ── Dirty signal ──────────────────────────────────────────────────────
+    // No-op for read-only tool names; otherwise delegate to the
+    // provider-neutral core. Never inspects tool arguments, never calls a
+    // task-store mutation verb.
+    "tool.execute.after": async (
+      input: ToolExecuteAfterInput,
+      _output: unknown,
+    ): Promise<void> => {
+      try {
+        // We deliberately do NOT self-exclude on tool-name substring the
+        // way the Claude Code shell hook does: the Claude Code hook sees
+        // a serialized Bash command string on stdin, and the cheap check
+        // is to skip anything containing "task-store". The OpenCode hook
+        // sees only the structured tool name (`bash`, `edit`, `write`,
+        // ...), and a `bash` call that happens to invoke `task-store` is
+        // still a real repository mutation (it ran a process). The CLI
+        // self-exclusion inside the auto-checkpoint core handles the
+        // semantic case.
+        markDirtyOnTool(worktree, input.tool);
+      } catch {
+        // Never let an injection failure break a session.
+      }
+    },
+
+    // ── Reconciliation boundary ──────────────────────────────────────────
+    // `session.idle` is the smallest reliable boundary at which OpenCode
+    // surfaces a model-facing continuation hook. There is no exact analog
+    // of Claude Code's `Stop` `additionalContext` channel at this event,
+    // so we stage the instruction to a pending file and let the next
+    // `experimental.chat.system.transform` deliver it.
+    event: async ({ event }: EventInput): Promise<void> => {
+      try {
+        if (event.type !== "session.idle") return;
+        const decision = checkReconcileBoundary(worktree);
+        if (decision.reconcile && decision.instruction !== null) {
+          writePendingReconciliation(worktree, decision.instruction);
+        }
+      } catch {
+        // Never let a boundary handler break a session.
+      }
+    },
+
+    // ── System prompt injection ──────────────────────────────────────────
+    // Delivers two distinct elements, in this order:
+    //   (1) the canonical resume projection, when state exists
+    //   (2) any pending reconciliation instruction staged by the boundary
+    // Both elements are appended to `output.system`; OpenCode composes
+    // the final system prompt. The instruction is consumed exactly once.
     "experimental.chat.system.transform": async (
       _input: unknown,
       output: SystemTransformOutput,
@@ -73,8 +167,15 @@ const TaskStoreOpenCodePlugin = async ({ worktree }: PluginInput) => {
           output.system.push(resume);
         }
       } catch {
-        // Never let an injection failure break a session. Resume is a
-        // navigation aid; OpenCode itself is the system.
+        // Never let an injection failure break a session.
+      }
+      try {
+        const pending = consumePendingReconciliation(worktree);
+        if (pending !== null && pending.length > 0) {
+          output.system.push(pending);
+        }
+      } catch {
+        // Same as above.
       }
     },
 
