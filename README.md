@@ -218,7 +218,7 @@ If the task store claims something is complete but the repository or tests disag
 
 ## Validated results
 
-Measured across 324 automated test scenarios:
+Measured across the 503 automated checks that make up the v0.2.0 suite:
 
 | Scenario | Resume context |
 |----------|---------------:|
@@ -261,7 +261,7 @@ without re-reading transcripts.
 
 ## Installation
 
-**Prerequisites:** Node.js ≥ 18, Claude Code, `python3`
+**Prerequisites:** Node.js ≥ 18, Claude Code or OpenCode, `python3`
 
 ```bash
 git clone https://github.com/FoFxjc/claude-task-store.git
@@ -345,7 +345,7 @@ task-store block T4 "need local HTTP fixture before streaming test works"
 task-store next "Replace mock with local HTTP fixture, then complete T4"
 ```
 
-On next session start (or in a fresh model session), Claude automatically receives the compact resume context shown above.
+On next session start (or in a fresh model session), the agent automatically receives the compact resume context shown above — identically in Claude Code and in OpenCode, since both render it through the same `task-store resume` CLI.
 
 ---
 
@@ -567,7 +567,7 @@ repository / tests  >  git state  >  task-store  >  model memory
 
 ### Cost when off
 
-Zero writes and no Node process. The hooks bail out in bash before spawning anything, so a project that never opts in behaves byte-for-byte like v0.1.0. When it *is* on, each matched tool call spawns one short-lived Node process to record the signal.
+Zero writes and no Node process. The hooks bail out in bash before spawning anything, so a project that never opts in behaves byte-for-byte as it did before auto-checkpoint existed. When it *is* on, each matched tool call spawns one short-lived Node process to record the signal.
 
 ### Provider neutrality
 
@@ -697,7 +697,7 @@ Options:
 
 ## Security and limitations
 
-- State files are injected into Claude's context. Treat `.claude-task/state.json` with the same trust as other project config. A malicious state file could inject arbitrary text into the AI context (prompt injection).
+- State files are injected into the agent's context (Claude Code or OpenCode). Treat `.claude-task/state.json` with the same trust as other project config. A malicious state file could inject arbitrary text into the AI context (prompt injection).
 - No network requests are made. All state is local.
 - Concurrent `task-store` CLI invocations are serialized by an O_EXCL lock file around each command's full read-modify-write cycle; `--expect-rev` makes this an atomic compare-and-write (not last-writer-wins) against other CLI callers. Direct library callers that bypass `withStoreLock()` are not protected. See [`SECURITY.md`](SECURITY.md).
 - Evidence (`-e` values) is kept as a plain string array end-to-end — no delimiter-based joining/splitting — so evidence text may safely contain commas, quotes, or other special characters.
