@@ -836,6 +836,125 @@ else
     "$([[ ! -f "$HC_C_DIR/.opencode/plugin/task-store.ts" ]] && echo true || echo false)"
 fi
 
+# ── Scenario 11: .gitignore backfill respects line boundaries ──────────────
+#
+# backfill_gitignore appends to an existing .gitignore that already carries
+# the marker. A .gitignore whose final byte is not a newline is valid and
+# common, and appending straight onto it glued our comment to the end of the
+# user's last rule ("build/# auto-checkpoint runtime marker"), corrupting
+# that rule AND the entry we were adding.
+#
+# The no-trailing-newline case below is the discriminating one: it fails
+# against the pre-fix implementation.
+echo ""
+echo "═══ Scenario 11: .gitignore backfill line boundaries ═══"
+
+GIB_NL_DIR=$(mktemp -d); GIB_NONL_DIR=$(mktemp -d); GIB_EMPTY_DIR=$(mktemp -d)
+trap 'chmod -R u+rwX "$HC_C_DIR" 2>/dev/null; rm -rf "$SNAP_DIR" "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR" "$PIPEFAIL_DIR" "$NEWLINE_DIR" "$RESOLVE_DIR" "$HC_A_DIR" "$HC_B_DIR" "$HC_C_DIR" "$GIB_NL_DIR" "$GIB_NONL_DIR" "$GIB_EMPTY_DIR"' EXIT
+
+# The marker line makes install.sh take the backfill branch. The trailing
+# entry is a real rule whose survival we assert byte-for-byte.
+GIB_BODY='# claude-task-store
+.claude-task/history.jsonl
+.claude-task/.lock
+node_modules/
+dist/
+build/'
+
+# ── 11a: .gitignore ends WITH a newline (the already-working case) ─────────
+git init -q "$GIB_NL_DIR"
+printf '%s\n' "$GIB_BODY" > "$GIB_NL_DIR/.gitignore"
+FORCE=1 bash "$ROOT/install.sh" "$GIB_NL_DIR" > /tmp/opencode_gib_nl.log 2>&1 || {
+  echo "install.sh (11a) failed:"; cat /tmp/opencode_gib_nl.log; exit 1;
+}
+
+check "11a: terminated .gitignore keeps its final rule intact" \
+  "$(grep -qxF 'build/' "$GIB_NL_DIR/.gitignore" && echo true || echo false)"
+
+check "11a: backfilled entry is present on its own line" \
+  "$(grep -qxF '.claude-task/auto-checkpoint.json' "$GIB_NL_DIR/.gitignore" && echo true || echo false)"
+
+check "11a: no line splices two rules together" \
+  "$(grep -qE '^[^#].*#' "$GIB_NL_DIR/.gitignore" && echo false || echo true)"
+
+check "11a: git agrees the pre-existing rule still works" \
+  "$(git -C "$GIB_NL_DIR" check-ignore -q build/x 2>/dev/null && echo true || echo false)"
+
+# ── 11b: .gitignore does NOT end with a newline (the defect) ───────────────
+git init -q "$GIB_NONL_DIR"
+printf '%s' "$GIB_BODY" > "$GIB_NONL_DIR/.gitignore"   # no trailing newline
+
+check "11b: fixture really has no trailing newline" \
+  "$([[ -n "$(tail -c 1 "$GIB_NONL_DIR/.gitignore")" ]] && echo true || echo false)"
+
+FORCE=1 bash "$ROOT/install.sh" "$GIB_NONL_DIR" > /tmp/opencode_gib_nonl.log 2>&1 || {
+  echo "install.sh (11b) failed:"; cat /tmp/opencode_gib_nonl.log; exit 1;
+}
+
+# THE discriminating assertion. Pre-fix the last line became
+# "build/# auto-checkpoint runtime marker ..." and this fails.
+check "11b: the user's unterminated final rule survives byte-for-byte" \
+  "$(grep -qxF 'build/' "$GIB_NONL_DIR/.gitignore" && echo true || echo false)"
+
+check "11b: git still honours that final rule" \
+  "$(git -C "$GIB_NONL_DIR" check-ignore -q build/x 2>/dev/null && echo true || echo false)"
+
+check "11b: the backfilled comment starts on its own line" \
+  "$(grep -qE '^# auto-checkpoint runtime marker' "$GIB_NONL_DIR/.gitignore" && echo true || echo false)"
+
+check "11b: the backfilled path is on its own line" \
+  "$(grep -qxF '.claude-task/auto-checkpoint.json' "$GIB_NONL_DIR/.gitignore" && echo true || echo false)"
+
+check "11b: no rule line has a comment spliced onto it" \
+  "$(grep -qE '^[^#].*#' "$GIB_NONL_DIR/.gitignore" && echo false || echo true)"
+
+check "11b: every unrelated rule is preserved" \
+  "$(if grep -qxF 'node_modules/' "$GIB_NONL_DIR/.gitignore" \
+       && grep -qxF 'dist/' "$GIB_NONL_DIR/.gitignore" \
+       && grep -qxF '.claude-task/history.jsonl' "$GIB_NONL_DIR/.gitignore" \
+       && grep -qxF '.claude-task/.lock' "$GIB_NONL_DIR/.gitignore"; then echo true; else echo false; fi)"
+
+check "11b: exactly one newline was added, not a blank line" \
+  "$(if [[ -z "$(grep -n '^$' "$GIB_NONL_DIR/.gitignore" | head -1)" ]]; then echo true; else echo false; fi)"
+
+check "11b: all three v0.2.0 paths are gitignored by git itself" \
+  "$(if git -C "$GIB_NONL_DIR" check-ignore -q .opencode/plugin/task-store.ts \
+       && git -C "$GIB_NONL_DIR" check-ignore -q .opencode/plugin/task-store/injection.ts \
+       && git -C "$GIB_NONL_DIR" check-ignore -q .claude-task/.pending-reconcile-instruction.txt; then echo true; else echo false; fi)"
+
+# ── 11c: empty .gitignore carrying the marker is handled ──────────────────
+# An empty file must not gain a leading blank line, and -s must keep the
+# newline probe from running against nothing.
+git init -q "$GIB_EMPTY_DIR"
+printf '# claude-task-store' > "$GIB_EMPTY_DIR/.gitignore"   # marker, unterminated, nothing else
+FORCE=1 bash "$ROOT/install.sh" "$GIB_EMPTY_DIR" > /tmp/opencode_gib_empty.log 2>&1 || {
+  echo "install.sh (11c) failed:"; cat /tmp/opencode_gib_empty.log; exit 1;
+}
+
+check "11c: marker-only .gitignore keeps its marker on its own line" \
+  "$(grep -qxF '# claude-task-store' "$GIB_EMPTY_DIR/.gitignore" && echo true || echo false)"
+
+check "11c: entries were backfilled into it" \
+  "$(grep -qxF '.claude-task/auto-checkpoint.json' "$GIB_EMPTY_DIR/.gitignore" && echo true || echo false)"
+
+check "11c: no leading blank line was introduced" \
+  "$([[ -n "$(head -c 1 "$GIB_EMPTY_DIR/.gitignore")" ]] && echo true || echo false)"
+
+# ── 11d: idempotence and exact-entry preservation ─────────────────────────
+GIB_NONL_AFTER="$(cat "$GIB_NONL_DIR/.gitignore")"
+FORCE=1 bash "$ROOT/install.sh" "$GIB_NONL_DIR" > /tmp/opencode_gib_rerun.log 2>&1 || {
+  echo "install.sh (11d) failed:"; cat /tmp/opencode_gib_rerun.log; exit 1;
+}
+
+check "11d: re-running install leaves .gitignore byte-for-byte unchanged" \
+  "$([[ "$(cat "$GIB_NONL_DIR/.gitignore")" == "$GIB_NONL_AFTER" ]] && echo true || echo false)"
+
+check "11d: no entry is duplicated after the re-run" \
+  "$(if [[ -z "$(grep -v '^#' "$GIB_NONL_DIR/.gitignore" | grep -v '^[[:space:]]*$' | sort | uniq -d)" ]]; then echo true; else echo false; fi)"
+
+check "11d: an already-present exact entry is not re-added" \
+  "$([[ "$(grep -cxF '.claude-task/auto-checkpoint.json' "$GIB_NONL_DIR/.gitignore")" == "1" ]] && echo true || echo false)"
+
 echo ""
 echo "═══ RESULTS ══════════════════════════════════════════════════"
 TOTAL=$((PASS + FAIL))

@@ -261,6 +261,26 @@ if [[ -f "$GITIGNORE" ]] && grep -q "$GITIGNORE_MARKER" "$GITIGNORE"; then
   backfill_gitignore() {
     local path="$1" comment="$2"
     grep -qxF "$path" "$GITIGNORE" && return 0
+
+    # Terminate the file's last line before appending, if it is unterminated.
+    #
+    # A .gitignore whose final byte is not a newline is valid and not unusual
+    # (plenty of editors and generators leave one that way). Appending
+    # straight onto it would glue our comment to the end of the user's last
+    # rule — "build/# auto-checkpoint runtime marker" — silently breaking that
+    # rule AND our new entry.
+    #
+    # `$(tail -c 1 ...)` is the test: command substitution strips trailing
+    # newlines, so the result is empty exactly when the final byte IS a
+    # newline, and non-empty otherwise. Guarded by -s so an empty (or absent)
+    # file adds nothing and we never open with a stray blank line.
+    #
+    # This appends at most one newline and touches nothing already in the
+    # file; the rest of the user's .gitignore is never read back or rewritten.
+    if [[ -s "$GITIGNORE" ]] && [[ -n "$(tail -c 1 "$GITIGNORE")" ]]; then
+      printf '\n' >> "$GITIGNORE"
+    fi
+
     printf '%s\n%s\n' "$comment" "$path" >> "$GITIGNORE"
     echo "  ✓ Added $path to .gitignore"
   }
