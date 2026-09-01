@@ -32,6 +32,9 @@ import {
   checkReconcileBoundary,
   writePendingReconciliation,
   consumePendingReconciliation,
+  capInjection,
+  MAX_INJECTION_CHARS,
+  TRUNCATION_SUFFIX,
   type CliRunResult,
 } from '../opencode-plugin/task-store/injection.js';
 
@@ -235,7 +238,7 @@ describe('buildResumeInjection (OpenCode plugin)', () => {
     expect(calls).toEqual([]);
   });
 
-  it('truncates output that exceeds the 400-token design cap', () => {
+  it('truncates oversized output to at most MAX_INJECTION_CHARS, suffix included', () => {
     writeState(root, 'active');
     writeCli(root);
     const oversized = 'X'.repeat(2000);
@@ -243,8 +246,12 @@ describe('buildResumeInjection (OpenCode plugin)', () => {
 
     const result = buildResumeInjection(root);
     expect(result).not.toBeNull();
-    expect(result!.length).toBeLessThanOrEqual(2000);
+    // The previous bound here was a loose 2000, which a 1638-char result
+    // (1600 sliced + a 38-char suffix appended after) satisfied. The cap is
+    // the real bound, and it must hold for the COMPLETE returned string.
+    expect(result!.length).toBeLessThanOrEqual(MAX_INJECTION_CHARS);
     expect(result).toContain('…truncated');
+    expect(result!.endsWith(TRUNCATION_SUFFIX)).toBe(true);
   });
 
   it('passes through output that is within the 400-token design cap', () => {
@@ -366,6 +373,68 @@ describe('OpenCode plugin source — structural', () => {
       .map((l) => l.trim())
       .filter((l) => /^(export|export default|export\s*\{)/.test(l));
     expect(exportLines).toEqual(['export default TaskStoreOpenCodePlugin;']);
+  });
+});
+
+// ─── Injection cap ─────────────────────────────────────────────────────────
+
+describe('capInjection', () => {
+  // MAX_INJECTION_CHARS is a HARD cap on the complete returned string. The
+  // earlier implementation sliced to the cap and THEN appended the suffix,
+  // so an oversized input produced cap + suffix.length characters — over
+  // budget by exactly the length of the marker announcing the truncation.
+
+  it('leaves input below the cap completely unchanged', () => {
+    const text = 'GOAL: small\nNEXT ACTION: do the thing\n';
+    expect(text.length).toBeLessThan(MAX_INJECTION_CHARS);
+    expect(capInjection(text)).toBe(text);
+  });
+
+  it('leaves input exactly at the cap unchanged (boundary, no suffix)', () => {
+    const text = 'X'.repeat(MAX_INJECTION_CHARS);
+    const result = capInjection(text);
+    expect(result).toBe(text);
+    expect(result.length).toBe(MAX_INJECTION_CHARS);
+    expect(result).not.toContain('…truncated');
+  });
+
+  it('truncates input one character over the cap', () => {
+    const result = capInjection('X'.repeat(MAX_INJECTION_CHARS + 1));
+    expect(result.length).toBeLessThanOrEqual(MAX_INJECTION_CHARS);
+    expect(result.endsWith(TRUNCATION_SUFFIX)).toBe(true);
+  });
+
+  it('keeps the COMPLETE result within the cap across a range of oversized inputs', () => {
+    for (const size of [
+      MAX_INJECTION_CHARS + 1,
+      MAX_INJECTION_CHARS + TRUNCATION_SUFFIX.length,
+      MAX_INJECTION_CHARS * 2,
+      MAX_INJECTION_CHARS * 10,
+    ]) {
+      const result = capInjection('X'.repeat(size));
+      expect(result.length).toBeLessThanOrEqual(MAX_INJECTION_CHARS);
+      expect(result.endsWith(TRUNCATION_SUFFIX)).toBe(true);
+    }
+  });
+
+  it('appends the suffix exactly once and preserves the head of the input', () => {
+    const result = capInjection('A'.repeat(MAX_INJECTION_CHARS * 3));
+    const expectedHead = 'A'.repeat(MAX_INJECTION_CHARS - TRUNCATION_SUFFIX.length);
+    expect(result).toBe(expectedHead + TRUNCATION_SUFFIX);
+    expect(result.length).toBe(MAX_INJECTION_CHARS);
+    expect(result.split('…truncated')).toHaveLength(2);
+  });
+
+  it('handles empty input', () => {
+    expect(capInjection('')).toBe('');
+  });
+
+  it('reserves room for the suffix rather than appending past the cap', () => {
+    // Pins the arithmetic directly: the retained slice plus the suffix must
+    // sum to the cap, never exceed it.
+    const result = capInjection('X'.repeat(MAX_INJECTION_CHARS + 500));
+    expect(result.length - TRUNCATION_SUFFIX.length)
+      .toBe(MAX_INJECTION_CHARS - TRUNCATION_SUFFIX.length);
   });
 });
 

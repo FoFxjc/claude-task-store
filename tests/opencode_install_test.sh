@@ -72,7 +72,10 @@ echo "╚═══════════════════════�
 echo ""
 echo "═══ Scenario 1: fresh install copies plugin + preserves unrelated .opencode ═══"
 FRESH_DIR=$(mktemp -d)
-trap 'rm -rf "$FRESH_DIR"' EXIT
+# Independent store for pre-install snapshots. It lives OUTSIDE the project
+# tree so nothing install.sh or uninstall.sh does can reach it.
+SNAP_DIR=$(mktemp -d)
+trap 'rm -rf "$SNAP_DIR" "$FRESH_DIR"' EXIT
 
 git init -q "$FRESH_DIR"
 
@@ -103,11 +106,29 @@ description: User's own command — must survive.
 Run deploy with $ARGUMENTS.
 EOF
 
-# Snapshot pre-install content for byte-comparison later.
-PRE_OPENCODE_JSON="$FRESH_DIR/.opencode/opencode.json"
-PRE_UNRELATED_PLUGIN="$FRESH_DIR/.opencode/plugin/my-unrelated-plugin.ts"
-PRE_AGENT="$FRESH_DIR/.opencode/agents/researcher.md"
-PRE_COMMAND="$FRESH_DIR/.opencode/commands/deploy.md"
+# Snapshot pre-install CONTENT for byte-comparison later.
+#
+# These must be independent copies. Pointing PRE_* at the live paths would
+# make every "survived install" check below a self-diff — `diff -q X X` is
+# always equal, so the assertion would pass even if install.sh rewrote the
+# file. Copy to $SNAP_DIR first, then diff snapshot vs. live afterwards.
+cp "$FRESH_DIR/.opencode/opencode.json"                  "$SNAP_DIR/opencode.json"
+cp "$FRESH_DIR/.opencode/plugin/my-unrelated-plugin.ts"  "$SNAP_DIR/my-unrelated-plugin.ts"
+cp "$FRESH_DIR/.opencode/agents/researcher.md"           "$SNAP_DIR/researcher.md"
+cp "$FRESH_DIR/.opencode/commands/deploy.md"             "$SNAP_DIR/deploy.md"
+
+PRE_OPENCODE_JSON="$SNAP_DIR/opencode.json"
+PRE_UNRELATED_PLUGIN="$SNAP_DIR/my-unrelated-plugin.ts"
+PRE_AGENT="$SNAP_DIR/researcher.md"
+PRE_COMMAND="$SNAP_DIR/deploy.md"
+
+# Guard the guard: a snapshot path must never alias the live file, or every
+# preservation check silently reverts to a self-diff.
+check "preservation snapshots are independent copies, not aliases of the live files" \
+  "$(if [[ "$PRE_OPENCODE_JSON" != "$FRESH_DIR"/* \
+        && "$PRE_UNRELATED_PLUGIN" != "$FRESH_DIR"/* \
+        && "$PRE_AGENT" != "$FRESH_DIR"/* \
+        && "$PRE_COMMAND" != "$FRESH_DIR"/* ]]; then echo true; else echo false; fi)"
 
 FORCE=1 bash "$ROOT/install.sh" "$FRESH_DIR" > /tmp/opencode_install_fresh.log 2>&1 || {
   echo "install.sh failed:"; cat /tmp/opencode_install_fresh.log; exit 1;
@@ -172,7 +193,7 @@ check "re-install preserves unrelated plugin file" \
 echo ""
 echo "═══ Scenario 3: TASK_STORE_SKIP_OPENCODE opt-out ═══"
 SKIP_DIR=$(mktemp -d)
-trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR"' EXIT
+trap 'rm -rf "$SNAP_DIR" "$FRESH_DIR" "$SKIP_DIR"' EXIT
 
 git init -q "$SKIP_DIR"
 FORCE=1 TASK_STORE_SKIP_OPENCODE=1 bash "$ROOT/install.sh" "$SKIP_DIR" > /tmp/opencode_install_skip.log 2>&1 || {
@@ -245,7 +266,7 @@ check ".claude-task/history.jsonl survives uninstall" \
 echo ""
 echo "═══ Scenario 5: uninstall refuses non-owned plugin at the path ═══"
 FOREIGN_DIR=$(mktemp -d)
-trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR"' EXIT
+trap 'rm -rf "$SNAP_DIR" "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR"' EXIT
 
 git init -q "$FOREIGN_DIR"
 mkdir -p "$FOREIGN_DIR/.opencode/plugin"
@@ -282,7 +303,7 @@ echo "═══ Scenario 6: .gitignore covers transient OpenCode artifacts ═�
 
 GI_FRESH_DIR=$(mktemp -d)
 GI_UPGRADE_DIR=$(mktemp -d)
-trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR"' EXIT
+trap 'rm -rf "$SNAP_DIR" "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR"' EXIT
 
 git init -q "$GI_FRESH_DIR"
 git init -q "$GI_UPGRADE_DIR"
@@ -363,7 +384,7 @@ UPG_DIR=$(mktemp -d)
 FOREIGN_PLUGIN_DIR=$(mktemp -d)
 FOREIGN_HELPER_DIR=$(mktemp -d)
 SUBSTR_DIR=$(mktemp -d)
-trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR"' EXIT
+trap 'rm -rf "$SNAP_DIR" "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR"' EXIT
 
 MARKER='// CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1'
 STALE_SENTINEL='STALE_ADAPTER_FROM_AN_OLDER_RELEASE'
@@ -554,7 +575,7 @@ check "uninstall keeps the user's file inside the helper dir (dir not empty)" \
 # `||` swallow it, so a regression shows up as a failing check, not a
 # vanished suite.
 PIPEFAIL_DIR=$(mktemp -d)
-trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR" "$PIPEFAIL_DIR"' EXIT
+trap 'rm -rf "$SNAP_DIR" "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR" "$PIPEFAIL_DIR"' EXIT
 
 git init -q "$PIPEFAIL_DIR"
 FORCE=1 bash "$ROOT/install.sh" "$PIPEFAIL_DIR" > /tmp/opencode_pf_install.log 2>&1 || {
@@ -597,7 +618,7 @@ echo ""
 echo "═══ Scenario 8: newline-bearing foreign filename in the helper dir ═══"
 
 NEWLINE_DIR=$(mktemp -d)
-trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR" "$PIPEFAIL_DIR" "$NEWLINE_DIR"' EXIT
+trap 'rm -rf "$SNAP_DIR" "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR" "$PIPEFAIL_DIR" "$NEWLINE_DIR"' EXIT
 
 git init -q "$NEWLINE_DIR"
 FORCE=1 bash "$ROOT/install.sh" "$NEWLINE_DIR" > /tmp/opencode_nl_install.log 2>&1 || {
@@ -650,7 +671,7 @@ echo ""
 echo "═══ Scenario 9: installed tree is self-consistent (module resolution) ═══"
 
 RESOLVE_DIR=$(mktemp -d)
-trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR" "$PIPEFAIL_DIR" "$NEWLINE_DIR" "$RESOLVE_DIR"' EXIT
+trap 'rm -rf "$SNAP_DIR" "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR" "$PIPEFAIL_DIR" "$NEWLINE_DIR" "$RESOLVE_DIR"' EXIT
 
 git init -q "$RESOLVE_DIR"
 FORCE=1 bash "$ROOT/install.sh" "$RESOLVE_DIR" > /tmp/opencode_rs_install.log 2>&1 || {

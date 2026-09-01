@@ -42,10 +42,40 @@ import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync, mkdirSyn
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-// 400-token design ceiling × ~4 chars/token. Matches src/core.ts's hard cap;
-// truncating is the only safe fallback if the canonical renderer ever
-// regresses past it.
+// Defensive character cap on anything this adapter pushes into the system
+// prompt, sized to the documented resume-projection budget of under 400
+// tokens (~4 chars/token, so ~1600 chars). This is an approximation of a
+// token budget, not an equivalence: it is a cheap character-count guard, and
+// the true token count of a given string will differ.
+//
+// The canonical renderer in src/core.ts documents that same budget but does
+// not enforce a character cap of its own, so nothing upstream guarantees this
+// bound — which is exactly why the adapter applies one. Truncating is the
+// only safe fallback if the renderer ever regresses past the budget: an
+// unbounded projection would crowd out the rest of the system prompt.
 export const MAX_INJECTION_CHARS = 1600;
+
+// Appended when, and only when, the text is truncated. Defined once so the
+// cap arithmetic below can reserve its exact length; a literal at the call
+// site is how the suffix escaped the budget in the first place.
+export const TRUNCATION_SUFFIX = "\n[…truncated, run `task-store status`]";
+
+/**
+ * Clamp `text` so the returned string — INCLUDING the truncation suffix when
+ * one is appended — is never longer than MAX_INJECTION_CHARS.
+ *
+ * Text at or below the cap is returned byte-for-byte unchanged; no suffix is
+ * added. Above the cap, room for the suffix is reserved BEFORE slicing.
+ *
+ * The trailing slice makes the postcondition unconditional: even if
+ * MAX_INJECTION_CHARS were later set below the suffix's own length, the
+ * result still cannot exceed it.
+ */
+export function capInjection(text: string): string {
+  if (text.length <= MAX_INJECTION_CHARS) return text;
+  const keep = Math.max(0, MAX_INJECTION_CHARS - TRUNCATION_SUFFIX.length);
+  return (text.slice(0, keep) + TRUNCATION_SUFFIX).slice(0, MAX_INJECTION_CHARS);
+}
 
 // CLI invocation timeout. The resume renderer is a synchronous read of a
 // small JSON file followed by string assembly — milliseconds in practice.
@@ -171,13 +201,9 @@ export function buildResumeInjection(worktree: string): string | null {
     return null;
   }
 
-  let text = result.stdout;
-  if (text.length > MAX_INJECTION_CHARS) {
-    // Defensive cap. The canonical renderer is bounded; this only fires
-    // if that invariant is broken. Truncate rather than blow the system
-    // prompt budget.
-    text = text.slice(0, MAX_INJECTION_CHARS) + "\n[…truncated, run `task-store status`]";
-  }
+  // Defensive cap. The canonical renderer is expected to stay within the
+  // budget; this only changes the text if that expectation is broken.
+  const text = capInjection(result.stdout);
 
   cache = { key, text };
   return text;
