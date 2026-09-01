@@ -338,26 +338,69 @@ else
   OPENCODE_PLUGIN_HELPER_DIR="$OPENCODE_PLUGIN_DIR/task-store"
   OPENCODE_PLUGIN_HELPER_FILE="$OPENCODE_PLUGIN_HELPER_DIR/injection.ts"
 
-  mkdir -p "$OPENCODE_PLUGIN_DIR"
+  # Ownership marker semantics — identical to uninstall.sh:
+  #
+  #   file absent            → install it
+  #   file carries marker    → refresh it (this is the upgrade-in-place path,
+  #                            the same contract as the .claude/task-store
+  #                            runtime installed in section 2)
+  #   file lacks the marker  → foreign file at an owned path. Never
+  #                            overwrite; warn and leave it exactly as-is.
+  #
+  # The marker is matched as a WHOLE LINE (grep -qxF), not as a substring: a
+  # file that merely mentions the identifier in prose (a README snippet, a
+  # vendored copy of our docs) is correctly treated as foreign rather than
+  # silently overwritten.
+  OPENCODE_MARKER='// CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1'
 
-  # Only write if the file does not already carry the ownership marker, so
-  # we never overwrite a user's manual edits and we never overwrite a
-  # claude-task-store install we did ourselves — re-running the installer
-  # upgrades in place, which is the same contract as the Claude Code side.
-  if [[ -f "$OPENCODE_PLUGIN_FILE" ]] \
-      && grep -q 'CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1' "$OPENCODE_PLUGIN_FILE"; then
-    echo "  ✓ OpenCode plugin already installed (ownership marker present)"
+  # Returns 0 only when $1 exists AND carries the ownership marker line.
+  opencode_owned() {
+    [[ -f "$1" ]] && grep -qxF "$OPENCODE_MARKER" "$1"
+  }
+
+  # Foreign file at the plugin path: refuse the whole adapter install rather
+  # than scattering a helper directory next to a plugin we do not own.
+  if [[ -f "$OPENCODE_PLUGIN_FILE" ]] && ! opencode_owned "$OPENCODE_PLUGIN_FILE"; then
+    echo "  ⚠  Left .opencode/plugin/task-store.ts in place — no claude-task-store ownership marker found."
+    echo "     Refusing to overwrite a file this installer does not own."
+    echo "     Move or remove it and re-run to enable the OpenCode integration."
   else
+    mkdir -p "$OPENCODE_PLUGIN_DIR"
+
+    if opencode_owned "$OPENCODE_PLUGIN_FILE"; then
+      OPENCODE_PLUGIN_ACTION="Refreshed"
+    else
+      OPENCODE_PLUGIN_ACTION="Installed"
+    fi
+
     cp "$SCRIPT_DIR/opencode-plugin/task-store.ts" "$OPENCODE_PLUGIN_FILE"
+    echo "  ✓ $OPENCODE_PLUGIN_ACTION OpenCode plugin: .opencode/plugin/task-store.ts"
+
     # The plugin imports the helper from a sibling subdirectory. OpenCode
     # does NOT auto-discover .ts files in subdirectories of .opencode/plugin/
     # (verified empirically: see tests/opencode_install_test.sh and the
     # opencode discovery rules in customize-opencode), so placing
     # `injection.ts` under `task-store/` keeps it out of OpenCode's
     # plugin loader while remaining importable from `task-store.ts`.
-    mkdir -p "$OPENCODE_PLUGIN_HELPER_DIR"
-    cp "$SCRIPT_DIR/opencode-plugin/task-store/injection.ts" "$OPENCODE_PLUGIN_HELPER_FILE"
-    echo "  ✓ Installed OpenCode plugin: .opencode/plugin/task-store.ts"
+    #
+    # The helper gets the same three-way ownership decision as the plugin,
+    # evaluated independently: a user who hand-rolled their own injection.ts
+    # keeps it, even though the plugin above was refreshed.
+    if [[ -f "$OPENCODE_PLUGIN_HELPER_FILE" ]] && ! opencode_owned "$OPENCODE_PLUGIN_HELPER_FILE"; then
+      echo "  ⚠  Left .opencode/plugin/task-store/injection.ts in place — no claude-task-store ownership marker found."
+      echo "     The refreshed plugin imports this helper; it may be out of date."
+    else
+      if opencode_owned "$OPENCODE_PLUGIN_HELPER_FILE"; then
+        OPENCODE_HELPER_ACTION="Refreshed"
+      else
+        OPENCODE_HELPER_ACTION="Installed"
+      fi
+
+      mkdir -p "$OPENCODE_PLUGIN_HELPER_DIR"
+      cp "$SCRIPT_DIR/opencode-plugin/task-store/injection.ts" "$OPENCODE_PLUGIN_HELPER_FILE"
+      echo "  ✓ $OPENCODE_HELPER_ACTION OpenCode plugin helper: .opencode/plugin/task-store/injection.ts"
+    fi
+
     echo "    (auto-discovered on next OpenCode launch; no opencode.json change)"
   fi
 

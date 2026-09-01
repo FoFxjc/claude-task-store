@@ -21,6 +21,11 @@
 #   9. .gitignore covers both adapter files and the transient pending
 #      reconciliation instruction, on fresh installs AND on upgrades of a
 #      project that already carries the v0.1.x marker block
+#  10. Upgrade semantics: a marker-owned plugin AND helper are REFRESHED on
+#      reinstall (stale owned content is replaced byte-for-byte with the
+#      current shipped source), while a foreign file at either owned path is
+#      preserved untouched. Ownership is a whole-line marker match, so a file
+#      that only mentions the marker as a substring is treated as foreign.
 
 set -euo pipefail
 
@@ -131,8 +136,20 @@ PLUGIN_COUNT=$(find "$FRESH_DIR/.opencode/plugin" -maxdepth 1 -name 'task-store.
 check "re-install does not duplicate task-store plugin" \
   "$([[ "$PLUGIN_COUNT" == "1" ]] && echo true || echo false)"
 
-check "re-install output notes plugin already installed" \
-  "$(grep -q 'OpenCode plugin already installed' /tmp/opencode_install_reinstall.log && echo true || echo false)"
+check "re-install reports the owned plugin was refreshed (not skipped)" \
+  "$(grep -q 'Refreshed OpenCode plugin' /tmp/opencode_install_reinstall.log && echo true || echo false)"
+
+check "re-install reports the owned helper was refreshed (not skipped)" \
+  "$(grep -q 'Refreshed OpenCode plugin helper' /tmp/opencode_install_reinstall.log && echo true || echo false)"
+
+check "re-install leaves plugin byte-identical to source (idempotent)" \
+  "$(diff -q "$ROOT/opencode-plugin/task-store.ts" "$OPENCODE_PLUGIN" >/dev/null && echo true || echo false)"
+
+check "re-install leaves helper byte-identical to source (idempotent)" \
+  "$(diff -q "$ROOT/opencode-plugin/task-store/injection.ts" "$FRESH_DIR/.opencode/plugin/task-store/injection.ts" >/dev/null && echo true || echo false)"
+
+check "re-install preserves unrelated plugin file" \
+  "$(diff -q "$PRE_UNRELATED_PLUGIN" "$FRESH_DIR/.opencode/plugin/my-unrelated-plugin.ts" >/dev/null && echo true || echo false)"
 
 # ── Scenario 3: TASK_STORE_SKIP_OPENCODE skips the .opencode copy ───────
 echo ""
@@ -302,6 +319,218 @@ check "upgrade install preserves the pre-existing .gitignore entries" \
        && grep -qxF '.claude-task/.lock' "$GI_UPGRADE_DIR/.gitignore" \
        && grep -qxF '.claude-task/auto-checkpoint.json' "$GI_UPGRADE_DIR/.gitignore" \
        && grep -qxF '.claude/task-store/' "$GI_UPGRADE_DIR/.gitignore"; then echo true; else echo false; fi)"
+
+# ── Scenario 7: upgrade semantics for marker-owned vs foreign adapters ──
+#
+# Regression guard for the v0.2.0 review finding: install.sh used to treat a
+# marker-present plugin as "already installed" and skip the copy, so a
+# reinstall never actually upgraded the OpenCode adapter — a stale plugin
+# from an older release survived indefinitely, contradicting the
+# upgrade-in-place contract the .claude/task-store runtime honours.
+#
+# The decisive check below is deliberately NON-VACUOUS: we install, then
+# clobber both adapter files with STALE but correctly marker-owned content
+# carrying a sentinel string, then reinstall and require the files to be
+# byte-for-byte identical to the current source (and the sentinel gone).
+# Under the old skip-if-marker-present behaviour these checks fail.
+echo ""
+echo "═══ Scenario 7: owned adapters upgrade, foreign adapters are preserved ═══"
+
+UPG_DIR=$(mktemp -d)
+FOREIGN_PLUGIN_DIR=$(mktemp -d)
+FOREIGN_HELPER_DIR=$(mktemp -d)
+SUBSTR_DIR=$(mktemp -d)
+trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR"' EXIT
+
+MARKER='// CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1'
+STALE_SENTINEL='STALE_ADAPTER_FROM_AN_OLDER_RELEASE'
+
+# ---- 7a: stale marker-owned content is replaced byte-for-byte -----------
+git init -q "$UPG_DIR"
+FORCE=1 bash "$ROOT/install.sh" "$UPG_DIR" > /tmp/opencode_upg_first.log 2>&1 || {
+  echo "install.sh (upgrade fixture) failed:"; cat /tmp/opencode_upg_first.log; exit 1;
+}
+
+UPG_PLUGIN="$UPG_DIR/.opencode/plugin/task-store.ts"
+UPG_HELPER="$UPG_DIR/.opencode/plugin/task-store/injection.ts"
+
+# Overwrite BOTH shipped files with stale-but-owned content. These carry the
+# real ownership marker on its own line, so they are unambiguously ours.
+cat > "$UPG_PLUGIN" <<EOF
+// claude-task-store: OpenCode plugin (stale v0.1.x copy)
+$MARKER
+// $STALE_SENTINEL
+export default async function () { return {}; }
+EOF
+cat > "$UPG_HELPER" <<EOF
+// claude-task-store OpenCode plugin — injection logic (stale v0.1.x copy)
+$MARKER
+// $STALE_SENTINEL
+export function buildResumeInjection() { return ""; }
+EOF
+
+# Also drop an unrelated file into the owned helper directory to prove the
+# refresh rewrites only injection.ts and never clears the directory.
+cat > "$UPG_DIR/.opencode/plugin/task-store/user-notes.md" <<'EOF'
+User's own notes inside the helper dir — must survive an upgrade.
+EOF
+UPG_NOTES="$UPG_DIR/.opencode/plugin/task-store/user-notes.md"
+UPG_NOTES_BEFORE=$(cat "$UPG_NOTES")
+
+check "fixture: stale plugin really is marker-owned before reinstall" \
+  "$(grep -qxF "$MARKER" "$UPG_PLUGIN" && echo true || echo false)"
+
+check "fixture: stale plugin differs from source before reinstall" \
+  "$(diff -q "$ROOT/opencode-plugin/task-store.ts" "$UPG_PLUGIN" >/dev/null 2>&1 && echo false || echo true)"
+
+check "fixture: stale helper differs from source before reinstall" \
+  "$(diff -q "$ROOT/opencode-plugin/task-store/injection.ts" "$UPG_HELPER" >/dev/null 2>&1 && echo false || echo true)"
+
+FORCE=1 bash "$ROOT/install.sh" "$UPG_DIR" > /tmp/opencode_upg_second.log 2>&1 || {
+  echo "install.sh (upgrade reinstall) failed:"; cat /tmp/opencode_upg_second.log; exit 1;
+}
+
+check "reinstall replaces stale owned plugin byte-for-byte with current source" \
+  "$(diff -q "$ROOT/opencode-plugin/task-store.ts" "$UPG_PLUGIN" >/dev/null && echo true || echo false)"
+
+check "reinstall replaces stale owned helper byte-for-byte with current source" \
+  "$(diff -q "$ROOT/opencode-plugin/task-store/injection.ts" "$UPG_HELPER" >/dev/null && echo true || echo false)"
+
+check "stale sentinel is gone from the upgraded plugin" \
+  "$(grep -q "$STALE_SENTINEL" "$UPG_PLUGIN" 2>/dev/null && echo false || echo true)"
+
+check "stale sentinel is gone from the upgraded helper" \
+  "$(grep -q "$STALE_SENTINEL" "$UPG_HELPER" 2>/dev/null && echo false || echo true)"
+
+check "upgrade log reports the plugin was refreshed" \
+  "$(grep -q 'Refreshed OpenCode plugin' /tmp/opencode_upg_second.log && echo true || echo false)"
+
+check "upgrade log reports the helper was refreshed" \
+  "$(grep -q 'Refreshed OpenCode plugin helper' /tmp/opencode_upg_second.log && echo true || echo false)"
+
+check "unrelated file inside the owned helper dir survives the upgrade" \
+  "$([[ "$(cat "$UPG_NOTES" 2>/dev/null)" == "$UPG_NOTES_BEFORE" ]] && echo true || echo false)"
+
+# A third run must change nothing further.
+cp "$UPG_PLUGIN" /tmp/opencode_upg_plugin_snapshot.ts
+cp "$UPG_HELPER" /tmp/opencode_upg_helper_snapshot.ts
+FORCE=1 bash "$ROOT/install.sh" "$UPG_DIR" > /tmp/opencode_upg_third.log 2>&1 || {
+  echo "install.sh (third run) failed:"; cat /tmp/opencode_upg_third.log; exit 1;
+}
+
+check "third consecutive install is idempotent for the plugin" \
+  "$(diff -q /tmp/opencode_upg_plugin_snapshot.ts "$UPG_PLUGIN" >/dev/null && echo true || echo false)"
+
+check "third consecutive install is idempotent for the helper" \
+  "$(diff -q /tmp/opencode_upg_helper_snapshot.ts "$UPG_HELPER" >/dev/null && echo true || echo false)"
+
+check "repeated installs do not duplicate the task-store plugin file" \
+  "$([[ "$(find "$UPG_DIR/.opencode/plugin" -maxdepth 1 -name 'task-store.ts' | wc -l | tr -d ' ')" == "1" ]] && echo true || echo false)"
+
+# ---- 7b: a foreign plugin at the owned path is never overwritten --------
+git init -q "$FOREIGN_PLUGIN_DIR"
+mkdir -p "$FOREIGN_PLUGIN_DIR/.opencode/plugin"
+cat > "$FOREIGN_PLUGIN_DIR/.opencode/plugin/task-store.ts" <<'EOF'
+// Someone else's plugin that happens to sit at our path.
+// No claude-task-store ownership marker anywhere in this file.
+export default async function () { return { name: "not-ours" }; }
+EOF
+cat > "$FOREIGN_PLUGIN_DIR/.opencode/plugin/other.ts" <<'EOF'
+// unrelated neighbour plugin — must survive
+export default async function () { return {}; }
+EOF
+FOREIGN_PLUGIN_BEFORE=$(cat "$FOREIGN_PLUGIN_DIR/.opencode/plugin/task-store.ts")
+FOREIGN_NEIGHBOUR_BEFORE=$(cat "$FOREIGN_PLUGIN_DIR/.opencode/plugin/other.ts")
+
+FORCE=1 bash "$ROOT/install.sh" "$FOREIGN_PLUGIN_DIR" > /tmp/opencode_foreign_plugin.log 2>&1 || {
+  echo "install.sh (foreign plugin) failed:"; cat /tmp/opencode_foreign_plugin.log; exit 1;
+}
+
+check "foreign plugin at the owned path is NOT overwritten by install" \
+  "$([[ "$(cat "$FOREIGN_PLUGIN_DIR/.opencode/plugin/task-store.ts")" == "$FOREIGN_PLUGIN_BEFORE" ]] && echo true || echo false)"
+
+check "install warns about the foreign plugin instead of silently skipping" \
+  "$(grep -q 'no claude-task-store ownership marker found' /tmp/opencode_foreign_plugin.log && echo true || echo false)"
+
+check "install does not create a helper dir next to a foreign plugin" \
+  "$([[ ! -e "$FOREIGN_PLUGIN_DIR/.opencode/plugin/task-store/injection.ts" ]] && echo true || echo false)"
+
+check "unrelated neighbour plugin survives the refused install" \
+  "$([[ "$(cat "$FOREIGN_PLUGIN_DIR/.opencode/plugin/other.ts")" == "$FOREIGN_NEIGHBOUR_BEFORE" ]] && echo true || echo false)"
+
+# ---- 7c: a foreign HELPER is preserved even when the plugin is ours -----
+git init -q "$FOREIGN_HELPER_DIR"
+FORCE=1 bash "$ROOT/install.sh" "$FOREIGN_HELPER_DIR" > /tmp/opencode_fh_first.log 2>&1 || {
+  echo "install.sh (foreign helper fixture) failed:"; cat /tmp/opencode_fh_first.log; exit 1;
+}
+FH_HELPER="$FOREIGN_HELPER_DIR/.opencode/plugin/task-store/injection.ts"
+cat > "$FH_HELPER" <<'EOF'
+// Hand-rolled replacement helper with no ownership marker.
+export function buildResumeInjection() { return "mine"; }
+EOF
+FH_HELPER_BEFORE=$(cat "$FH_HELPER")
+
+FORCE=1 bash "$ROOT/install.sh" "$FOREIGN_HELPER_DIR" > /tmp/opencode_fh_second.log 2>&1 || {
+  echo "install.sh (foreign helper reinstall) failed:"; cat /tmp/opencode_fh_second.log; exit 1;
+}
+
+check "foreign helper is NOT overwritten even when the plugin is owned" \
+  "$([[ "$(cat "$FH_HELPER")" == "$FH_HELPER_BEFORE" ]] && echo true || echo false)"
+
+check "install warns that the foreign helper was left in place" \
+  "$(grep -q 'injection.ts in place' /tmp/opencode_fh_second.log && echo true || echo false)"
+
+check "owned plugin is still refreshed alongside a foreign helper" \
+  "$(diff -q "$ROOT/opencode-plugin/task-store.ts" "$FOREIGN_HELPER_DIR/.opencode/plugin/task-store.ts" >/dev/null && echo true || echo false)"
+
+# ---- 7d: ownership is a whole-line match, not a substring match ---------
+#
+# A file that merely MENTIONS the marker (vendored docs, a prose reference,
+# a longer identifier that contains ours) must not be claimed as ours.
+git init -q "$SUBSTR_DIR"
+mkdir -p "$SUBSTR_DIR/.opencode/plugin"
+cat > "$SUBSTR_DIR/.opencode/plugin/task-store.ts" <<'EOF'
+// Someone's plugin whose docs quote our marker inline:
+// see the "CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1" marker used by claude-task-store.
+// It is NOT on a line of its own, so this file is foreign.
+export default async function () { return { name: "still-not-ours" }; }
+EOF
+SUBSTR_BEFORE=$(cat "$SUBSTR_DIR/.opencode/plugin/task-store.ts")
+
+FORCE=1 bash "$ROOT/install.sh" "$SUBSTR_DIR" > /tmp/opencode_substr_install.log 2>&1 || {
+  echo "install.sh (substring marker) failed:"; cat /tmp/opencode_substr_install.log; exit 1;
+}
+
+check "substring-only marker does NOT make a file eligible for overwrite" \
+  "$([[ "$(cat "$SUBSTR_DIR/.opencode/plugin/task-store.ts")" == "$SUBSTR_BEFORE" ]] && echo true || echo false)"
+
+bash "$ROOT/uninstall.sh" "$SUBSTR_DIR" > /tmp/opencode_substr_uninstall.log 2>&1 || {
+  echo "uninstall.sh (substring marker) failed:"; cat /tmp/opencode_substr_uninstall.log; exit 1;
+}
+
+check "substring-only marker does NOT make a file eligible for removal" \
+  "$([[ "$(cat "$SUBSTR_DIR/.opencode/plugin/task-store.ts")" == "$SUBSTR_BEFORE" ]] && echo true || echo false)"
+
+# ---- 7e: uninstall still removes exactly the owned adapter --------------
+bash "$ROOT/uninstall.sh" "$UPG_DIR" > /tmp/opencode_upg_uninstall.log 2>&1 || {
+  echo "uninstall.sh (upgraded dir) failed:"; cat /tmp/opencode_upg_uninstall.log; exit 1;
+}
+
+check "uninstall removes the refreshed owned plugin" \
+  "$([[ ! -f "$UPG_PLUGIN" ]] && echo true || echo false)"
+
+# uninstall.sh deliberately leaves the helper directory alone when the user
+# has put their own files in it — Scenario 4 covers the clean case where the
+# directory holds nothing but our injection.ts and is removed wholesale.
+check "uninstall keeps the user's file inside the helper dir (dir not empty)" \
+  "$([[ "$(cat "$UPG_NOTES" 2>/dev/null)" == "$UPG_NOTES_BEFORE" ]] && echo true || echo false)"
+
+bash "$ROOT/uninstall.sh" "$FOREIGN_PLUGIN_DIR" > /tmp/opencode_fp_uninstall.log 2>&1 || {
+  echo "uninstall.sh (foreign plugin) failed:"; cat /tmp/opencode_fp_uninstall.log; exit 1;
+}
+
+check "uninstall leaves the foreign plugin in place" \
+  "$([[ "$(cat "$FOREIGN_PLUGIN_DIR/.opencode/plugin/task-store.ts")" == "$FOREIGN_PLUGIN_BEFORE" ]] && echo true || echo false)"
 
 echo ""
 echo "═══ RESULTS ══════════════════════════════════════════════════"

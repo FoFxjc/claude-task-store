@@ -72,7 +72,6 @@
 import {
   buildResumeInjection,
   consumePendingReconciliation,
-  isDirtyWorthyTool,
   markDirtyOnTool,
   checkReconcileBoundary,
   writePendingReconciliation,

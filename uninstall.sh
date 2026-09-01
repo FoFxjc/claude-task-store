@@ -117,9 +117,15 @@ fi
 # unrelated plugin at the same path, and we never touch anything else
 # under .opencode/ (their own plugins, agents, commands, MCP servers,
 # skills, and opencode.json all stay put).
+#
+# The marker is matched as a WHOLE LINE (grep -qxF), not as a substring, so
+# this agrees exactly with the ownership test install.sh uses before it will
+# refresh a file. A file that merely mentions the identifier in prose is
+# foreign to both scripts.
+OPENCODE_MARKER='// CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1'
 OPENCODE_PLUGIN_FILE="$OPENCODE_DIR/plugin/task-store.ts"
 if [[ -f "$OPENCODE_PLUGIN_FILE" ]]; then
-  if grep -q 'CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1' "$OPENCODE_PLUGIN_FILE"; then
+  if grep -qxF "$OPENCODE_MARKER" "$OPENCODE_PLUGIN_FILE"; then
     rm -f "$OPENCODE_PLUGIN_FILE"
     echo "  ✓ Removed OpenCode plugin: .opencode/plugin/task-store.ts"
     # The helper subdirectory contains exactly one file we own — `injection.ts`.
@@ -132,7 +138,7 @@ if [[ -f "$OPENCODE_PLUGIN_FILE" ]]; then
       # Only delete the helper if BOTH (a) the helper file carries the
       # ownership marker and (b) the directory contains no other files.
       if [[ -f "$OPENCODE_HELPER_FILE" ]] \
-          && grep -q 'CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1' "$OPENCODE_HELPER_FILE" \
+          && grep -qxF "$OPENCODE_MARKER" "$OPENCODE_HELPER_FILE" \
           && [[ -z "$(ls -A "$OPENCODE_HELPER_DIR" 2>/dev/null | grep -v '^injection\.ts$')" ]]; then
         rm -rf "$OPENCODE_HELPER_DIR"
         echo "  ✓ Removed OpenCode plugin helper: .opencode/plugin/task-store/"
