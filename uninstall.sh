@@ -5,6 +5,7 @@ set -euo pipefail
 
 PROJECT_ROOT="${1:-$(pwd)}"
 CLAUDE_DIR="$PROJECT_ROOT/.claude"
+OPENCODE_DIR="$PROJECT_ROOT/.opencode"
 
 echo "→ Removing claude-task-store from: $PROJECT_ROOT"
 
@@ -108,6 +109,39 @@ with open(settings_file, 'w') as f:
     f.write('\n')
 print('  ✓ Removed task-store hooks from .claude/settings.json (unrelated hooks preserved)')
 PYEOF
+fi
+
+# Remove the OpenCode plugin — but only the file we own. The plugin file
+# carries a literal ownership marker comment that install.sh writes; we
+# grep for it before removing. This means we never delete a user's
+# unrelated plugin at the same path, and we never touch anything else
+# under .opencode/ (their own plugins, agents, commands, MCP servers,
+# skills, and opencode.json all stay put).
+OPENCODE_PLUGIN_FILE="$OPENCODE_DIR/plugin/task-store.ts"
+if [[ -f "$OPENCODE_PLUGIN_FILE" ]]; then
+  if grep -q 'CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1' "$OPENCODE_PLUGIN_FILE"; then
+    rm -f "$OPENCODE_PLUGIN_FILE"
+    echo "  ✓ Removed OpenCode plugin: .opencode/plugin/task-store.ts"
+    # The helper subdirectory contains exactly one file we own — `injection.ts`.
+    # If the user hasn't added their own files into the directory, remove it
+    # so we don't leave an empty .opencode/plugin/task-store/ behind. If they
+    # have added files, leave the directory alone (their files are theirs).
+    OPENCODE_HELPER_DIR="$OPENCODE_DIR/plugin/task-store"
+    OPENCODE_HELPER_FILE="$OPENCODE_HELPER_DIR/injection.ts"
+    if [[ -d "$OPENCODE_HELPER_DIR" ]]; then
+      # Only delete the helper if BOTH (a) the helper file carries the
+      # ownership marker and (b) the directory contains no other files.
+      if [[ -f "$OPENCODE_HELPER_FILE" ]] \
+          && grep -q 'CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1' "$OPENCODE_HELPER_FILE" \
+          && [[ -z "$(ls -A "$OPENCODE_HELPER_DIR" 2>/dev/null | grep -v '^injection\.ts$')" ]]; then
+        rm -rf "$OPENCODE_HELPER_DIR"
+        echo "  ✓ Removed OpenCode plugin helper: .opencode/plugin/task-store/"
+      fi
+    fi
+  else
+    echo "  ⚠  Left $OPENCODE_PLUGIN_FILE in place — no claude-task-store ownership marker found."
+    echo "     Remove it by hand if you meant to."
+  fi
 fi
 
 echo "  ✓ claude-task-store removed"

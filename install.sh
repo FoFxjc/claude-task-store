@@ -281,11 +281,76 @@ else
 # .claude/task-store/ is build output copied in by install.sh; re-created by
 # re-running the installer, so it does not belong in version control
 .claude/task-store/
+# .opencode/plugin/task-store.ts is the auto-discovered OpenCode plugin;
+# like the Claude Code runtime above, it is re-created by the installer.
+.opencode/plugin/task-store.ts
 EOF
   echo "  ✓ Updated .gitignore (history.jsonl ignored, state.json committable)"
 fi
 
-# ── 4. Done ──────────────────────────────────────────────────────────────────
+# ── 4. OpenCode integration (thin adapter) ──────────────────────────────────
+#
+# OpenCode (>= 1.x) auto-discovers any *.ts or *.js file under
+# `.opencode/plugin/`. We copy the canonical task-store plugin there; it
+# loads the project-local CLI runtime already installed in section 2, so
+# no duplicate code, no extra build step, no change to the target project's
+# package.json.
+#
+# The existing Claude-compatible SKILL.md at `.claude/skills/task-store/`
+# is also auto-discovered by OpenCode as an "external skill" — we do NOT
+# create a duplicate `.opencode/skills/task-store/SKILL.md`. The plugin
+# below handles fresh-session resume injection.
+#
+# If the user explicitly opted out of OpenCode integration, skip this.
+# Anything else under `.opencode/` (their own agents, commands, MCP
+# servers, plugin configs) is never touched.
+
+if [[ "${TASK_STORE_SKIP_OPENCODE:-0}" == "1" ]]; then
+  echo ""
+  echo "  • OpenCode integration skipped (TASK_STORE_SKIP_OPENCODE=1)"
+elif [[ ! -f "$SCRIPT_DIR/opencode-plugin/task-store.ts" ]]; then
+  echo ""
+  echo "  • OpenCode plugin source missing at $SCRIPT_DIR/opencode-plugin/"
+  echo "    (older claude-task-store checkout). Skipping OpenCode integration."
+else
+  echo ""
+  echo "→ Setting up OpenCode plugin in: $PROJECT_ROOT"
+
+  OPENCODE_PLUGIN_DIR="$PROJECT_ROOT/.opencode/plugin"
+  OPENCODE_PLUGIN_FILE="$OPENCODE_PLUGIN_DIR/task-store.ts"
+  OPENCODE_PLUGIN_HELPER_DIR="$OPENCODE_PLUGIN_DIR/task-store"
+  OPENCODE_PLUGIN_HELPER_FILE="$OPENCODE_PLUGIN_HELPER_DIR/injection.ts"
+
+  mkdir -p "$OPENCODE_PLUGIN_DIR"
+
+  # Only write if the file does not already carry the ownership marker, so
+  # we never overwrite a user's manual edits and we never overwrite a
+  # claude-task-store install we did ourselves — re-running the installer
+  # upgrades in place, which is the same contract as the Claude Code side.
+  if [[ -f "$OPENCODE_PLUGIN_FILE" ]] \
+      && grep -q 'CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1' "$OPENCODE_PLUGIN_FILE"; then
+    echo "  ✓ OpenCode plugin already installed (ownership marker present)"
+  else
+    cp "$SCRIPT_DIR/opencode-plugin/task-store.ts" "$OPENCODE_PLUGIN_FILE"
+    # The plugin imports the helper from a sibling subdirectory. OpenCode
+    # does NOT auto-discover .ts files in subdirectories of .opencode/plugin/
+    # (verified empirically: see tests/opencode_install_test.sh and the
+    # opencode discovery rules in customize-opencode), so placing
+    # `injection.ts` under `task-store/` keeps it out of OpenCode's
+    # plugin loader while remaining importable from `task-store.ts`.
+    mkdir -p "$OPENCODE_PLUGIN_HELPER_DIR"
+    cp "$SCRIPT_DIR/opencode-plugin/task-store/injection.ts" "$OPENCODE_PLUGIN_HELPER_FILE"
+    echo "  ✓ Installed OpenCode plugin: .opencode/plugin/task-store.ts"
+    echo "    (auto-discovered on next OpenCode launch; no opencode.json change)"
+  fi
+
+  # Note: we intentionally do NOT touch opencode.json, .opencode/agent/,
+  # .opencode/command/, .opencode/skills/, or any other .opencode/* file.
+  # The existing .claude/skills/task-store/SKILL.md is already auto-loaded
+  # by OpenCode as an "external skill", so no skill duplication is needed.
+fi
+
+# ── 5. Done ──────────────────────────────────────────────────────────────────
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
@@ -297,7 +362,8 @@ echo ""
 echo "  1. Initialize a task store for your project:"
 echo "     task-store init \"Your goal here\" \"Task 1\" \"Task 2\" ..."
 echo ""
-echo "  2. Start Claude Code — state will be injected automatically at session start."
+echo "  2. Start Claude Code OR OpenCode in this project — state will be"
+echo "     injected automatically at session start."
 echo ""
 echo "  3. Use these commands during development:"
 echo "     task-store status           # show current state"
@@ -308,5 +374,8 @@ echo "     task-store next \"action\"   # set next action before ending session"
 echo ""
 echo "  4. To enable cross-session handoff via git:"
 echo "     git add .claude-task/state.json"
+echo ""
+echo "  5. To opt out of OpenCode integration on future installs:"
+echo "     TASK_STORE_SKIP_OPENCODE=1 ./install.sh /path/to/project"
 echo ""
 echo "  See README.md for full documentation."

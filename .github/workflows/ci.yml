@@ -56,3 +56,18 @@ jobs:
 
       - name: Auto-checkpoint suite
         run: bash tests/autocheckpoint_test.sh
+
+      - name: OpenCode install/uninstall regression
+        run: bash tests/opencode_install_test.sh
+
+      # The OpenCode resume smoke suite below requires a working `opencode`
+      # binary on PATH. The CI runner doesn't ship one, so it is wired
+      # up to skip cleanly when the binary is absent. It runs locally
+      # and via developer machines that have OpenCode installed.
+      - name: OpenCode resume-injection smoke (skips if opencode is absent)
+        run: |
+          if command -v opencode >/dev/null 2>&1; then
+            bash tests/opencode_smoke_test.sh || [ $? -eq 77 ]
+          else
+            echo "opencode not installed; skipping OpenCode resume smoke"
+          fi

@@ -1,6 +1,6 @@
 # claude-task-store
 
-Persistent execution checkpoints for Claude Code and coding agents.
+Persistent execution checkpoints for Claude Code, OpenCode, and coding agents.
 
 **Your context window should not be your task lifetime.**
 
@@ -249,7 +249,13 @@ State lives in two plain files inside your project:
 └── history.jsonl   ← Append-only audit trail (gitignored by default)
 ```
 
-At session start, a compact summary is automatically injected into Claude's context via a `SessionStart` hook. Claude reads the current task, completed work, failed approaches, and the explicit next action — and continues without re-reading transcripts.
+At session start, a compact summary is automatically injected into the agent's
+context. The exact hook surface differs per host — Claude Code uses a
+`SessionStart` hook, OpenCode uses an auto-discovered plugin that hooks
+`experimental.chat.system.transform` — but both call the same `task-store resume`
+CLI and project the same canonical output. The agent reads the current task,
+completed work, failed approaches, and the explicit next action — and continues
+without re-reading transcripts.
 
 ---
 
@@ -272,8 +278,8 @@ resume renderer without anything else on your machine — no global npm install,
 no PATH shim, and no changes to your project's `package.json`. The installed
 project is self-contained: you can delete this checkout afterwards.
 
-Start Claude Code in that project and the full resume projection is injected at
-session start.
+Start Claude Code or OpenCode in that project and the full resume projection is
+injected at session start.
 
 The installer:
 1. Builds the TypeScript CLI
@@ -281,17 +287,23 @@ The installer:
 3. Copies the skill to `.claude/skills/task-store/SKILL.md`
 4. Copies hook scripts to `.claude/hooks/scripts/`
 5. Merges hook config into `.claude/settings.json` — only claude-task-store's own hook entries are ever added or removed (matched by exact command path, not substring), so any other hooks you or another plugin registered for `SessionStart`/`PreCompact`/`SessionEnd` are left untouched. A backup is written to `.claude/settings.json.bak` before each rewrite.
-6. Updates `.gitignore`
+6. Copies the OpenCode adapter (a thin auto-discovered plugin) to `.opencode/plugin/task-store.ts` plus a sibling helper module in `.opencode/plugin/task-store/`. Nothing else under `.opencode/` is touched; no `opencode.json` change is required.
+7. Updates `.gitignore`
 
-The `SessionStart` hook resolves the CLI in this order:
+The `SessionStart` hook (Claude Code) resolves the CLI in this order:
 
 1. the project-local runtime at `.claude/task-store/` (installed above)
 2. `task-store` on `PATH`
 3. a minimal goal/next-action fallback, used only when neither is available
    (for example, if Node is missing) and clearly labelled as such
 
+The OpenCode plugin uses the same project-local runtime directly and does not
+fall back to PATH — install.sh always installs `.claude/task-store/` and the
+plugin reads it. To opt out of OpenCode integration in a future install, run
+`TASK_STORE_SKIP_OPENCODE=1 ./install.sh /path/to/project`.
+
 **Optional — `task-store` on your PATH.** Only needed if you want to run the CLI
-by hand from any directory; the hooks never require it:
+by hand from any directory; the hooks and the OpenCode plugin never require it:
 
 ```bash
 TASK_STORE_INSTALL_GLOBAL=1 ./install.sh /path/to/your/project
@@ -302,7 +314,7 @@ TASK_STORE_INSTALL_GLOBAL=1 ./install.sh /path/to/your/project
 ```bash
 ./uninstall.sh /path/to/your/project
 ```
-Uninstalling backs up `.claude/settings.json` to `.claude/settings.json.bak` first and removes only claude-task-store's own hook entries, in the same exact-match-safe way as install. It also removes the project-local runtime at `.claude/task-store/`, but only after confirming that directory carries claude-task-store's own marker. Your task state in `.claude-task/` is left in place.
+Uninstalling backs up `.claude/settings.json` to `.claude/settings.json.bak` first and removes only claude-task-store's own hook entries, in the same exact-match-safe way as install. It also removes the project-local runtime at `.claude/task-store/`, but only after confirming that directory carries claude-task-store's own marker. It removes the OpenCode plugin at `.opencode/plugin/task-store.ts` (and its sibling helper subdirectory when it contains no other files), but only when the plugin file carries claude-task-store's ownership marker. Anything else under `.claude/` or `.opencode/` — your own hooks, agents, commands, plugins, MCP servers, skills, and `opencode.json` — is left untouched. Your task state in `.claude-task/` is left in place.
 
 ---
 
@@ -389,6 +401,53 @@ After installation, these hooks run automatically:
 The last two are installed unconditionally but are **inert unless you opt in**: each exits in a few milliseconds of shell, before starting Node, when `.claude-task/config.json` is absent or not set to `conservative`. See [Optional auto-checkpoint mode](#optional-auto-checkpoint-mode).
 
 The `/task-store` skill is also installed. Claude uses it when starting long-running tasks, after milestones, and before ending sessions. Invoke directly with `/task-store`.
+
+---
+
+## OpenCode integration
+
+A thin auto-discovered OpenCode plugin is installed alongside the Claude Code
+side. It uses OpenCode's `experimental.chat.system.transform` hook to push the
+same `task-store resume` projection into the system prompt for every chat
+call — including the first user message of a fresh session, which is the
+OpenCode analog of Claude Code's `SessionStart`. No `opencode.json` change is
+required.
+
+Architecture:
+
+```
+OpenCode session
+  ↓
+.opencode/plugin/task-store.ts        (auto-discovered, ~75 LOC)
+  ↓
+experimental.chat.system.transform
+  ↓
+node .claude/task-store/bin/task-store.js resume --root <worktree>
+  ↓
+output.system.push(...)
+```
+
+The plugin contains no task-state logic of its own. It is a thin adapter that
+reuses the canonical CLI installed by step 2 of the installer. The same
+Claude-compatible SKILL.md at `.claude/skills/task-store/` is also discovered
+by OpenCode as an "external skill" (OpenCode auto-loads SKILL.md files from
+both `~/.claude/skills/` and `.claude/skills/`), so no duplicate
+`.opencode/skills/` copy is needed.
+
+Around automatic compaction: the plugin intentionally does not mutate state
+at compaction time. `experimental.session.compacting` is registered as a
+no-op — the task store is the source of truth for execution state, and the
+next chat call re-injects fresh state via `system.transform`, so the
+conversation summary loses nothing that matters.
+
+To opt out of OpenCode integration in a future install, run
+`TASK_STORE_SKIP_OPENCODE=1 ./install.sh /path/to/project`. The Claude Code
+side is unaffected.
+
+The plugin's behavior is verified end-to-end by `tests/opencode_smoke_test.sh`,
+which runs the locally installed `opencode` binary against a temp project
+with state and asserts the resume projection is pushed into the system
+prompt.
 
 ---
 
@@ -484,6 +543,13 @@ The core knows nothing about Claude Code event names. Adapters map their own lif
 The state format is model-neutral. Any agent that can run shell commands can read and update the checkpoint using the CLI alone — no Claude Code skills or hooks required.
 
 Validated: Claude Code ↔ Codex handoffs in both directions. See [`docs/phase3-cross-agent-handoff.md`](docs/phase3-cross-agent-handoff.md).
+
+Claude Code and OpenCode can both resume from the same execution checkpoint: the
+CLI runtime, state schema, resume renderer, and trust hierarchy are shared, and
+the only host-specific code is the thin adapter (Claude Code hooks vs the
+OpenCode plugin). Handoff between hosts is therefore just "open the same
+project in the other host"; the state in `.claude-task/state.json` is the
+bridge, with no extra migration step.
 
 ---
 
@@ -609,17 +675,25 @@ See [`SECURITY.md`](SECURITY.md) for full details.
 ```bash
 npm install
 npm run build
-npm test                           # Unit tests (31)
+npm run typecheck                  # tsc --noEmit on src/ AND opencode-plugin/
+npm test                           # Unit tests
 bash tests/acceptance.sh           # Cross-session recovery test
 bash tests/phase2/pressure_test.sh # 22-session pressure test
 bash tests/phase3/handoff_test.sh  # Cross-agent handoff test
 bash tests/autocheckpoint_test.sh  # Auto-checkpoint mode regression
+bash tests/opencode_install_test.sh     # OpenCode install/uninstall regression
+bash tests/opencode_smoke_test.sh       # Real OpenCode resume-injection smoke
 ```
 
-324 automated checks pass across unit, acceptance, and integration test suites
-(unit 69, acceptance 22, Phase 2 reliability 67, Phase 3 handoff 22, installer
-regression 18, path safety 33, project-local runtime 33, auto-checkpoint 60).
-CI runs all of them on Node 18/20/22.
+The OpenCode smoke test needs a working `opencode` binary on `PATH`. It
+skips cleanly (`exit 77`) if it isn't installed; the other suites are pure
+shell and run anywhere.
+
+383 automated checks pass across unit, acceptance, and integration test suites
+(unit 87, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
+installer regression 17, path safety 32, project-local runtime 32,
+auto-checkpoint 60, OpenCode install regression 27, OpenCode resume smoke 16).
+CI runs the non-OpenCode suites on Node 18/20/22.
 
 ---
 
