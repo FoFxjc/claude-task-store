@@ -16,7 +16,7 @@
 #   1. install.sh places the adapter at the path OpenCode auto-discovers
 #   2. install.sh copies the plugin file with the ownership marker intact
 #   3. Re-running install.sh is idempotent (no duplicate plugin copy)
-#   4. Unrelated .opencode/ files (plugin, agent, command, opencode.json)
+#   4. Unrelated .opencode/ files (plugin, agents, commands, opencode.json)
 #      survive install + uninstall
 #   5. TASK_STORE_SKIP_OPENCODE=1 skips the .opencode/ copy
 #   6. Uninstall removes only the task-store plugin (ownership marker
@@ -31,6 +31,18 @@
 #      current shipped source), while a foreign file at either owned path is
 #      preserved untouched. Ownership is a whole-line marker match, so a file
 #      that only mentions the marker as a substring is treated as foreign.
+#  11. uninstall.sh runs to completion under `set -euo pipefail` when the
+#      helper directory holds nothing but our injection.ts, and the owned
+#      helper directory is removed in that case.
+#  12. The helper-directory emptiness test is not fooled by a filename that
+#      embeds a newline: a foreign entry named "injection.ts<LF>injection.ts"
+#      is preserved. This check FAILS against the previous
+#      `ls -A | grep -v '^injection\.ts$'` implementation, which read that
+#      directory as empty and rm -rf'd the user's file.
+#  13. The installed tree is self-consistent: every relative import in the
+#      installed adapter names a file that exists at that exact path and
+#      extension, and no import reaches outside node: built-ins. This pins
+#      the packaging contract without needing an opencode binary.
 
 set -euo pipefail
 
@@ -563,6 +575,122 @@ check "uninstall fully removed the owned helper dir in that case" \
 
 check "uninstall reached its final summary line (did not abort early)" \
   "$(grep -q 'claude-task-store removed' /tmp/opencode_pf_uninstall.log && echo true || echo false)"
+
+# ── Scenario 8: helper-dir emptiness test vs. a newline-bearing filename ────
+#
+# This is the regression that DISCRIMINATES the current `find -print -quit`
+# emptiness test from the `ls -A | grep -v '^injection\.ts$'` form it replaced.
+#
+# `ls -A` emits one LINE per directory entry, so a filename containing a
+# newline is split across several lines. A foreign file literally named
+#
+#     injection.ts<LF>injection.ts
+#
+# contributes only lines that `grep -v '^injection\.ts$'` discards. The old
+# pipeline therefore saw an EMPTY result for a directory that is not empty and
+# ran `rm -rf` over the user's file. `find` matches `! -name` against the whole
+# filename, sees the foreign entry, and keeps the directory.
+#
+# Run against the pre-fix uninstall.sh this scenario fails on the
+# "preserves the newline-named foreign file" check.
+echo ""
+echo "═══ Scenario 8: newline-bearing foreign filename in the helper dir ═══"
+
+NEWLINE_DIR=$(mktemp -d)
+trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR" "$PIPEFAIL_DIR" "$NEWLINE_DIR"' EXIT
+
+git init -q "$NEWLINE_DIR"
+FORCE=1 bash "$ROOT/install.sh" "$NEWLINE_DIR" > /tmp/opencode_nl_install.log 2>&1 || {
+  echo "install.sh (newline fixture) failed:"; cat /tmp/opencode_nl_install.log; exit 1;
+}
+
+NL_HELPER_DIR="$NEWLINE_DIR/.opencode/plugin/task-store"
+# A single foreign file whose NAME embeds a newline and whose every line
+# happens to read exactly "injection.ts".
+NL_FOREIGN_NAME="$(printf 'injection.ts\ninjection.ts')"
+printf 'user data that must survive\n' > "$NL_HELPER_DIR/$NL_FOREIGN_NAME"
+
+check "fixture: helper dir holds our injection.ts plus one newline-named foreign file" \
+  "$([[ -f "$NL_HELPER_DIR/injection.ts" && -f "$NL_HELPER_DIR/$NL_FOREIGN_NAME" ]] && echo true || echo false)"
+
+# Demonstrate the discrimination directly: the old pipeline reports "empty".
+check "pre-fix 'ls -A | grep -v' emptiness test wrongly reports this dir empty" \
+  "$([[ -z "$(ls -A "$NL_HELPER_DIR" 2>/dev/null | grep -v '^injection\.ts$')" ]] && echo true || echo false)"
+
+NL_CODE=0
+bash "$ROOT/uninstall.sh" "$NEWLINE_DIR" > /tmp/opencode_nl_uninstall.log 2>&1 || NL_CODE=$?
+
+check "uninstall exit status is 0 with a newline-named entry present" \
+  "$([[ "$NL_CODE" == "0" ]] && echo true || echo false)"
+
+check "uninstall removes the owned plugin file" \
+  "$([[ ! -f "$NEWLINE_DIR/.opencode/plugin/task-store.ts" ]] && echo true || echo false)"
+
+# THE discriminating assertion. Pre-fix: the directory (and this file) is
+# rm -rf'd. Post-fix: find sees the foreign entry and the directory stays.
+check "uninstall preserves the newline-named foreign file (helper dir kept)" \
+  "$([[ -d "$NL_HELPER_DIR" && -f "$NL_HELPER_DIR/$NL_FOREIGN_NAME" ]] && echo true || echo false)"
+
+check "preserved foreign file still has its original contents" \
+  "$([[ "$(cat "$NL_HELPER_DIR/$NL_FOREIGN_NAME" 2>/dev/null)" == "user data that must survive" ]] && echo true || echo false)"
+
+check "uninstall reached its final summary line with a newline-named entry" \
+  "$(grep -q 'claude-task-store removed' /tmp/opencode_nl_uninstall.log && echo true || echo false)"
+
+# ── Scenario 9: installed-tree module resolution ───────────────────────────
+#
+# The adapter is loaded from source by OpenCode's Bun runtime, so every
+# relative import specifier in the INSTALLED plugin must name a file that
+# actually exists in the INSTALLED tree, extension included. A specifier such
+# as "./task-store/injection.js" resolves nowhere on disk and only loads
+# because Bun happens to remap a missing .js to a sibling .ts — a property of
+# one runtime, not a packaging contract. This check needs no opencode binary,
+# so it guards the contract on every CI run.
+echo ""
+echo "═══ Scenario 9: installed tree is self-consistent (module resolution) ═══"
+
+RESOLVE_DIR=$(mktemp -d)
+trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR" "$PIPEFAIL_DIR" "$NEWLINE_DIR" "$RESOLVE_DIR"' EXIT
+
+git init -q "$RESOLVE_DIR"
+FORCE=1 bash "$ROOT/install.sh" "$RESOLVE_DIR" > /tmp/opencode_rs_install.log 2>&1 || {
+  echo "install.sh (resolution fixture) failed:"; cat /tmp/opencode_rs_install.log; exit 1;
+}
+
+RS_PLUGIN_DIR="$RESOLVE_DIR/.opencode/plugin"
+
+# Every relative specifier in every installed adapter file must exist verbatim.
+RS_MISSING=""
+while IFS= read -r rs_file; do
+  rs_base="$(dirname "$rs_file")"
+  while IFS= read -r rs_spec; do
+    [[ -z "$rs_spec" ]] && continue
+    if [[ ! -f "$rs_base/$rs_spec" ]]; then
+      RS_MISSING="$RS_MISSING $rs_file -> $rs_spec"
+    fi
+  done < <(grep -oE 'from "\.[^"]*"' "$rs_file" | sed 's/^from "//; s/"$//')
+done < <(find "$RS_PLUGIN_DIR" -name '*.ts' -type f)
+
+check "every relative import in the installed adapter resolves to a real file" \
+  "$([[ -z "$RS_MISSING" ]] && echo true || echo false)"
+if [[ -n "$RS_MISSING" ]]; then
+  echo "      unresolved:$RS_MISSING"
+fi
+
+# Pin the specific specifier, so a silent change back to a .js path is caught
+# rather than merely producing a still-resolving different layout.
+check "installed plugin imports the helper by its real .ts filename" \
+  "$(grep -q 'from "./task-store/injection.ts"' "$RS_PLUGIN_DIR/task-store.ts" && echo true || echo false)"
+
+check "installed plugin contains no .js import specifier" \
+  "$(grep -qE 'from "\.[^"]*\.js"' "$RS_PLUGIN_DIR/task-store.ts" && echo false || echo true)"
+
+# Non-relative specifiers must be node: built-ins only — install.sh never
+# touches the target project's package.json, so an npm import would not
+# resolve inside OpenCode's loader.
+check "installed adapter imports no npm packages (node: built-ins only)" \
+  "$(if find "$RS_PLUGIN_DIR" -name '*.ts' -type f -exec grep -hoE 'from "[^".][^"]*"' {} + \
+        | sed 's/^from "//; s/"$//' | grep -qvE '^node:'; then echo false; else echo true; fi)"
 
 bash "$ROOT/uninstall.sh" "$FOREIGN_PLUGIN_DIR" > /tmp/opencode_fp_uninstall.log 2>&1 || {
   echo "uninstall.sh (foreign plugin) failed:"; cat /tmp/opencode_fp_uninstall.log; exit 1;

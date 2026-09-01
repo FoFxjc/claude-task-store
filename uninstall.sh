@@ -136,12 +136,32 @@ if [[ -f "$OPENCODE_PLUGIN_FILE" ]]; then
     OPENCODE_HELPER_FILE="$OPENCODE_HELPER_DIR/injection.ts"
     if [[ -d "$OPENCODE_HELPER_DIR" ]]; then
       # Only delete the helper if BOTH (a) the helper file carries the
-      # ownership marker and (b) the directory contains no other files.
+      # ownership marker and (b) the directory contains no other entry.
       #
-      # `find -print -quit` rather than `ls -A | grep -v`: find exits 0 whether
-      # or not it matches, so the emptiness test never depends on a pipeline's
-      # exit status, and it is not confused by unusual filenames. Like `ls -A`
-      # it considers dotfiles, and it stops at the first foreign entry.
+      # `find -print -quit` rather than the earlier `ls -A | grep -v`, for two
+      # reasons:
+      #
+      #   1. Exit status. Under `set -euo pipefail` a `grep -v` that filters
+      #      away every line exits 1. Here the pipeline sits inside an
+      #      `if` condition, where bash suppresses errexit, so it did not in
+      #      fact abort the uninstall — but it is a latent trap: moving this
+      #      test into an assignment or a plain statement WOULD abort, and
+      #      the emptiness of a directory should never be entangled with a
+      #      pipeline's exit status in the first place. `find` exits 0
+      #      whether or not it matches.
+      #
+      #   2. Ownership safety — the real bug. `ls -A` emits one LINE per
+      #      entry, so a filename containing a newline is split into several
+      #      lines. A foreign file literally named "injection.ts\ninjection.ts"
+      #      contributes only lines that `grep -v '^injection\.ts$'` discards,
+      #      making a non-empty directory look empty and taking the user's
+      #      file with the `rm -rf`. `find` matches `! -name` against the
+      #      whole filename, so that file is seen and the directory is kept.
+      #      tests/opencode_install_test.sh pins this case; it fails against
+      #      the `ls | grep` form.
+      #
+      # Like `ls -A`, find here considers dotfiles, and `-quit` stops it at
+      # the first foreign entry.
       if [[ -f "$OPENCODE_HELPER_FILE" ]] \
           && grep -qxF "$OPENCODE_MARKER" "$OPENCODE_HELPER_FILE" \
           && [[ -z "$(find "$OPENCODE_HELPER_DIR" -mindepth 1 -maxdepth 1 \

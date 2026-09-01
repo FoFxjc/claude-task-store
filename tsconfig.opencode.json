@@ -6,6 +6,13 @@
     "noEmit": true,
     "strict": true,
     "isolatedModules": true,
+    // The adapter is typechecked, never emitted (noEmit above), and it is
+    // loaded from source by OpenCode's Bun runtime. Its import specifiers
+    // therefore name the real installed files (`./task-store/injection.ts`)
+    // rather than a `.js` path that exists nowhere on disk. That is only
+    // expressible with allowImportingTsExtensions, which TypeScript permits
+    // exactly in this noEmit shape.
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "types": ["node"]

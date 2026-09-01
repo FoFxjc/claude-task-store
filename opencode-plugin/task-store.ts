@@ -10,6 +10,31 @@
 // candidate Plugin — so helper functions must live in a separate sibling
 // module (`./task-store/injection.ts`) that this file imports.
 //
+// Packaging contract — the import specifier names the file that is actually
+// installed, extension included:
+//
+//   install.sh copies      opencode-plugin/task-store/injection.ts
+//                     ->   .opencode/plugin/task-store/injection.ts
+//   this file imports      ./task-store/injection.ts
+//
+// So the specifier resolves to a path that exists on disk verbatim, with no
+// reliance on a runtime rewriting `.js` to `.ts`. OpenCode 1.18.25 runs
+// plugins under Bun, and Bun does happen to remap a missing `.js` to a
+// sibling `.ts` — but that is an implementation detail of one runtime, not a
+// contract, and it makes the installed tree self-inconsistent (an import of
+// a file that is not there). Naming the real extension is deterministic
+// under Bun, under `bun build`, and under anything else that can read the
+// directory. Verified against the real binary: the plugin loads and the
+// hooks fire with no module-resolution warning or error.
+//
+// This costs one tsconfig flag (`allowImportingTsExtensions`, valid because
+// tsconfig.opencode.json is noEmit — the adapter is typechecked, never
+// compiled) and no bundler, no build step, and no duplicated logic.
+//
+// Discovery, verified against the opencode 1.18.25 binary's own glob:
+//   `.opencode/{plugin,plugins}/*.{ts,js}` — a single level, so the helper
+//   under `task-store/` is imported but never itself loaded as a plugin.
+//
 // Lifecycle:
 //   - tool.execute.after
 //       Cheap, runs after every tool call. For tool names that are not in
@@ -75,7 +100,7 @@ import {
   markDirtyOnTool,
   checkReconcileBoundary,
   writePendingReconciliation,
-} from "./task-store/injection.js";
+} from "./task-store/injection.ts";
 
 interface PluginInput {
   // OpenCode's PluginInput exposes both worktree (project root) and

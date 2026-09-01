@@ -376,12 +376,18 @@ else
     cp "$SCRIPT_DIR/opencode-plugin/task-store.ts" "$OPENCODE_PLUGIN_FILE"
     echo "  ✓ $OPENCODE_PLUGIN_ACTION OpenCode plugin: .opencode/plugin/task-store.ts"
 
-    # The plugin imports the helper from a sibling subdirectory. OpenCode
-    # does NOT auto-discover .ts files in subdirectories of .opencode/plugin/
-    # (verified empirically: see tests/opencode_install_test.sh and the
-    # opencode discovery rules in customize-opencode), so placing
-    # `injection.ts` under `task-store/` keeps it out of OpenCode's
-    # plugin loader while remaining importable from `task-store.ts`.
+    # The plugin imports the helper from a sibling subdirectory. OpenCode's
+    # plugin discovery glob is `.opencode/{plugin,plugins}/*.{ts,js}` — a
+    # SINGLE level (read from the opencode 1.18.25 binary) — so a .ts file
+    # in a subdirectory of .opencode/plugin/ is never auto-loaded as a
+    # plugin. Placing `injection.ts` under `task-store/` therefore keeps it
+    # out of OpenCode's plugin loader while remaining importable from
+    # `task-store.ts`.
+    #
+    # The extension here is load-bearing: task-store.ts imports
+    # `./task-store/injection.ts`, naming this exact installed filename, so
+    # the installed tree is self-consistent and nothing depends on a
+    # runtime silently rewriting a `.js` specifier to a `.ts` file.
     #
     # The helper gets the same three-way ownership decision as the plugin,
     # evaluated independently: a user who hand-rolled their own injection.ts
@@ -404,8 +410,23 @@ else
     echo "    (auto-discovered on next OpenCode launch; no opencode.json change)"
   fi
 
-  # Note: we intentionally do NOT touch opencode.json, .opencode/agent/,
-  # .opencode/command/, .opencode/skills/, or any other .opencode/* file.
+  # Note: we intentionally do NOT touch opencode.json or any other
+  # .opencode/* file. OpenCode accepts BOTH the singular and the plural
+  # spelling of each customization directory — its discovery globs (read
+  # from the opencode 1.18.25 binary) are:
+  #
+  #   .opencode/{agent,agents}/**/*.md
+  #   .opencode/{command,commands}/**/*.md
+  #   .opencode/{plugin,plugins}/*.{ts,js}
+  #   .opencode/{skill,skills}/**/SKILL.md
+  #   .opencode/{tool,tools}/*.{js,ts}
+  #
+  # so a user's agents, commands, skills, tools and their own plugins are
+  # left alone under either spelling. Note the plugin glob is a SINGLE
+  # level (`/*.`, not `/**/*.`): that is why the helper this installer
+  # writes to .opencode/plugin/task-store/injection.ts is importable by the
+  # adapter but is never itself loaded as a plugin.
+  #
   # The existing .claude/skills/task-store/SKILL.md is already auto-loaded
   # by OpenCode as an "external skill", so no skill duplication is needed.
 fi

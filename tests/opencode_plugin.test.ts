@@ -316,6 +316,36 @@ describe('OpenCode plugin source — structural', () => {
     }
   });
 
+  it('imports only relative paths that exist on disk with that exact extension', async () => {
+    // Packaging contract. install.sh copies opencode-plugin/task-store.ts and
+    // opencode-plugin/task-store/injection.ts into .opencode/plugin/ verbatim,
+    // preserving their relative layout. So every relative import specifier in
+    // the plugin must resolve to a real file AS WRITTEN — extension included.
+    //
+    // A specifier like "./task-store/injection.js" would point at a path that
+    // exists in neither the repo nor the installed tree; it only happens to
+    // load because Bun remaps a missing .js to a sibling .ts. That is one
+    // runtime's behaviour, not a contract, so this test refuses to depend on
+    // it and fails if a specifier ever stops naming a real file.
+    const fs = await import('node:fs/promises');
+    const pluginDir = join(process.cwd(), 'opencode-plugin');
+    const src = await fs.readFile(join(pluginDir, 'task-store.ts'), 'utf8');
+
+    const re = /import\s+(?:[\w*${},\s]+\s+from\s+)?["']([^"']+)["']/g;
+    const relative: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src)) !== null) {
+      if (m[1].startsWith('.')) relative.push(m[1]);
+    }
+
+    expect(relative).toEqual(['./task-store/injection.ts']);
+
+    for (const spec of relative) {
+      const resolved = join(pluginDir, spec);
+      await expect(fs.access(resolved)).resolves.toBeUndefined();
+    }
+  });
+
   it('exports a default plugin function', async () => {
     const mod = await import('../opencode-plugin/task-store.js');
     expect(typeof mod.default).toBe('function');
