@@ -720,6 +720,122 @@ bash "$ROOT/uninstall.sh" "$FOREIGN_PLUGIN_DIR" > /tmp/opencode_fp_uninstall.log
 check "uninstall leaves the foreign plugin in place" \
   "$([[ "$(cat "$FOREIGN_PLUGIN_DIR/.opencode/plugin/task-store.ts")" == "$FOREIGN_PLUGIN_BEFORE" ]] && echo true || echo false)"
 
+# ── Scenario 10: helper cleanup — owned file, foreign siblings, error paths ─
+#
+# uninstall.sh removes the helper in two independent steps: the owned
+# injection.ts is removed on its own ownership marker, and the directory is
+# then removed only if it is genuinely empty. `rmdir` is the primitive for the
+# second step precisely because it cannot delete a non-empty directory and
+# cannot mistake an error for emptiness.
+echo ""
+echo "═══ Scenario 10: helper cleanup (owned file / foreign siblings / errors) ═══"
+
+HC_A_DIR=$(mktemp -d); HC_B_DIR=$(mktemp -d); HC_C_DIR=$(mktemp -d)
+trap 'chmod -R u+rwX "$HC_C_DIR" 2>/dev/null; rm -rf "$SNAP_DIR" "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR" "$PIPEFAIL_DIR" "$NEWLINE_DIR" "$RESOLVE_DIR" "$HC_A_DIR" "$HC_B_DIR" "$HC_C_DIR"' EXIT
+
+# ── 10a: owned helper removed even when a foreign sibling is present ───────
+# Previously the owned injection.ts was left behind whenever the user had put
+# anything else in the directory, because removal was gated on the whole
+# directory being empty of foreign entries.
+git init -q "$HC_A_DIR"
+FORCE=1 bash "$ROOT/install.sh" "$HC_A_DIR" > /tmp/opencode_hca_install.log 2>&1 || {
+  echo "install.sh (10a) failed:"; cat /tmp/opencode_hca_install.log; exit 1;
+}
+HCA_HELPER_DIR="$HC_A_DIR/.opencode/plugin/task-store"
+HCA_FOREIGN="$HCA_HELPER_DIR/user-notes.md"
+printf 'notes the user put next to our helper\n' > "$HCA_FOREIGN"
+HCA_FOREIGN_BEFORE=$(cat "$HCA_FOREIGN")
+
+HCA_CODE=0
+bash "$ROOT/uninstall.sh" "$HC_A_DIR" > /tmp/opencode_hca_uninstall.log 2>&1 || HCA_CODE=$?
+
+check "10a: uninstall exits 0 with a foreign sibling in the helper dir" \
+  "$([[ "$HCA_CODE" == "0" ]] && echo true || echo false)"
+
+check "10a: owned injection.ts is removed despite the foreign sibling" \
+  "$([[ ! -e "$HCA_HELPER_DIR/injection.ts" ]] && echo true || echo false)"
+
+check "10a: foreign sibling survives byte-for-byte" \
+  "$([[ "$(cat "$HCA_FOREIGN" 2>/dev/null)" == "$HCA_FOREIGN_BEFORE" ]] && echo true || echo false)"
+
+check "10a: helper dir is kept because foreign content remains" \
+  "$([[ -d "$HCA_HELPER_DIR" ]] && echo true || echo false)"
+
+check "10a: uninstall says it left the directory in place" \
+  "$(grep -q 'still holds files we do not own' /tmp/opencode_hca_uninstall.log && echo true || echo false)"
+
+# Idempotence: a second uninstall over the same tree must not fail or delete
+# the user's file.
+HCA_CODE2=0
+bash "$ROOT/uninstall.sh" "$HC_A_DIR" > /tmp/opencode_hca_uninstall2.log 2>&1 || HCA_CODE2=$?
+check "10a: repeat uninstall is idempotent (exit 0, foreign file intact)" \
+  "$([[ "$HCA_CODE2" == "0" && "$(cat "$HCA_FOREIGN" 2>/dev/null)" == "$HCA_FOREIGN_BEFORE" ]] && echo true || echo false)"
+
+# ── 10b: truly empty helper dir is removed ────────────────────────────────
+git init -q "$HC_B_DIR"
+FORCE=1 bash "$ROOT/install.sh" "$HC_B_DIR" > /tmp/opencode_hcb_install.log 2>&1 || {
+  echo "install.sh (10b) failed:"; cat /tmp/opencode_hcb_install.log; exit 1;
+}
+bash "$ROOT/uninstall.sh" "$HC_B_DIR" > /tmp/opencode_hcb_uninstall.log 2>&1 || {
+  echo "uninstall.sh (10b) failed:"; cat /tmp/opencode_hcb_uninstall.log; exit 1;
+}
+check "10b: helper dir is removed when it becomes truly empty" \
+  "$([[ ! -d "$HC_B_DIR/.opencode/plugin/task-store" ]] && echo true || echo false)"
+
+check "10b: uninstall reports removing the empty helper directory" \
+  "$(grep -q 'Removed empty OpenCode helper directory' /tmp/opencode_hcb_uninstall.log && echo true || echo false)"
+
+# ── 10c: an inspection ERROR must never be read as emptiness ──────────────
+# The replaced `find`-based test answered "is anything in here?" by reading
+# stdout, so a find that failed on a permission error produced empty stdout
+# and was indistinguishable from an empty directory — authorising an rm -rf
+# over the user's files. rmdir performs the removal instead of answering a
+# question, so every failure mode is conservative.
+if [[ "$EUID" -eq 0 ]]; then
+  echo "  • running as root; skipping the permission-error checks (root bypasses mode bits)"
+else
+  # Direct comparison of the two primitives against an unreadable directory
+  # that genuinely holds a user file.
+  ERRP=$(mktemp -d); mkdir -p "$ERRP/helper"; echo "user data" > "$ERRP/helper/notes.md"
+  chmod 000 "$ERRP/helper"
+
+  check "10c: the replaced find-based test reports an unreadable dir as EMPTY (the bug)" \
+    "$([[ -z "$(find "$ERRP/helper" -mindepth 1 -maxdepth 1 ! -name 'injection.ts' -print -quit 2>/dev/null)" ]] && echo true || echo false)"
+
+  check "10c: rmdir refuses that same directory (error is never proof of emptiness)" \
+    "$(if rmdir "$ERRP/helper" 2>/dev/null; then echo false; else echo true; fi)"
+
+  chmod 755 "$ERRP/helper"
+  check "10c: the user's file survived both probes" \
+    "$([[ "$(cat "$ERRP/helper/notes.md" 2>/dev/null)" == "user data" ]] && echo true || echo false)"
+  rm -rf "$ERRP"
+
+  # End-to-end: a helper directory uninstall cannot inspect is left alone.
+  git init -q "$HC_C_DIR"
+  FORCE=1 bash "$ROOT/install.sh" "$HC_C_DIR" > /tmp/opencode_hcc_install.log 2>&1 || {
+    echo "install.sh (10c) failed:"; cat /tmp/opencode_hcc_install.log; exit 1;
+  }
+  HCC_HELPER_DIR="$HC_C_DIR/.opencode/plugin/task-store"
+  printf 'user file inside an unreadable dir\n' > "$HCC_HELPER_DIR/user-notes.md"
+  chmod 000 "$HCC_HELPER_DIR"
+
+  HCC_CODE=0
+  bash "$ROOT/uninstall.sh" "$HC_C_DIR" > /tmp/opencode_hcc_uninstall.log 2>&1 || HCC_CODE=$?
+
+  check "10c: uninstall exits 0 when the helper dir cannot be inspected" \
+    "$([[ "$HCC_CODE" == "0" ]] && echo true || echo false)"
+
+  check "10c: the uninspectable helper dir is NOT deleted" \
+    "$([[ -d "$HCC_HELPER_DIR" ]] && echo true || echo false)"
+
+  chmod 755 "$HCC_HELPER_DIR"
+  check "10c: its contents survived (owned helper and the user's file)" \
+    "$([[ -f "$HCC_HELPER_DIR/injection.ts" && "$(cat "$HCC_HELPER_DIR/user-notes.md" 2>/dev/null)" == "user file inside an unreadable dir" ]] && echo true || echo false)"
+
+  check "10c: the owned plugin file was still removed (cleanup continued past the error)" \
+    "$([[ ! -f "$HC_C_DIR/.opencode/plugin/task-store.ts" ]] && echo true || echo false)"
+fi
+
 echo ""
 echo "═══ RESULTS ══════════════════════════════════════════════════"
 TOTAL=$((PASS + FAIL))

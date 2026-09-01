@@ -27,7 +27,31 @@ The state files are read by both integrations and injected into the agent's cont
 **Mitigation**: Both adapters read and inject the state file as-is; neither interprets, executes, or evaluates its contents. Do not commit state files from untrusted sources without reviewing them. Treat `.claude-task/state.json` with the same trust level as other project configuration files. The trust hierarchy the tool documents and re-states in its own reconciliation instruction is the behavioral mitigation: **repository/tests > git state > task-store > model memory**. The task store records what happened; it is never authoritative over what the repository and its tests actually show.
 
 ### Executable surface installed into your project
-`install.sh` places executable code in two places. Nothing else in your project is modified — in particular, your `package.json` and lockfile are never touched.
+`install.sh` places executable code in two places (detailed below). It also
+makes these non-executable changes, all of them confined to claude-task-store's
+own files and entries:
+
+- writes claude-task-store's files under `.claude/` (the skill, the hook
+  scripts, and the project-local CLI runtime at `.claude/task-store/`) and
+  under `.opencode/` (the adapter at `.opencode/plugin/task-store.ts` and its
+  helper at `.opencode/plugin/task-store/injection.ts`);
+- updates `.claude/settings.json` to register claude-task-store's own hooks,
+  backing the file up to `settings.json.bak` first and leaving hooks
+  registered by you or other tools in place;
+- appends claude-task-store's own entries to `.gitignore`.
+
+**What it does not do**, which is the security-relevant part:
+
+- it never touches your package manager manifests or lockfiles — `package.json`,
+  `package-lock.json`, and their equivalents are not read for modification,
+  rewritten, or added to;
+- it installs no dependencies and runs no package manager;
+- it adds no network access and no telemetry. Every component runs locally and
+  offline; nothing in this project sends data anywhere.
+
+`uninstall.sh` is symmetric: it removes only files and settings entries that
+carry claude-task-store's own ownership markers, and leaves `.claude-task/`
+state in place.
 
 **Claude Code — shell hooks in `.claude/hooks/scripts/`**, registered in `.claude/settings.json`:
 - `session-start.sh` (`SessionStart`) — injects the resume projection

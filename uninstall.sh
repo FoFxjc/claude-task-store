@@ -128,46 +128,57 @@ if [[ -f "$OPENCODE_PLUGIN_FILE" ]]; then
   if grep -qxF "$OPENCODE_MARKER" "$OPENCODE_PLUGIN_FILE"; then
     rm -f "$OPENCODE_PLUGIN_FILE"
     echo "  ✓ Removed OpenCode plugin: .opencode/plugin/task-store.ts"
-    # The helper subdirectory contains exactly one file we own — `injection.ts`.
-    # If the user hasn't added their own files into the directory, remove it
-    # so we don't leave an empty .opencode/plugin/task-store/ behind. If they
-    # have added files, leave the directory alone (their files are theirs).
+    # Helper cleanup, in two independent steps.
+    #
+    # The helper file is ownership-marked in its own right, so step 1 does not
+    # depend on what else lives in the directory: a user who dropped their own
+    # notes next to our helper still gets our helper removed. Step 2 then
+    # disposes of the directory only if nothing is left in it.
     OPENCODE_HELPER_DIR="$OPENCODE_DIR/plugin/task-store"
     OPENCODE_HELPER_FILE="$OPENCODE_HELPER_DIR/injection.ts"
     if [[ -d "$OPENCODE_HELPER_DIR" ]]; then
-      # Only delete the helper if BOTH (a) the helper file carries the
-      # ownership marker and (b) the directory contains no other entry.
+
+      # ── Step 1: remove the owned helper file ──────────────────────────
+      # Same whole-line marker test as everywhere else. A foreign file at the
+      # owned path is left exactly as-is.
+      if [[ -f "$OPENCODE_HELPER_FILE" ]]; then
+        if grep -qxF "$OPENCODE_MARKER" "$OPENCODE_HELPER_FILE"; then
+          rm -f "$OPENCODE_HELPER_FILE"
+          echo "  ✓ Removed OpenCode plugin helper: .opencode/plugin/task-store/injection.ts"
+        else
+          echo "  ⚠  Left $OPENCODE_HELPER_FILE in place — no claude-task-store ownership marker found."
+          echo "     Remove it by hand if you meant to."
+        fi
+      fi
+
+      # ── Step 2: remove the directory only if it is genuinely empty ─────
+      # `rmdir` is the whole safety argument here, and it replaces the earlier
+      # `find`-based emptiness test:
       #
-      # `find -print -quit` rather than the earlier `ls -A | grep -v`, for two
-      # reasons:
+      #   * It is never destructive to content. The kernel refuses to remove a
+      #     directory that still has entries (ENOTEMPTY), so a user's files
+      #     cannot be lost the way an `rm -rf` guarded by a separate emptiness
+      #     test can lose them if that test is wrong.
       #
-      #   1. Exit status. Under `set -euo pipefail` a `grep -v` that filters
-      #      away every line exits 1. Here the pipeline sits inside an
-      #      `if` condition, where bash suppresses errexit, so it did not in
-      #      fact abort the uninstall — but it is a latent trap: moving this
-      #      test into an assignment or a plain statement WOULD abort, and
-      #      the emptiness of a directory should never be entangled with a
-      #      pipeline's exit status in the first place. `find` exits 0
-      #      whether or not it matches.
+      #   * An error cannot be mistaken for emptiness. The `find` form asked a
+      #     question ("is anything in here?") and read the answer from stdout,
+      #     so a find that failed on a permission or I/O error produced empty
+      #     stdout and was indistinguishable from a genuinely empty directory —
+      #     which then authorised an `rm -rf`. `rmdir` does not answer a
+      #     question, it performs the removal, and any failure — non-empty,
+      #     permission denied, I/O error, a race with another writer — leaves
+      #     the directory in place. Failure is always conservative.
       #
-      #   2. Ownership safety — the real bug. `ls -A` emits one LINE per
-      #      entry, so a filename containing a newline is split into several
-      #      lines. A foreign file literally named "injection.ts\ninjection.ts"
-      #      contributes only lines that `grep -v '^injection\.ts$'` discards,
-      #      making a non-empty directory look empty and taking the user's
-      #      file with the `rm -rf`. `find` matches `! -name` against the
-      #      whole filename, so that file is seen and the directory is kept.
-      #      tests/opencode_install_test.sh pins this case; it fails against
-      #      the `ls | grep` form.
+      #   * It reads no filenames, so filenames cannot fool it. Unusual names
+      #     (spaces, apostrophes, embedded newlines, dotfiles) are irrelevant.
       #
-      # Like `ls -A`, find here considers dotfiles, and `-quit` stops it at
-      # the first foreign entry.
-      if [[ -f "$OPENCODE_HELPER_FILE" ]] \
-          && grep -qxF "$OPENCODE_MARKER" "$OPENCODE_HELPER_FILE" \
-          && [[ -z "$(find "$OPENCODE_HELPER_DIR" -mindepth 1 -maxdepth 1 \
-                        ! -name 'injection.ts' -print -quit 2>/dev/null)" ]]; then
-        rm -rf "$OPENCODE_HELPER_DIR"
-        echo "  ✓ Removed OpenCode plugin helper: .opencode/plugin/task-store/"
+      # The command sits in an `if` condition, where bash suppresses errexit,
+      # so a non-empty directory is an expected outcome rather than an abort.
+      # No `set +e` is needed anywhere.
+      if rmdir "$OPENCODE_HELPER_DIR" 2>/dev/null; then
+        echo "  ✓ Removed empty OpenCode helper directory: .opencode/plugin/task-store/"
+      else
+        echo "  • Left .opencode/plugin/task-store/ in place — it still holds files we do not own."
       fi
     fi
   else

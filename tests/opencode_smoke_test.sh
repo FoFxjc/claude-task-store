@@ -9,7 +9,7 @@
 #   3. Verifying the recorded push:
 #        - is non-empty
 #        - matches what `task-store resume --root <project>` prints (canonical)
-#        - is below the 400-token design ceiling (1600 chars)
+#        - is within the 400-token design ceiling (<= 1600 chars, inclusive)
 #
 # The plugin itself is verified at the unit-test level for status checks,
 # caching, and graceful degradation. This smoke test is end-to-end: it
@@ -95,8 +95,11 @@ EXPECTED_RESUME="$(node "$CLI" resume --root "$TEST_DIR")"
 check "fixture state initialized (.claude-task/state.json exists)" \
   "$([[ -f "$TEST_DIR/.claude-task/state.json" ]] && echo true || echo false)"
 
-check "canonical resume projection is below the 400-token design ceiling (1600 chars)" \
-  "$([[ "${#EXPECTED_RESUME}" -lt 1600 ]] && echo true || echo false)"
+# MAX_INJECTION_CHARS is an INCLUSIVE cap: the adapter passes text through
+# untouched at exactly 1600 chars and only truncates above it. `-lt` would
+# report a false negative on a projection that sits exactly on the boundary.
+check "canonical resume projection is within the 400-token design ceiling (<= 1600 chars)" \
+  "$([[ "${#EXPECTED_RESUME}" -le 1600 ]] && echo true || echo false)"
 
 # ── Install the production plugin (with a diagnostic capture) ──────────
 mkdir -p "$TEST_DIR/.opencode/plugin/task-store"
@@ -139,12 +142,29 @@ check "injected projection matches the canonical \`task-store resume\` output" \
       echo false
     fi)"
 
-check "injected projection is below the 400-token design ceiling (1600 chars)" \
+# Count CHARACTERS (wc -m), not bytes (wc -c). The adapter's cap is
+# `text.length <= MAX_INJECTION_CHARS`, and JS string length counts UTF-16
+# code units — which equals the character count for everything the renderer
+# emits. The projection's box-drawing header is multi-byte in UTF-8, so a byte
+# count runs ~1.5x the character count and would fail a projection that is
+# comfortably within the real cap.
+check "injected projection is within the 400-token design ceiling (<= 1600 chars)" \
   "$(if [[ -s "$PUSHED" ]]; then
-      if [[ "$(wc -c < "$PUSHED")" -lt 1600 ]]; then echo true; else echo false; fi
+      if [[ "$(wc -m < "$PUSHED")" -le 1600 ]]; then echo true; else echo false; fi
     else
       echo false
     fi)"
+
+# Pin the boundary semantics themselves, independent of whatever the live
+# projection happens to measure: the cap is inclusive, so exactly 1600 passes
+# and 1601 does not. This is what makes `-le` above the correct comparison.
+BOUNDARY_AT="$(printf 'X%.0s' $(seq 1 1600))"
+BOUNDARY_OVER="$(printf 'X%.0s' $(seq 1 1601))"
+check "cap boundary: exactly 1600 chars is within the ceiling (inclusive)" \
+  "$([[ "${#BOUNDARY_AT}" -le 1600 ]] && echo true || echo false)"
+check "cap boundary: 1601 chars exceeds the ceiling" \
+  "$([[ "${#BOUNDARY_OVER}" -le 1600 ]] && echo false || echo true)"
+
 
 check "injected projection contains the GOAL" \
   "$(grep -q 'GOAL: Build the authentication system' "$PUSHED" 2>/dev/null && echo true || echo false)"
