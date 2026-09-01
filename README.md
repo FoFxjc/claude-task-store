@@ -192,7 +192,7 @@ Externalizing execution state allows:
 
 Smaller models often do not fail because they cannot perform the next coding step. They fail because too much of their context is occupied by accumulated execution history.
 
-**Use smaller models for longer tasks.**
+**Make longer tasks more practical on constrained-context models.**
 
 > This improves continuity and reduces repeated orientation work. It does not make a weaker model equivalent to a stronger one, and it does not remove the need for context on the current task.
 
@@ -473,8 +473,9 @@ window, the 120-second debounce, and the trust hierarchy embedded in
 Around automatic compaction: the plugin intentionally does not mutate state
 at compaction time. `experimental.session.compacting` is registered as a
 no-op — the task store is the source of truth for execution state, and the
-next chat call re-injects fresh state via `system.transform`, so the
-conversation summary loses nothing that matters.
+next chat call re-injects fresh state via `system.transform`, so execution
+continuity does not depend on the conversation summary preserving task-store
+state.
 
 To opt out of OpenCode integration in a future install, run
 `TASK_STORE_SKIP_OPENCODE=1 ./install.sh /path/to/project`. The Claude Code
@@ -536,9 +537,9 @@ tool activity  →  mark possibly stale   (no task-store write)
         checkpoint changes only if the agent decides it should
 ```
 
-**Dirty signals** are tool calls that can change repository or execution state — `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash`. Read-only tools are deliberately excluded, so browsing the codebase never marks anything stale. A dirty signal records two timestamps and a counter. It never writes task state.
+**Dirty signals** are tool calls that can change repository or execution state. In Claude Code that is a specific matcher list — `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash`. Read-only tools are deliberately excluded, so browsing the codebase never marks anything stale. OpenCode classifies against its own host tool lifecycle instead, excluding its read-only tools (`read`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `skill`, `task`, `question`, `todowrite`) and treating the rest as dirty; the dirty/reconcile semantics it feeds are the same provider-neutral ones. Either way, a dirty signal records two timestamps and a counter. It never writes task state.
 
-**Reconciliation boundaries** are where the checkpoint is allowed to be questioned:
+**Reconciliation boundaries** are where the checkpoint is allowed to be questioned. The events below are Claude Code's; for OpenCode's `session.idle` boundary and its `system.transform` instruction delivery, see [OpenCode auto-checkpoint parity](#opencode-auto-checkpoint-parity):
 
 | Boundary | What happens | Why |
 |----------|--------------|-----|
@@ -571,7 +572,7 @@ Zero writes and no Node process. The hooks bail out in bash before spawning anyt
 
 ### Provider neutrality
 
-The core knows nothing about Claude Code event names. Adapters map their own lifecycle onto three verbs — `markDirty()`, `shouldReconcile()`, `markReconciled()` — in [`src/autocheckpoint.ts`](src/autocheckpoint.ts). That is the entire extension surface; an OpenCode adapter reuses the same config file and the same behavior without touching the core.
+The core knows nothing about Claude Code event names. Adapters map their own lifecycle onto three verbs — `markDirty()`, `shouldReconcile()`, `markReconciled()` — in [`src/autocheckpoint.ts`](src/autocheckpoint.ts). That is the entire extension surface. The OpenCode adapter reuses the same config file and the same behavior without touching the core.
 
 ---
 
@@ -727,7 +728,7 @@ The OpenCode smoke tests need a working `opencode` binary on `PATH`. They
 skip cleanly (`exit 77`) if it isn't installed; the other suites are pure
 shell and run anywhere.
 
-503 automated checks pass across 11 suites (17 test files: 3 Jest, 14 shell)
+503 automated checks pass across 17 test files: 3 Jest and 14 shell
 — unit 116, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
 installer regression 17, path safety 32, project-local runtime 32,
 auto-checkpoint 60, OpenCode install regression 117, OpenCode resume smoke 18,
