@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit && tsc --noEmit --project tsconfig.opencode.json",
     "test": "node --experimental-vm-modules node_modules/.bin/jest",
     "prepublishOnly": "npm run build"
   },
@@ -46,6 +47,7 @@
     "bin/",
     "skills/",
     "hooks/",
+    "opencode-plugin/",
     "schemas/",
     "DESIGN.md",
     "README.md",

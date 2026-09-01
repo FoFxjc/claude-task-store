@@ -5,6 +5,7 @@ set -euo pipefail
 
 PROJECT_ROOT="${1:-$(pwd)}"
 CLAUDE_DIR="$PROJECT_ROOT/.claude"
+OPENCODE_DIR="$PROJECT_ROOT/.opencode"
 
 echo "→ Removing claude-task-store from: $PROJECT_ROOT"
 
@@ -108,6 +109,82 @@ with open(settings_file, 'w') as f:
     f.write('\n')
 print('  ✓ Removed task-store hooks from .claude/settings.json (unrelated hooks preserved)')
 PYEOF
+fi
+
+# Remove the OpenCode plugin — but only the file we own. The plugin file
+# carries a literal ownership marker comment that install.sh writes; we
+# grep for it before removing. This means we never delete a user's
+# unrelated plugin at the same path, and we never touch anything else
+# under .opencode/ (their own plugins, agents, commands, MCP servers,
+# skills, and opencode.json all stay put).
+#
+# The marker is matched as a WHOLE LINE (grep -qxF), not as a substring, so
+# this agrees exactly with the ownership test install.sh uses before it will
+# refresh a file. A file that merely mentions the identifier in prose is
+# foreign to both scripts.
+OPENCODE_MARKER='// CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1'
+OPENCODE_PLUGIN_FILE="$OPENCODE_DIR/plugin/task-store.ts"
+if [[ -f "$OPENCODE_PLUGIN_FILE" ]]; then
+  if grep -qxF "$OPENCODE_MARKER" "$OPENCODE_PLUGIN_FILE"; then
+    rm -f "$OPENCODE_PLUGIN_FILE"
+    echo "  ✓ Removed OpenCode plugin: .opencode/plugin/task-store.ts"
+    # Helper cleanup, in two independent steps.
+    #
+    # The helper file is ownership-marked in its own right, so step 1 does not
+    # depend on what else lives in the directory: a user who dropped their own
+    # notes next to our helper still gets our helper removed. Step 2 then
+    # disposes of the directory only if nothing is left in it.
+    OPENCODE_HELPER_DIR="$OPENCODE_DIR/plugin/task-store"
+    OPENCODE_HELPER_FILE="$OPENCODE_HELPER_DIR/injection.ts"
+    if [[ -d "$OPENCODE_HELPER_DIR" ]]; then
+
+      # ── Step 1: remove the owned helper file ──────────────────────────
+      # Same whole-line marker test as everywhere else. A foreign file at the
+      # owned path is left exactly as-is.
+      if [[ -f "$OPENCODE_HELPER_FILE" ]]; then
+        if grep -qxF "$OPENCODE_MARKER" "$OPENCODE_HELPER_FILE"; then
+          rm -f "$OPENCODE_HELPER_FILE"
+          echo "  ✓ Removed OpenCode plugin helper: .opencode/plugin/task-store/injection.ts"
+        else
+          echo "  ⚠  Left $OPENCODE_HELPER_FILE in place — no claude-task-store ownership marker found."
+          echo "     Remove it by hand if you meant to."
+        fi
+      fi
+
+      # ── Step 2: remove the directory only if it is genuinely empty ─────
+      # `rmdir` is the whole safety argument here, and it replaces the earlier
+      # `find`-based emptiness test:
+      #
+      #   * It is never destructive to content. The kernel refuses to remove a
+      #     directory that still has entries (ENOTEMPTY), so a user's files
+      #     cannot be lost the way an `rm -rf` guarded by a separate emptiness
+      #     test can lose them if that test is wrong.
+      #
+      #   * An error cannot be mistaken for emptiness. The `find` form asked a
+      #     question ("is anything in here?") and read the answer from stdout,
+      #     so a find that failed on a permission or I/O error produced empty
+      #     stdout and was indistinguishable from a genuinely empty directory —
+      #     which then authorised an `rm -rf`. `rmdir` does not answer a
+      #     question, it performs the removal, and any failure — non-empty,
+      #     permission denied, I/O error, a race with another writer — leaves
+      #     the directory in place. Failure is always conservative.
+      #
+      #   * It reads no filenames, so filenames cannot fool it. Unusual names
+      #     (spaces, apostrophes, embedded newlines, dotfiles) are irrelevant.
+      #
+      # The command sits in an `if` condition, where bash suppresses errexit,
+      # so a non-empty directory is an expected outcome rather than an abort.
+      # No `set +e` is needed anywhere.
+      if rmdir "$OPENCODE_HELPER_DIR" 2>/dev/null; then
+        echo "  ✓ Removed empty OpenCode helper directory: .opencode/plugin/task-store/"
+      else
+        echo "  • Left .opencode/plugin/task-store/ in place — it still holds files we do not own."
+      fi
+    fi
+  else
+    echo "  ⚠  Left $OPENCODE_PLUGIN_FILE in place — no claude-task-store ownership marker found."
+    echo "     Remove it by hand if you meant to."
+  fi
 fi
 
 echo "  ✓ claude-task-store removed"

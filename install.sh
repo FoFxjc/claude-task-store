@@ -254,16 +254,48 @@ GITIGNORE_MARKER="# claude-task-store"
 if [[ -f "$GITIGNORE" ]] && grep -q "$GITIGNORE_MARKER" "$GITIGNORE"; then
   echo "  ✓ .gitignore already has task-store entries"
   # Backfill entries added after the marker block was first written. Without
-  # this, upgrading a v0.1.0 project would leave the auto-checkpoint runtime
-  # marker showing up as an untracked file forever, because the marker check
-  # above short-circuits the whole block.
-  if ! grep -q '.claude-task/auto-checkpoint.json' "$GITIGNORE"; then
-    cat >> "$GITIGNORE" <<'EOF'
-# auto-checkpoint runtime marker (ephemeral dirty/debounce bookkeeping)
-.claude-task/auto-checkpoint.json
-EOF
-    echo "  ✓ Added .claude-task/auto-checkpoint.json to .gitignore"
-  fi
+  # this, upgrading an older project would leave newer ephemeral files showing
+  # up as untracked forever, because the marker check above short-circuits the
+  # whole block. Each entry is appended only if the exact path is not already
+  # present, so re-running the installer never duplicates a line.
+  backfill_gitignore() {
+    local path="$1" comment="$2"
+    grep -qxF "$path" "$GITIGNORE" && return 0
+
+    # Terminate the file's last line before appending, if it is unterminated.
+    #
+    # A .gitignore whose final byte is not a newline is valid and not unusual
+    # (plenty of editors and generators leave one that way). Appending
+    # straight onto it would glue our comment to the end of the user's last
+    # rule — "build/# auto-checkpoint runtime marker" — silently breaking that
+    # rule AND our new entry.
+    #
+    # `$(tail -c 1 ...)` is the test: command substitution strips trailing
+    # newlines, so the result is empty exactly when the final byte IS a
+    # newline, and non-empty otherwise. Guarded by -s so an empty (or absent)
+    # file adds nothing and we never open with a stray blank line.
+    #
+    # This appends at most one newline and touches nothing already in the
+    # file; the rest of the user's .gitignore is never read back or rewritten.
+    if [[ -s "$GITIGNORE" ]] && [[ -n "$(tail -c 1 "$GITIGNORE")" ]]; then
+      printf '\n' >> "$GITIGNORE"
+    fi
+
+    printf '%s\n%s\n' "$comment" "$path" >> "$GITIGNORE"
+    echo "  ✓ Added $path to .gitignore"
+  }
+  # v0.1.1: auto-checkpoint runtime marker.
+  backfill_gitignore '.claude-task/auto-checkpoint.json' \
+    '# auto-checkpoint runtime marker (ephemeral dirty/debounce bookkeeping)'
+  # v0.2.0: the OpenCode adapter (both files) and the pending reconciliation
+  # instruction the OpenCode boundary hook stages between session.idle and the
+  # next chat call.
+  backfill_gitignore '.claude-task/.pending-reconcile-instruction.txt' \
+    '# pending reconciliation instruction staged by the OpenCode plugin (consumed once)'
+  backfill_gitignore '.opencode/plugin/task-store.ts' \
+    '# .opencode/plugin/task-store*: OpenCode adapter, re-created by the installer'
+  backfill_gitignore '.opencode/plugin/task-store/injection.ts' \
+    '# (sibling helper module imported by the plugin above)'
 else
   echo "" >> "$GITIGNORE"
   cat >> "$GITIGNORE" <<'EOF'
@@ -281,11 +313,145 @@ else
 # .claude/task-store/ is build output copied in by install.sh; re-created by
 # re-running the installer, so it does not belong in version control
 .claude/task-store/
+# .pending-reconcile-instruction.txt is staged by the OpenCode plugin at a
+# session.idle boundary and consumed by the next chat call — purely transient
+.claude-task/.pending-reconcile-instruction.txt
+# .opencode/plugin/task-store.ts is the auto-discovered OpenCode plugin and
+# .opencode/plugin/task-store/injection.ts is the sibling helper it imports;
+# like the Claude Code runtime above, both are re-created by the installer.
+.opencode/plugin/task-store.ts
+.opencode/plugin/task-store/injection.ts
 EOF
   echo "  ✓ Updated .gitignore (history.jsonl ignored, state.json committable)"
 fi
 
-# ── 4. Done ──────────────────────────────────────────────────────────────────
+# ── 4. OpenCode integration (thin adapter) ──────────────────────────────────
+#
+# OpenCode (>= 1.x) auto-discovers any *.ts or *.js file under
+# `.opencode/plugin/`. We copy the canonical task-store plugin there; it
+# loads the project-local CLI runtime already installed in section 2, so
+# no duplicate code, no extra build step, no change to the target project's
+# package.json.
+#
+# The existing Claude-compatible SKILL.md at `.claude/skills/task-store/`
+# is also auto-discovered by OpenCode as an "external skill" — we do NOT
+# create a duplicate `.opencode/skills/task-store/SKILL.md`. The plugin
+# below handles fresh-session resume injection.
+#
+# If the user explicitly opted out of OpenCode integration, skip this.
+# Anything else under `.opencode/` (their own agents, commands, MCP
+# servers, plugin configs) is never touched.
+
+if [[ "${TASK_STORE_SKIP_OPENCODE:-0}" == "1" ]]; then
+  echo ""
+  echo "  • OpenCode integration skipped (TASK_STORE_SKIP_OPENCODE=1)"
+elif [[ ! -f "$SCRIPT_DIR/opencode-plugin/task-store.ts" ]]; then
+  echo ""
+  echo "  • OpenCode plugin source missing at $SCRIPT_DIR/opencode-plugin/"
+  echo "    (older claude-task-store checkout). Skipping OpenCode integration."
+else
+  echo ""
+  echo "→ Setting up OpenCode plugin in: $PROJECT_ROOT"
+
+  OPENCODE_PLUGIN_DIR="$PROJECT_ROOT/.opencode/plugin"
+  OPENCODE_PLUGIN_FILE="$OPENCODE_PLUGIN_DIR/task-store.ts"
+  OPENCODE_PLUGIN_HELPER_DIR="$OPENCODE_PLUGIN_DIR/task-store"
+  OPENCODE_PLUGIN_HELPER_FILE="$OPENCODE_PLUGIN_HELPER_DIR/injection.ts"
+
+  # Ownership marker semantics — identical to uninstall.sh:
+  #
+  #   file absent            → install it
+  #   file carries marker    → refresh it (this is the upgrade-in-place path,
+  #                            the same contract as the .claude/task-store
+  #                            runtime installed in section 2)
+  #   file lacks the marker  → foreign file at an owned path. Never
+  #                            overwrite; warn and leave it exactly as-is.
+  #
+  # The marker is matched as a WHOLE LINE (grep -qxF), not as a substring: a
+  # file that merely mentions the identifier in prose (a README snippet, a
+  # vendored copy of our docs) is correctly treated as foreign rather than
+  # silently overwritten.
+  OPENCODE_MARKER='// CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1'
+
+  # Returns 0 only when $1 exists AND carries the ownership marker line.
+  opencode_owned() {
+    [[ -f "$1" ]] && grep -qxF "$OPENCODE_MARKER" "$1"
+  }
+
+  # Foreign file at the plugin path: refuse the whole adapter install rather
+  # than scattering a helper directory next to a plugin we do not own.
+  if [[ -f "$OPENCODE_PLUGIN_FILE" ]] && ! opencode_owned "$OPENCODE_PLUGIN_FILE"; then
+    echo "  ⚠  Left .opencode/plugin/task-store.ts in place — no claude-task-store ownership marker found."
+    echo "     Refusing to overwrite a file this installer does not own."
+    echo "     Move or remove it and re-run to enable the OpenCode integration."
+  else
+    mkdir -p "$OPENCODE_PLUGIN_DIR"
+
+    if opencode_owned "$OPENCODE_PLUGIN_FILE"; then
+      OPENCODE_PLUGIN_ACTION="Refreshed"
+    else
+      OPENCODE_PLUGIN_ACTION="Installed"
+    fi
+
+    cp "$SCRIPT_DIR/opencode-plugin/task-store.ts" "$OPENCODE_PLUGIN_FILE"
+    echo "  ✓ $OPENCODE_PLUGIN_ACTION OpenCode plugin: .opencode/plugin/task-store.ts"
+
+    # The plugin imports the helper from a sibling subdirectory. OpenCode's
+    # plugin discovery glob is `.opencode/{plugin,plugins}/*.{ts,js}` — a
+    # SINGLE level (read from the opencode 1.18.25 binary) — so a .ts file
+    # in a subdirectory of .opencode/plugin/ is never auto-loaded as a
+    # plugin. Placing `injection.ts` under `task-store/` therefore keeps it
+    # out of OpenCode's plugin loader while remaining importable from
+    # `task-store.ts`.
+    #
+    # The extension here is load-bearing: task-store.ts imports
+    # `./task-store/injection.ts`, naming this exact installed filename, so
+    # the installed tree is self-consistent and nothing depends on a
+    # runtime silently rewriting a `.js` specifier to a `.ts` file.
+    #
+    # The helper gets the same three-way ownership decision as the plugin,
+    # evaluated independently: a user who hand-rolled their own injection.ts
+    # keeps it, even though the plugin above was refreshed.
+    if [[ -f "$OPENCODE_PLUGIN_HELPER_FILE" ]] && ! opencode_owned "$OPENCODE_PLUGIN_HELPER_FILE"; then
+      echo "  ⚠  Left .opencode/plugin/task-store/injection.ts in place — no claude-task-store ownership marker found."
+      echo "     The refreshed plugin imports this helper; it may be out of date."
+    else
+      if opencode_owned "$OPENCODE_PLUGIN_HELPER_FILE"; then
+        OPENCODE_HELPER_ACTION="Refreshed"
+      else
+        OPENCODE_HELPER_ACTION="Installed"
+      fi
+
+      mkdir -p "$OPENCODE_PLUGIN_HELPER_DIR"
+      cp "$SCRIPT_DIR/opencode-plugin/task-store/injection.ts" "$OPENCODE_PLUGIN_HELPER_FILE"
+      echo "  ✓ $OPENCODE_HELPER_ACTION OpenCode plugin helper: .opencode/plugin/task-store/injection.ts"
+    fi
+
+    echo "    (auto-discovered on next OpenCode launch; no opencode.json change)"
+  fi
+
+  # Note: we intentionally do NOT touch opencode.json or any other
+  # .opencode/* file. OpenCode accepts BOTH the singular and the plural
+  # spelling of each customization directory — its discovery globs (read
+  # from the opencode 1.18.25 binary) are:
+  #
+  #   .opencode/{agent,agents}/**/*.md
+  #   .opencode/{command,commands}/**/*.md
+  #   .opencode/{plugin,plugins}/*.{ts,js}
+  #   .opencode/{skill,skills}/**/SKILL.md
+  #   .opencode/{tool,tools}/*.{js,ts}
+  #
+  # so a user's agents, commands, skills, tools and their own plugins are
+  # left alone under either spelling. Note the plugin glob is a SINGLE
+  # level (`/*.`, not `/**/*.`): that is why the helper this installer
+  # writes to .opencode/plugin/task-store/injection.ts is importable by the
+  # adapter but is never itself loaded as a plugin.
+  #
+  # The existing .claude/skills/task-store/SKILL.md is already auto-loaded
+  # by OpenCode as an "external skill", so no skill duplication is needed.
+fi
+
+# ── 5. Done ──────────────────────────────────────────────────────────────────
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
@@ -297,7 +463,8 @@ echo ""
 echo "  1. Initialize a task store for your project:"
 echo "     task-store init \"Your goal here\" \"Task 1\" \"Task 2\" ..."
 echo ""
-echo "  2. Start Claude Code — state will be injected automatically at session start."
+echo "  2. Start Claude Code OR OpenCode in this project — state will be"
+echo "     injected automatically at session start."
 echo ""
 echo "  3. Use these commands during development:"
 echo "     task-store status           # show current state"
@@ -308,5 +475,8 @@ echo "     task-store next \"action\"   # set next action before ending session"
 echo ""
 echo "  4. To enable cross-session handoff via git:"
 echo "     git add .claude-task/state.json"
+echo ""
+echo "  5. To opt out of OpenCode integration on future installs:"
+echo "     TASK_STORE_SKIP_OPENCODE=1 ./install.sh /path/to/project"
 echo ""
 echo "  See README.md for full documentation."

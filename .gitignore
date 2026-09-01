@@ -8,11 +8,18 @@ dist/
 .claude-task/history.jsonl
 # .lock is a transient O_EXCL write lock; a crashed process can leave one behind
 .claude-task/.lock
+# .pending-reconcile-instruction.txt is staged by the OpenCode plugin at a
+# session.idle boundary and consumed by the next chat call — purely transient
+.claude-task/.pending-reconcile-instruction.txt
 # settings.json.bak is written by install.sh/uninstall.sh before each rewrite
 .claude/settings.json.bak
 # .claude/task-store/ is build output copied in by install.sh; re-created by
 # re-running the installer, so it does not belong in version control
 .claude/task-store/
+# .opencode/plugin/task-store{.ts,/injection.ts} is the OpenCode adapter that
+# install.sh copies in when dogfooding this repo; re-created by the installer
+.opencode/plugin/task-store.ts
+.opencode/plugin/task-store/injection.ts
 
 # Editor
 .DS_Store
