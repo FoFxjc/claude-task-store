@@ -192,7 +192,7 @@ Externalizing execution state allows:
 
 Smaller models often do not fail because they cannot perform the next coding step. They fail because too much of their context is occupied by accumulated execution history.
 
-**Use smaller models for longer tasks.**
+**Make longer tasks more practical on constrained-context models.**
 
 > This improves continuity and reduces repeated orientation work. It does not make a weaker model equivalent to a stronger one, and it does not remove the need for context on the current task.
 
@@ -218,7 +218,7 @@ If the task store claims something is complete but the repository or tests disag
 
 ## Validated results
 
-Measured across 324 automated test scenarios:
+Measured across the 503 automated checks that make up the v0.2.0 suite:
 
 | Scenario | Resume context |
 |----------|---------------:|
@@ -261,7 +261,7 @@ without re-reading transcripts.
 
 ## Installation
 
-**Prerequisites:** Node.js ≥ 18, Claude Code, `python3`
+**Prerequisites:** Node.js ≥ 18, Claude Code or OpenCode, `python3`
 
 ```bash
 git clone https://github.com/FoFxjc/claude-task-store.git
@@ -345,7 +345,7 @@ task-store block T4 "need local HTTP fixture before streaming test works"
 task-store next "Replace mock with local HTTP fixture, then complete T4"
 ```
 
-On next session start (or in a fresh model session), Claude automatically receives the compact resume context shown above.
+On next session start (or in a fresh model session), the agent automatically receives the compact resume context shown above — identically in Claude Code and in OpenCode, since both render it through the same `task-store resume` CLI.
 
 ---
 
@@ -473,8 +473,9 @@ window, the 120-second debounce, and the trust hierarchy embedded in
 Around automatic compaction: the plugin intentionally does not mutate state
 at compaction time. `experimental.session.compacting` is registered as a
 no-op — the task store is the source of truth for execution state, and the
-next chat call re-injects fresh state via `system.transform`, so the
-conversation summary loses nothing that matters.
+next chat call re-injects fresh state via `system.transform`, so execution
+continuity does not depend on the conversation summary preserving task-store
+state.
 
 To opt out of OpenCode integration in a future install, run
 `TASK_STORE_SKIP_OPENCODE=1 ./install.sh /path/to/project`. The Claude Code
@@ -536,9 +537,9 @@ tool activity  →  mark possibly stale   (no task-store write)
         checkpoint changes only if the agent decides it should
 ```
 
-**Dirty signals** are tool calls that can change repository or execution state — `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash`. Read-only tools are deliberately excluded, so browsing the codebase never marks anything stale. A dirty signal records two timestamps and a counter. It never writes task state.
+**Dirty signals** are tool calls that can change repository or execution state. In Claude Code that is a specific matcher list — `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash`. Read-only tools are deliberately excluded, so browsing the codebase never marks anything stale. OpenCode classifies against its own host tool lifecycle instead, excluding its read-only tools (`read`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `skill`, `task`, `question`, `todowrite`) and treating the rest as dirty; the dirty/reconcile semantics it feeds are the same provider-neutral ones. Either way, a dirty signal records two timestamps and a counter. It never writes task state.
 
-**Reconciliation boundaries** are where the checkpoint is allowed to be questioned:
+**Reconciliation boundaries** are where the checkpoint is allowed to be questioned. The events below are Claude Code's; for OpenCode's `session.idle` boundary and its `system.transform` instruction delivery, see [OpenCode auto-checkpoint parity](#opencode-auto-checkpoint-parity):
 
 | Boundary | What happens | Why |
 |----------|--------------|-----|
@@ -567,11 +568,11 @@ repository / tests  >  git state  >  task-store  >  model memory
 
 ### Cost when off
 
-Zero writes and no Node process. The hooks bail out in bash before spawning anything, so a project that never opts in behaves byte-for-byte like v0.1.0. When it *is* on, each matched tool call spawns one short-lived Node process to record the signal.
+Zero writes and no Node process. The hooks bail out in bash before spawning anything, so a project that never opts in behaves byte-for-byte as it did before auto-checkpoint existed. When it *is* on, each matched tool call spawns one short-lived Node process to record the signal.
 
 ### Provider neutrality
 
-The core knows nothing about Claude Code event names. Adapters map their own lifecycle onto three verbs — `markDirty()`, `shouldReconcile()`, `markReconciled()` — in [`src/autocheckpoint.ts`](src/autocheckpoint.ts). That is the entire extension surface; an OpenCode adapter reuses the same config file and the same behavior without touching the core.
+The core knows nothing about Claude Code event names. Adapters map their own lifecycle onto three verbs — `markDirty()`, `shouldReconcile()`, `markReconciled()` — in [`src/autocheckpoint.ts`](src/autocheckpoint.ts). That is the entire extension surface. The OpenCode adapter reuses the same config file and the same behavior without touching the core.
 
 ---
 
@@ -697,7 +698,7 @@ Options:
 
 ## Security and limitations
 
-- State files are injected into Claude's context. Treat `.claude-task/state.json` with the same trust as other project config. A malicious state file could inject arbitrary text into the AI context (prompt injection).
+- State files are injected into the agent's context (Claude Code or OpenCode). Treat `.claude-task/state.json` with the same trust as other project config. A malicious state file could inject arbitrary text into the AI context (prompt injection).
 - No network requests are made. All state is local.
 - Concurrent `task-store` CLI invocations are serialized by an O_EXCL lock file around each command's full read-modify-write cycle; `--expect-rev` makes this an atomic compare-and-write (not last-writer-wins) against other CLI callers. Direct library callers that bypass `withStoreLock()` are not protected. See [`SECURITY.md`](SECURITY.md).
 - Evidence (`-e` values) is kept as a plain string array end-to-end — no delimiter-based joining/splitting — so evidence text may safely contain commas, quotes, or other special characters.
@@ -727,7 +728,7 @@ The OpenCode smoke tests need a working `opencode` binary on `PATH`. They
 skip cleanly (`exit 77`) if it isn't installed; the other suites are pure
 shell and run anywhere.
 
-503 automated checks pass across 11 suites (17 test files: 3 Jest, 14 shell)
+503 automated checks pass across 17 test files: 3 Jest and 14 shell
 — unit 116, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
 installer regression 17, path safety 32, project-local runtime 32,
 auto-checkpoint 60, OpenCode install regression 117, OpenCode resume smoke 18,
