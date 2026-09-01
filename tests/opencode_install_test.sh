@@ -7,8 +7,13 @@
 # preservation rules. End-to-end plugin logic is covered by the Jest
 # unit tests; this file is concerned with the installer contract.
 #
+# This suite exercises installer/uninstaller FILESYSTEM effects only; it never
+# launches `opencode`. Actual plugin loading and runtime behaviour are covered
+# by tests/opencode_smoke_test.sh and tests/opencode_autockpt_smoke_test.sh,
+# which run against a real opencode binary.
+#
 # Coverage:
-#   1. OpenCode plugin loads in a representative project
+#   1. install.sh places the adapter at the path OpenCode auto-discovers
 #   2. install.sh copies the plugin file with the ownership marker intact
 #   3. Re-running install.sh is idempotent (no duplicate plugin copy)
 #   4. Unrelated .opencode/ files (plugin, agent, command, opencode.json)
@@ -196,6 +201,12 @@ check "uninstall removed .opencode/plugin/task-store.ts" \
 
 check "uninstall also removed the helper subdirectory (when empty of other files)" \
   "$([[ ! -d "$FRESH_DIR/.opencode/plugin/task-store" ]] && echo true || echo false)"
+
+# Proves uninstall progressed past the helper-dir emptiness test rather than
+# dying on it. The explicit exit-status assertion for that same code path
+# lives in Scenario 7e, which captures the raw return code.
+check "uninstall logged the helper removal (emptiness test did not abort)" \
+  "$(grep -q 'Removed OpenCode plugin helper' /tmp/opencode_uninstall.log && echo true || echo false)"
 
 check "uninstall preserved unrelated plugin file" \
   "$(diff -q "$PRE_UNRELATED_PLUGIN" "$FRESH_DIR/.opencode/plugin/my-unrelated-plugin.ts" >/dev/null && echo true || echo false)"
@@ -524,6 +535,34 @@ check "uninstall removes the refreshed owned plugin" \
 # directory holds nothing but our injection.ts and is removed wholesale.
 check "uninstall keeps the user's file inside the helper dir (dir not empty)" \
   "$([[ "$(cat "$UPG_NOTES" 2>/dev/null)" == "$UPG_NOTES_BEFORE" ]] && echo true || echo false)"
+
+# Dedicated exit-status fixture: a pristine install whose helper directory
+# contains ONLY injection.ts — the exact shape flagged as a possible
+# `set -euo pipefail` abort. Capture the raw exit code rather than letting
+# `||` swallow it, so a regression shows up as a failing check, not a
+# vanished suite.
+PIPEFAIL_DIR=$(mktemp -d)
+trap 'rm -rf "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$UPG_DIR" "$FOREIGN_PLUGIN_DIR" "$FOREIGN_HELPER_DIR" "$SUBSTR_DIR" "$PIPEFAIL_DIR"' EXIT
+
+git init -q "$PIPEFAIL_DIR"
+FORCE=1 bash "$ROOT/install.sh" "$PIPEFAIL_DIR" > /tmp/opencode_pf_install.log 2>&1 || {
+  echo "install.sh (pipefail fixture) failed:"; cat /tmp/opencode_pf_install.log; exit 1;
+}
+
+check "fixture: helper dir contains only injection.ts" \
+  "$([[ "$(ls -A "$PIPEFAIL_DIR/.opencode/plugin/task-store" | tr '\n' ' ' | xargs)" == "injection.ts" ]] && echo true || echo false)"
+
+PF_CODE=0
+bash "$ROOT/uninstall.sh" "$PIPEFAIL_DIR" > /tmp/opencode_pf_uninstall.log 2>&1 || PF_CODE=$?
+
+check "uninstall exit status is 0 when the helper dir holds only injection.ts" \
+  "$([[ "$PF_CODE" == "0" ]] && echo true || echo false)"
+
+check "uninstall fully removed the owned helper dir in that case" \
+  "$([[ ! -d "$PIPEFAIL_DIR/.opencode/plugin/task-store" ]] && echo true || echo false)"
+
+check "uninstall reached its final summary line (did not abort early)" \
+  "$(grep -q 'claude-task-store removed' /tmp/opencode_pf_uninstall.log && echo true || echo false)"
 
 bash "$ROOT/uninstall.sh" "$FOREIGN_PLUGIN_DIR" > /tmp/opencode_fp_uninstall.log 2>&1 || {
   echo "uninstall.sh (foreign plugin) failed:"; cat /tmp/opencode_fp_uninstall.log; exit 1;

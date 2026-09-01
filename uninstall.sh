@@ -137,9 +137,15 @@ if [[ -f "$OPENCODE_PLUGIN_FILE" ]]; then
     if [[ -d "$OPENCODE_HELPER_DIR" ]]; then
       # Only delete the helper if BOTH (a) the helper file carries the
       # ownership marker and (b) the directory contains no other files.
+      #
+      # `find -print -quit` rather than `ls -A | grep -v`: find exits 0 whether
+      # or not it matches, so the emptiness test never depends on a pipeline's
+      # exit status, and it is not confused by unusual filenames. Like `ls -A`
+      # it considers dotfiles, and it stops at the first foreign entry.
       if [[ -f "$OPENCODE_HELPER_FILE" ]] \
           && grep -qxF "$OPENCODE_MARKER" "$OPENCODE_HELPER_FILE" \
-          && [[ -z "$(ls -A "$OPENCODE_HELPER_DIR" 2>/dev/null | grep -v '^injection\.ts$')" ]]; then
+          && [[ -z "$(find "$OPENCODE_HELPER_DIR" -mindepth 1 -maxdepth 1 \
+                        ! -name 'injection.ts' -print -quit 2>/dev/null)" ]]; then
         rm -rf "$OPENCODE_HELPER_DIR"
         echo "  ✓ Removed OpenCode plugin helper: .opencode/plugin/task-store/"
       fi

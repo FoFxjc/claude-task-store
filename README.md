@@ -722,10 +722,10 @@ The OpenCode smoke tests need a working `opencode` binary on `PATH`. They
 skip cleanly (`exit 77`) if it isn't installed; the other suites are pure
 shell and run anywhere.
 
-442 automated checks pass across 11 suites (17 test files: 3 Jest, 14 shell)
+447 automated checks pass across 11 suites (17 test files: 3 Jest, 14 shell)
 — unit 108, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
 installer regression 17, path safety 32, project-local runtime 32,
-auto-checkpoint 60, OpenCode install regression 66, OpenCode resume smoke 16,
+auto-checkpoint 60, OpenCode install regression 71, OpenCode resume smoke 16,
 OpenCode auto-checkpoint smoke 20.
 
 CI runs every suite on Node 18/20/22 **except** the two real-OpenCode smoke
