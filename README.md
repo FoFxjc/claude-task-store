@@ -198,6 +198,35 @@ Smaller models often do not fail because they cannot perform the next coding ste
 
 ---
 
+## Context is a budget
+
+A larger context window is genuinely useful, and nothing here argues against it.
+But available capacity and justified consumption are separate questions: context
+that is carried forward or re-read still costs latency, money, and attention,
+whatever the limit happens to be.
+
+claude-task-store tries to reduce unnecessary context use in two directions:
+
+- **Execution** — externalize durable task state instead of carrying execution
+  history through every session.
+- **Observation** — give an agent the smallest useful view of the environment
+  instead of making it rediscover installation and operating boundaries from the
+  whole repository.
+
+The second direction applies to setup, not only to running work. For example,
+[`docs/agent-installation.md`](docs/agent-installation.md) gives a coding agent a
+bounded installation procedure and a minimal observation set, so it does not need
+to traverse the target repository broadly just to learn how to install and
+operate the tool.
+
+Broad inspection is not forbidden — it is demand-driven. An agent should expand
+what it observes when the task actually requires it, such as when installation
+validation fails and the cause has to be found.
+
+> Context capacity is not context permission.
+
+---
+
 ## Source of truth
 
 The task store is a navigation aid, not an authoritative record.
@@ -271,7 +300,9 @@ You just need to send this to your coding agent:
 runbook that tells the agent how to install safely — without modifying your
 application or package dependencies, without overwriting unrelated Claude
 Code/OpenCode configuration, and without enabling auto-checkpoint unless you
-explicitly ask for it.
+explicitly ask for it. The guide intentionally defines a minimal observation
+set, so the agent does not need to broadly inspect the repository unless
+installation validation fails.
 
 ### Manual installation
 
