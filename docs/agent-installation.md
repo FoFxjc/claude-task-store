@@ -12,6 +12,12 @@ configuration.
 
 ## Preconditions
 
+> **Do not broadly inspect the target repository unless installation validation fails.**
+
+Start with the minimum observation set defined in this guide. Expand inspection
+only when the documented installation or verification steps fail or reveal a
+specific ambiguity.
+
 Before modifying anything:
 
 - Identify the repository root.
