@@ -261,6 +261,20 @@ without re-reading transcripts.
 
 ## Installation
 
+### Let your coding agent install it for you
+
+You just need to send this to your coding agent:
+
+> Install `https://github.com/FoFxjc/claude-task-store` into this repository and follow `docs/agent-installation.md`.
+
+[`docs/agent-installation.md`](docs/agent-installation.md) is a machine-facing
+runbook that tells the agent how to install safely — without modifying your
+application or package dependencies, without overwriting unrelated Claude
+Code/OpenCode configuration, and without enabling auto-checkpoint unless you
+explicitly ask for it.
+
+### Manual installation
+
 **Prerequisites:** Node.js ≥ 18, Claude Code or OpenCode, `python3`
 
 ```bash
@@ -507,6 +521,12 @@ the locally installed `opencode` binary:
 **Default: off.** Nothing below happens unless you turn it on.
 
 `claude-task-store` covers session boundaries well, but not the middle of a long session. The agent can edit files, run tests and finish milestones without ever calling the CLI, and `.claude-task/state.json` quietly falls behind the repository. Auto-checkpoint is a conservative fix for exactly that drift.
+
+**Primarily, auto-checkpoint is interruption insurance.** It reduces recovery
+cost when a session ends unexpectedly — a crash, a timeout, a closed terminal —
+before the agent has a chance to update the checkpoint manually. It is not
+automatic task management: it never decides that a task is finished, and
+completion still requires an explicit `task-store done` with evidence.
 
 > Auto-checkpoint does not try to guess what your code means. It only notices that meaningful work happened and asks the agent to reconcile the checkpoint at a safe boundary.
 
