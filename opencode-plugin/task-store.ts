@@ -51,11 +51,15 @@
 //       text is staged to a pending file.
 //
 //   - experimental.chat.system.transform
-//       Fires on every chat call. Pushes:
+//       Fires on every chat call. Merges into the existing system prompt:
 //         (a) the canonical `task-store resume` projection (always, when
 //             state exists and is not archived)
 //         (b) any pending reconciliation instruction staged by the
 //             boundary hook, consumed in one shot
+//       Both are appended to `output.system[0]` — never pushed as extra
+//       array elements, because OpenCode turns each element into its own
+//       `role: "system"` message for OpenAI-compatible providers and
+//       LiteLLM requires system messages to come first.
 //       This is also the OpenCode analog of Claude Code's SessionStart.
 //
 //   - experimental.session.compacting
@@ -95,8 +99,7 @@
 // do not edit: ownership marker read by install.sh / uninstall.sh
 
 import {
-  buildResumeInjection,
-  consumePendingReconciliation,
+  applySystemInjection,
   markDirtyOnTool,
   checkReconcileBoundary,
   writePendingReconciliation,
@@ -176,30 +179,23 @@ const TaskStoreOpenCodePlugin = async ({ worktree }: PluginInput) => {
     },
 
     // ── System prompt injection ──────────────────────────────────────────
-    // Delivers two distinct elements, in this order:
+    // Delivers two pieces of content, in this order:
     //   (1) the canonical resume projection, when state exists
     //   (2) any pending reconciliation instruction staged by the boundary
-    // Both elements are appended to `output.system`; OpenCode composes
-    // the final system prompt. The instruction is consumed exactly once.
+    // Both are merged into the FIRST element of `output.system` rather than
+    // pushed as new elements: OpenCode maps each entry of `output.system` to
+    // its own `role: "system"` message for OpenAI-compatible providers, and
+    // LiteLLM rejects a system message that is not the first message. See
+    // applySystemInjection() for the full rationale. The instruction is
+    // consumed exactly once.
     "experimental.chat.system.transform": async (
       _input: unknown,
       output: SystemTransformOutput,
     ): Promise<void> => {
       try {
-        const resume = buildResumeInjection(worktree);
-        if (resume !== null && resume.length > 0) {
-          output.system.push(resume);
-        }
+        applySystemInjection(worktree, output.system);
       } catch {
         // Never let an injection failure break a session.
-      }
-      try {
-        const pending = consumePendingReconciliation(worktree);
-        if (pending !== null && pending.length > 0) {
-          output.system.push(pending);
-        }
-      } catch {
-        // Same as above.
       }
     },
 

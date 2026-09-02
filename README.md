@@ -429,8 +429,21 @@ experimental.chat.system.transform
   ↓
 node .claude/task-store/bin/task-store.js resume --root <worktree>
   ↓
-output.system.push(...)
+merged into output.system[0]   (never pushed as a new array element)
 ```
+
+**Single system block.** Everything the plugin contributes — the resume
+projection and any pending reconciliation instruction — is appended to the
+*first* element of `output.system`, after whatever system content OpenCode
+already put there. A new element is created only when OpenCode supplied an
+empty array. This is deliberate: OpenCode maps each element of
+`output.system` to its own `role: "system"` message for OpenAI-compatible
+providers, and LiteLLM-backed endpoints reject any request whose system
+message is not the first message
+(`litellm.BadRequestError: System message must be at the beginning`). The
+plugin therefore never increases the number of system message blocks. Order
+is fixed: existing OpenCode system content → resume projection → pending
+reconciliation instruction.
 
 The plugin contains no task-state logic of its own. It is a thin adapter that
 reuses the canonical CLI installed by step 2 of the installer. The same
@@ -449,7 +462,7 @@ through OpenCode's lifecycle hooks:
 |---|---|---|
 | Tool activity → dirty | `PostToolUse` shell hook | `tool.execute.after` plugin hook |
 | Reconciliation boundary | `Stop` hook (`additionalContext`) | `event({type: "session.idle"})` plugin hook, staging the instruction to `.claude-task/.pending-reconcile-instruction.txt` |
-| Instruction delivery | Same call (the `Stop` output channel) | Next `experimental.chat.system.transform` (which consumes the pending file once) |
+| Instruction delivery | Same call (the `Stop` output channel) | Next `experimental.chat.system.transform` (which consumes the pending file once and merges it into `output.system[0]`) |
 | Compaction | `PreCompact` writes history marker | `experimental.session.compacting` registered as a deliberate no-op |
 
 Both harnesses invoke the **same** `task-store auto mark-dirty`,

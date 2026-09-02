@@ -421,3 +421,95 @@ export function consumePendingReconciliation(worktree: string): string | null {
   }
   return content;
 }
+
+// ─── System-prompt composition ──────────────────────────────────────────────
+//
+// OpenCode's `experimental.chat.system.transform` hands the plugin an array
+// of system-prompt strings. For workflow/Anthropic-shaped providers OpenCode
+// concatenates them, but for OpenAI-compatible providers it maps EACH entry
+// to its own `role: "system"` message. LiteLLM-backed endpoints reject any
+// request whose system message is not the very first message, so appending a
+// second entry made every chat call fail with:
+//
+//   litellm.BadRequestError: System message must be at the beginning
+//
+// The fix is to treat the task-store output as augmentation of the system
+// context that is already there, rather than as additional system blocks:
+// everything this adapter contributes is merged into `system[0]`, and a new
+// element is created only when OpenCode gave us an empty array. The number of
+// system message blocks is therefore never increased by this plugin.
+
+/**
+ * Separator between the existing system content and the task-store block,
+ * and between the resume projection and the reconciliation instruction.
+ *
+ * A blank line is the smallest thing that reads as a section break in both
+ * the projection's own plain-text layout and whatever prompt precedes it.
+ */
+export const SYSTEM_INJECTION_SEPARATOR = "\n\n";
+
+/**
+ * Merge `block` into the primary (first) system element, creating that
+ * element only when the array is empty.
+ *
+ * Postcondition, and the whole point of this function: the array's length
+ * either stays the same (when it already had an element) or becomes exactly
+ * 1 (when it was empty). It never grows past 1 element's worth of new system
+ * message blocks, which is what the LiteLLM constraint requires.
+ *
+ * Existing content is preserved byte-for-byte as the prefix; the block is
+ * always appended after it.
+ */
+export function mergeIntoPrimarySystem(system: string[], block: string): void {
+  if (!block) return;
+  if (system.length > 0) {
+    system[0] = system[0] + SYSTEM_INJECTION_SEPARATOR + block;
+    return;
+  }
+  system.push(block);
+}
+
+/**
+ * The whole `experimental.chat.system.transform` body, in one testable
+ * function: collect the resume projection and any pending reconciliation
+ * instruction, then merge both into the existing system context.
+ *
+ * Ordering is fixed and load-bearing:
+ *
+ *   existing OpenCode system content
+ *     → task-store resume projection
+ *       → pending reconciliation instruction
+ *
+ * The pending instruction is consumed exactly once whether or not it ends up
+ * being injected — `consumePendingReconciliation` deletes the file as it
+ * reads it, and the CLI's own debounce is what prevents a re-nag.
+ *
+ * Each source is guarded separately so a failure in one cannot suppress the
+ * other, and the whole thing degrades to "inject nothing": a checkpoint aid
+ * must never break a coding session.
+ */
+export function applySystemInjection(worktree: string, system: string[]): void {
+  if (!Array.isArray(system)) return;
+
+  let resume: string | null = null;
+  try {
+    resume = buildResumeInjection(worktree);
+  } catch {
+    // swallow — see the doc comment above
+  }
+
+  let pending: string | null = null;
+  try {
+    pending = consumePendingReconciliation(worktree);
+  } catch {
+    // swallow — same
+  }
+
+  const parts: string[] = [];
+  if (resume !== null && resume.length > 0) parts.push(resume);
+  if (pending !== null && pending.length > 0) parts.push(pending);
+  if (parts.length === 0) return;
+
+  const block = parts.join(SYSTEM_INJECTION_SEPARATOR);
+  mergeIntoPrimarySystem(system, block);
+}
