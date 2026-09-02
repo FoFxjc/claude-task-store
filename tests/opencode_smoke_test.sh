@@ -44,6 +44,68 @@ check() {
   fi
 }
 
+# Diagnostic patch, applied to the INSTALLED copy of the adapter's injection
+# helper (never to the production source). It records two things per chat
+# call:
+#
+#   .smoke-pushed.txt         the exact resume text the adapter merged in
+#   .smoke-system-count.json  the number of `output.system` elements before
+#                             and after the merge
+#
+# The block count is what regressed in issue #7: OpenCode maps each element
+# of `output.system` to its own `role: "system"` message for
+# OpenAI-compatible providers, and LiteLLM rejects a request whose system
+# message is not the first message. Pushing a second element therefore broke
+# every chat call with `litellm.BadRequestError: System message must be at
+# the beginning`.
+#
+# The patch asserts its own anchor. If the adapter is refactored so the
+# anchor stops matching, this aborts loudly (set -e) instead of silently
+# recording nothing and letting every downstream check pass vacuously --
+# which is exactly how the previous `output.system.push(resume);` anchor
+# would have failed after this fix.
+install_diagnostic() {
+  python3 - "$1/.opencode/plugin/task-store/injection.ts" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+
+anchor = """  const block = parts.join(SYSTEM_INJECTION_SEPARATOR);
+  mergeIntoPrimarySystem(system, block);"""
+if anchor not in content:
+    sys.exit("diagnostic anchor not found in " + path)
+
+patched = content.replace(anchor, """  const block = parts.join(SYSTEM_INJECTION_SEPARATOR);
+  const __smokeBefore = system.length;
+  mergeIntoPrimarySystem(system, block);
+  try {
+    if (resume) writeFileSync(worktree + "/.claude-task/.smoke-pushed.txt", resume);
+    writeFileSync(
+      worktree + "/.claude-task/.smoke-system-count.json",
+      JSON.stringify({ before: __smokeBefore, after: system.length }),
+    );
+  } catch {}""")
+
+with open(path, "w") as f:
+    f.write(patched)
+PYEOF
+}
+
+# Read back the recorded block counts. Prints "true" when task-store did not
+# add a system message block: the count is unchanged when OpenCode already
+# supplied system content, and is exactly 1 when it supplied none.
+system_count_ok() {
+  node -e '
+    const fs = require("fs");
+    const p = process.argv[1];
+    if (!fs.existsSync(p)) { console.log("false"); process.exit(0); }
+    const { before, after } = JSON.parse(fs.readFileSync(p, "utf8"));
+    console.log(String(before > 0 ? after === before : after === 1));
+  ' "$1"
+}
+
 if ! command -v opencode >/dev/null 2>&1; then
   echo "opencode not found in PATH; skipping OpenCode smoke test."
   exit 77
@@ -106,24 +168,10 @@ mkdir -p "$TEST_DIR/.opencode/plugin/task-store"
 cp "$ROOT/opencode-plugin/task-store.ts" "$TEST_DIR/.opencode/plugin/task-store.ts"
 cp "$ROOT/opencode-plugin/task-store/injection.ts" "$TEST_DIR/.opencode/plugin/task-store/injection.ts"
 
-# Add a one-line file-write right after the push, so we can inspect
-# exactly what the plugin pushed. This is purely a test diagnostic and
-# does not change the production plugin source.
-DIAG_PATH="$TEST_DIR/.opencode/plugin/task-store.ts"
-python3 - "$DIAG_PATH" <<'PYEOF'
-import sys
-plugin_path = sys.argv[1]
-with open(plugin_path) as f:
-    content = f.read()
-patched = content.replace(
-    'output.system.push(resume);',
-    '''const fs = await import("node:fs");
-    try { fs.writeFileSync(worktree + "/.claude-task/.smoke-pushed.txt", resume); } catch {}
-    output.system.push(resume);'''
-)
-with open(plugin_path, "w") as f:
-    f.write(patched)
-PYEOF
+# Record what the adapter merged into the system prompt, and how many
+# system blocks existed before and after. Purely a test diagnostic; the
+# production source is untouched.
+install_diagnostic "$TEST_DIR"
 
 # ── Run OpenCode ────────────────────────────────────────────────────────
 cd "$TEST_DIR"
@@ -190,6 +238,27 @@ check "OpenCode plugin loaded (no \`failed to load plugin\` error in log)" \
 check "OpenCode plugin path was loaded by OpenCode (no \`paths[0]\` schema error)" \
   "$(if grep -q 'paths\[0\]' /tmp/opencode_smoke.log; then echo false; else echo true; fi)"
 
+# ── Issue #7: task-store must not add a system message block ────────────
+# A real OpenCode session always supplies its own system prompt, so the
+# adapter's contribution has to be merged into that first element. Any extra
+# element becomes a second `role: "system"` message for OpenAI-compatible
+# providers, which is exactly what LiteLLM rejects with
+# `BadRequestError: System message must be at the beginning`.
+COUNTS="$TEST_DIR/.claude-task/.smoke-system-count.json"
+
+check "block-count diagnostic was recorded by the real OpenCode session" \
+  "$([[ -s "$COUNTS" ]] && echo true || echo false)"
+
+check "OpenCode supplied at least one system block of its own (fixture sanity)" \
+  "$(if [[ -s "$COUNTS" ]]; then
+      node -e 'const{before}=require(process.argv[1]);console.log(String(before>0))' "$COUNTS"
+    else
+      echo false
+    fi)"
+
+check "task-store did not increase the system message block count (issue #7)" \
+  "$(system_count_ok "$COUNTS")"
+
 # ── Test 2: paths with spaces and apostrophes ──────────────────────────
 echo ""
 echo "═══ Smoke test 2: paths with spaces and apostrophes ═══"
@@ -217,21 +286,7 @@ node "$TEST_DIR2/.claude/task-store/bin/task-store.js" init "Spaced goal" "T1" -
 mkdir -p "$TEST_DIR2/.opencode/plugin/task-store"
 cp "$ROOT/opencode-plugin/task-store.ts" "$TEST_DIR2/.opencode/plugin/task-store.ts"
 cp "$ROOT/opencode-plugin/task-store/injection.ts" "$TEST_DIR2/.opencode/plugin/task-store/injection.ts"
-DIAG2="$TEST_DIR2/.opencode/plugin/task-store.ts"
-python3 - "$DIAG2" <<'PYEOF'
-import sys
-plugin_path = sys.argv[1]
-with open(plugin_path) as f:
-    content = f.read()
-patched = content.replace(
-    'output.system.push(resume);',
-    '''const fs = await import("node:fs");
-    try { fs.writeFileSync(worktree + "/.claude-task/.smoke-pushed.txt", resume); } catch {}
-    output.system.push(resume);'''
-)
-with open(plugin_path, "w") as f:
-    f.write(patched)
-PYEOF
+install_diagnostic "$TEST_DIR2"
 
 cd "$TEST_DIR2"
 opencode run --print-logs --log-level INFO "exit" > /tmp/opencode_smoke_spaced.log 2>&1 || true
@@ -264,21 +319,7 @@ EOF
 mkdir -p "$TEST_DIR3/.opencode/plugin/task-store"
 cp "$ROOT/opencode-plugin/task-store.ts" "$TEST_DIR3/.opencode/plugin/task-store.ts"
 cp "$ROOT/opencode-plugin/task-store/injection.ts" "$TEST_DIR3/.opencode/plugin/task-store/injection.ts"
-DIAG3="$TEST_DIR3/.opencode/plugin/task-store.ts"
-python3 - "$DIAG3" <<'PYEOF'
-import sys
-plugin_path = sys.argv[1]
-with open(plugin_path) as f:
-    content = f.read()
-patched = content.replace(
-    'output.system.push(resume);',
-    '''const fs = await import("node:fs");
-    try { fs.writeFileSync(worktree + "/.claude-task/.smoke-pushed.txt", resume); } catch {}
-    output.system.push(resume);'''
-)
-with open(plugin_path, "w") as f:
-    f.write(patched)
-PYEOF
+install_diagnostic "$TEST_DIR3"
 
 cd "$TEST_DIR3"
 opencode run --print-logs --log-level INFO "exit" > /tmp/opencode_smoke_empty.log 2>&1 || true
@@ -315,21 +356,7 @@ node "$CLI4" archive --root "$TEST_DIR4" >/dev/null
 mkdir -p "$TEST_DIR4/.opencode/plugin/task-store"
 cp "$ROOT/opencode-plugin/task-store.ts" "$TEST_DIR4/.opencode/plugin/task-store.ts"
 cp "$ROOT/opencode-plugin/task-store/injection.ts" "$TEST_DIR4/.opencode/plugin/task-store/injection.ts"
-DIAG4="$TEST_DIR4/.opencode/plugin/task-store.ts"
-python3 - "$DIAG4" <<'PYEOF'
-import sys
-plugin_path = sys.argv[1]
-with open(plugin_path) as f:
-    content = f.read()
-patched = content.replace(
-    'output.system.push(resume);',
-    '''const fs = await import("node:fs");
-    try { fs.writeFileSync(worktree + "/.claude-task/.smoke-pushed.txt", resume); } catch {}
-    output.system.push(resume);'''
-)
-with open(plugin_path, "w") as f:
-    f.write(patched)
-PYEOF
+install_diagnostic "$TEST_DIR4"
 
 cd "$TEST_DIR4"
 opencode run --print-logs --log-level INFO "exit" > /tmp/opencode_smoke_archived.log 2>&1 || true

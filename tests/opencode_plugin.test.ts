@@ -33,6 +33,9 @@ import {
   writePendingReconciliation,
   consumePendingReconciliation,
   capInjection,
+  applySystemInjection,
+  mergeIntoPrimarySystem,
+  SYSTEM_INJECTION_SEPARATOR,
   MAX_INJECTION_CHARS,
   TRUNCATION_SUFFIX,
   type CliRunResult,
@@ -650,5 +653,225 @@ describe('pending reconciliation bridge', () => {
     } finally {
       rmSync(tricky, { recursive: true, force: true });
     }
+  });
+});
+
+// ─── System-prompt composition (regression: GitHub issue #7) ───────────────
+//
+// OpenCode maps each element of `output.system` to its own `role: "system"`
+// message for OpenAI-compatible providers. A LiteLLM-backed endpoint rejects
+// any request whose system message is not the very first message:
+//
+//   litellm.BadRequestError: System message must be at the beginning
+//
+// The adapter therefore merges everything it contributes into `system[0]`.
+// These tests pin that invariant — the block count must never grow — plus
+// the ordering and one-shot consumption semantics around it.
+
+describe('mergeIntoPrimarySystem', () => {
+  it('appends to the existing first element instead of pushing a new one', () => {
+    const system = ['EXISTING'];
+    mergeIntoPrimarySystem(system, 'BLOCK');
+    expect(system).toEqual([`EXISTING${SYSTEM_INJECTION_SEPARATOR}BLOCK`]);
+  });
+
+  it('creates exactly one element when the array is empty', () => {
+    const system: string[] = [];
+    mergeIntoPrimarySystem(system, 'BLOCK');
+    expect(system).toEqual(['BLOCK']);
+  });
+
+  it('leaves later elements untouched when OpenCode supplied several', () => {
+    const system = ['FIRST', 'SECOND'];
+    mergeIntoPrimarySystem(system, 'BLOCK');
+    expect(system).toHaveLength(2);
+    expect(system[0]).toBe(`FIRST${SYSTEM_INJECTION_SEPARATOR}BLOCK`);
+    expect(system[1]).toBe('SECOND');
+  });
+
+  it('is a no-op for an empty block', () => {
+    const system = ['EXISTING'];
+    mergeIntoPrimarySystem(system, '');
+    expect(system).toEqual(['EXISTING']);
+  });
+});
+
+describe('applySystemInjection (single system block invariant)', () => {
+  let root: string;
+  let defaultStdout: string;
+  beforeEach(() => {
+    root = makeTmpDir('systemblock');
+    defaultStdout = 'MOCK RESUME\n';
+    _resetCacheForTests();
+    _setRunResumeCliForTests((): CliRunResult => ({
+      status: 0,
+      stdout: defaultStdout,
+      stderr: '',
+    }));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    _setRunResumeCliForTests(() => {
+      throw new Error('default runner should not be invoked in tests');
+    });
+  });
+
+  it('existing system + resume => still exactly one system element', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    const system = ['OPENCODE SYSTEM PROMPT'];
+    applySystemInjection(root, system);
+    expect(system).toHaveLength(1);
+    expect(system[0]).toContain('MOCK RESUME');
+  });
+
+  it('existing system + resume + pending => still exactly one system element', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
+    const system = ['OPENCODE SYSTEM PROMPT'];
+    applySystemInjection(root, system);
+    expect(system).toHaveLength(1);
+    expect(system[0]).toContain('MOCK RESUME');
+    expect(system[0]).toContain('RECONCILE INSTRUCTION');
+  });
+
+  it('preserves the existing system content byte-for-byte as a prefix', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
+    // Deliberately awkward content: trailing whitespace, blank lines and a
+    // multi-byte character must all survive untouched.
+    const existing = 'You are OpenCode.\n\n  Rules:\n   - be terse  \n☑ done';
+    const system = [existing];
+    applySystemInjection(root, system);
+    expect(system[0].startsWith(existing)).toBe(true);
+  });
+
+  it('orders existing system → resume → pending instruction', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
+    const system = ['OPENCODE SYSTEM PROMPT'];
+    applySystemInjection(root, system);
+    const merged = system[0];
+    const existingAt = merged.indexOf('OPENCODE SYSTEM PROMPT');
+    const resumeAt = merged.indexOf('MOCK RESUME');
+    const pendingAt = merged.indexOf('RECONCILE INSTRUCTION');
+    expect(existingAt).toBe(0);
+    expect(resumeAt).toBeGreaterThan(existingAt);
+    expect(pendingAt).toBeGreaterThan(resumeAt);
+  });
+
+  it('separates each part with the documented separator', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
+    const system = ['EXISTING'];
+    applySystemInjection(root, system);
+    expect(system[0]).toBe(
+      `EXISTING${SYSTEM_INJECTION_SEPARATOR}MOCK RESUME\n${SYSTEM_INJECTION_SEPARATOR}RECONCILE INSTRUCTION`,
+    );
+  });
+
+  it('creates exactly one element when OpenCode supplied no system content', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    const system: string[] = [];
+    applySystemInjection(root, system);
+    expect(system).toHaveLength(1);
+    expect(system[0]).toBe('MOCK RESUME\n');
+  });
+
+  it('leaves the system array unchanged when there is no state and no pending', () => {
+    const system = ['OPENCODE SYSTEM PROMPT'];
+    applySystemInjection(root, system);
+    expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
+  });
+
+  it('leaves the system array unchanged for archived state (no-injection unchanged)', () => {
+    writeState(root, 'archived');
+    writeCli(root);
+    const system = ['OPENCODE SYSTEM PROMPT'];
+    applySystemInjection(root, system);
+    expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
+  });
+
+  it('leaves the system array unchanged when the project-local CLI is missing', () => {
+    writeState(root, 'active');
+    const system = ['OPENCODE SYSTEM PROMPT'];
+    applySystemInjection(root, system);
+    expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
+  });
+
+  it('injects a pending instruction even when there is no resume projection', () => {
+    // No state at all: the boundary-staged instruction must still reach the
+    // model, and still without adding a system block.
+    writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
+    const system = ['OPENCODE SYSTEM PROMPT'];
+    applySystemInjection(root, system);
+    expect(system).toHaveLength(1);
+    expect(system[0]).toBe(
+      `OPENCODE SYSTEM PROMPT${SYSTEM_INJECTION_SEPARATOR}RECONCILE INSTRUCTION`,
+    );
+  });
+
+  it('consumes the pending instruction exactly once', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
+
+    const first = ['SYS'];
+    applySystemInjection(root, first);
+    expect(first[0]).toContain('RECONCILE INSTRUCTION');
+
+    const second = ['SYS'];
+    applySystemInjection(root, second);
+    expect(second[0]).not.toContain('RECONCILE INSTRUCTION');
+    expect(second).toHaveLength(1);
+    // The pending file is gone after the first consume.
+    expect(
+      existsSync(join(root, '.claude-task', '.pending-reconcile-instruction.txt')),
+    ).toBe(false);
+  });
+
+  it('LiteLLM failure mode: task-store never increases the system block count', () => {
+    // The exact shape that produced `litellm.BadRequestError: System message
+    // must be at the beginning` — an existing OpenCode system prompt plus
+    // both task-store contributions. The count before must equal the count
+    // after, for every combination of contributions.
+    const cases: { label: string; state: boolean; pending: boolean }[] = [
+      { label: 'resume only', state: true, pending: false },
+      { label: 'pending only', state: false, pending: true },
+      { label: 'resume + pending', state: true, pending: true },
+      { label: 'neither', state: false, pending: false },
+    ];
+    for (const c of cases) {
+      const caseRoot = makeTmpDir(`litellm-${c.label.replace(/\W+/g, '-')}`);
+      try {
+        _resetCacheForTests();
+        if (c.state) {
+          writeState(caseRoot, 'active');
+          writeCli(caseRoot);
+        }
+        if (c.pending) writePendingReconciliation(caseRoot, 'RECONCILE INSTRUCTION');
+        const system = ['OPENCODE SYSTEM PROMPT'];
+        const before = system.length;
+        applySystemInjection(caseRoot, system);
+        expect(system.length).toBe(before);
+      } finally {
+        rmSync(caseRoot, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('tolerates a missing system array without throwing', () => {
+    // Defensive: OpenCode owns the shape of `output`. A checkpoint aid must
+    // degrade to no-injection rather than break the chat call.
+    writeState(root, 'active');
+    writeCli(root);
+    expect(() =>
+      applySystemInjection(root, undefined as unknown as string[]),
+    ).not.toThrow();
   });
 });

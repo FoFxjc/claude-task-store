@@ -286,19 +286,28 @@ install_plugin "$T5"
 
 # Diagnostic patch: write the injected resume text to a file so the
 # test can assert the resume fired even though we cannot observe the
-# model directly.
-python3 - "$T5/.opencode/plugin/task-store.ts" <<'PYEOF'
+# model directly. Patched into the installed injection helper, which is
+# where the resume text is composed; the patch asserts its own anchor so a
+# refactor fails loudly rather than silently recording nothing.
+python3 - "$T5/.opencode/plugin/task-store/injection.ts" <<'PYEOF'
 import sys
-plugin_path = sys.argv[1]
-with open(plugin_path) as f:
+
+path = sys.argv[1]
+with open(path) as f:
     content = f.read()
-patched = content.replace(
-    'output.system.push(resume);',
-    '''const fs = await import("node:fs");
-    fs.writeFileSync(worktree + "/.claude-task/.system-resume.txt", resume);
-    output.system.push(resume);'''
-)
-with open(plugin_path, "w") as f:
+
+anchor = """  const block = parts.join(SYSTEM_INJECTION_SEPARATOR);"""
+if anchor not in content:
+    sys.exit("diagnostic anchor not found in " + path)
+
+patched = content.replace(anchor, """  if (resume) {
+    try {
+      writeFileSync(worktree + "/.claude-task/.system-resume.txt", resume);
+    } catch {}
+  }
+""" + anchor)
+
+with open(path, "w") as f:
     f.write(patched)
 PYEOF
 
