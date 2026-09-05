@@ -79,7 +79,8 @@ EVIDENCE_OK=$(python3 - "$PROJ/.claude-task/state.json" <<'PYEOF'
 import json, sys
 with open(sys.argv[1]) as f:
     state = json.load(f)
-t1 = next(t for t in state['tasks'] if t['id'] == 'T1')
+topic = next(t for t in state['topics'] if t['name'] == state['active_topic'])
+t1 = next(t for t in topic['tasks'] if t['id'] == 'T1')
 ev = t1.get('evidence') or []
 print('true' if ev == ['tests pass, all 139 of them', 'src/core.ts'] else 'false')
 PYEOF
@@ -95,7 +96,8 @@ import json, sys
 path = sys.argv[1]
 with open(path) as f:
     state = json.load(f)
-for t in state['tasks']:
+topic = next(t for t in state['topics'] if t['name'] == state['active_topic'])
+for t in topic['tasks']:
     if t['id'] == 'T2':
         t['notes'] = 'PRIOR CONTEXT worth keeping'
 with open(path, 'w') as f:
@@ -108,8 +110,9 @@ NOTES_OK=$(python3 - "$PROJ/.claude-task/state.json" <<'PYEOF'
 import json, sys
 with open(sys.argv[1]) as f:
     state = json.load(f)
-t2 = next(t for t in state['tasks'] if t['id'] == 'T2')
-blockers = [b for b in state.get('blockers', []) if b.get('task_id') == 'T2']
+topic = next(t for t in state['topics'] if t['name'] == state['active_topic'])
+t2 = next(t for t in topic['tasks'] if t['id'] == 'T2')
+blockers = [b for b in topic.get('blockers', []) if b.get('task_id') == 'T2']
 kept = t2.get('notes') == 'PRIOR CONTEXT worth keeping'
 recorded = any('upstream API returns 500' in b.get('description', '') for b in blockers)
 print('true' if kept and recorded else 'false')
@@ -319,7 +322,9 @@ wait
 TASK_COUNT=$(python3 - "$PROJ/.claude-task/state.json" <<'PYEOF'
 import json, sys
 with open(sys.argv[1]) as f:
-    print(len(json.load(f)['tasks']))
+    state = json.load(f)
+    topic = next(t for t in state['topics'] if t['name'] == state['active_topic'])
+    print(len(topic['tasks']))
 PYEOF
 )
 check "all $N concurrent \`add\` writes survive (got $TASK_COUNT)" \
@@ -328,7 +333,9 @@ check "all $N concurrent \`add\` writes survive (got $TASK_COUNT)" \
 DUPE_IDS=$(python3 - "$PROJ/.claude-task/state.json" <<'PYEOF'
 import json, sys
 with open(sys.argv[1]) as f:
-    ids = [t['id'] for t in json.load(f)['tasks']]
+    state = json.load(f)
+    topic = next(t for t in state['topics'] if t['name'] == state['active_topic'])
+    ids = [t['id'] for t in topic['tasks']]
 print('true' if len(ids) == len(set(ids)) else 'false')
 PYEOF
 )

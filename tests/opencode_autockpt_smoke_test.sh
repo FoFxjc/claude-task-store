@@ -247,7 +247,8 @@ check "conservative+dirty: state.json task statuses unchanged (no auto-completio
       const s = JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
       // After init/start: T1 was started (in_progress); T2 is still pending.
       // The plugin must not have advanced any status to "done".
-      const ok = s.tasks.every(t => t.status !== "done") && s.tasks.every(t => t.status === "pending" || t.status === "in_progress");
+      const topic = s.topics.find(t => t.name === s.active_topic);
+      const ok = topic.tasks.every(t => t.status !== "done") && topic.tasks.every(t => t.status === "pending" || t.status === "in_progress");
       console.log(ok ? "true" : "false");
     ' "$T3/.claude-task/state.json" | grep -q true && echo true || echo false)"
 

@@ -131,7 +131,7 @@ store lets the work outlive the session.
 
 ```
 .claude-task/
-├── state.json       # Current execution state (human-readable, committable)
+├── state.json       # Named topic checkpoints + active topic (human-readable, committable)
 └── history.jsonl    # Append-only audit trail (one JSON object per line)
 
 .claude/
@@ -151,3 +151,10 @@ bin/
 schemas/
 └── state.schema.json  # JSON Schema for state.json validation
 ```
+
+The store can retain several named topics for one branch while selecting one
+`active_topic`. Task IDs and execution fields are topic-local; existing CLI
+verbs and the canonical resume renderer operate only on the selected topic.
+Switching topics changes selection without rewriting either topic's checkpoint.
+This is not worktree isolation, concurrent execution, dependency tracking, or
+orchestration.

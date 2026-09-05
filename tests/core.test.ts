@@ -26,6 +26,9 @@ import {
   historyFilePath,
   StateError,
   validateState,
+  getActiveTopic,
+  addTopic,
+  useTopic,
 } from '../src/core.js';
 
 function makeTmpDir(): string {
@@ -47,17 +50,17 @@ describe('initState', () => {
 
   it('creates tasks with sequential IDs', () => {
     const state = initState('Goal', ['T A', 'T B', 'T C'], root);
-    expect(state.tasks.map(t => t.id)).toEqual(['T1', 'T2', 'T3']);
+    expect(getActiveTopic(state).tasks.map(t => t.id)).toEqual(['T1', 'T2', 'T3']);
   });
 
   it('sets all tasks to pending initially', () => {
     const state = initState('Goal', ['T A', 'T B'], root);
-    expect(state.tasks.every(t => t.status === 'pending')).toBe(true);
+    expect(getActiveTopic(state).tasks.every(t => t.status === 'pending')).toBe(true);
   });
 
   it('sets next_action to start first task', () => {
     const state = initState('Goal', ['First task'], root);
-    expect(state.next_action).toContain('T1');
+    expect(getActiveTopic(state).next_action).toContain('T1');
   });
 
   it('throws if active state already exists', () => {
@@ -82,8 +85,8 @@ describe('startTask / completeTask', () => {
 
   it('marks task in_progress and sets current_task', () => {
     const state = startTask('T1', root);
-    expect(state.tasks[0].status).toBe('in_progress');
-    expect(state.current_task).toBe('T1');
+    expect(getActiveTopic(state).tasks[0].status).toBe('in_progress');
+    expect(getActiveTopic(state).current_task).toBe('T1');
   });
 
   it('requires evidence to complete', () => {
@@ -94,14 +97,14 @@ describe('startTask / completeTask', () => {
   it('marks task done with evidence', () => {
     startTask('T1', root);
     const state = completeTask('T1', ['src/foo.ts', 'tests pass'], undefined, root);
-    expect(state.tasks[0].status).toBe('done');
-    expect(state.tasks[0].evidence).toContain('src/foo.ts');
+    expect(getActiveTopic(state).tasks[0].status).toBe('done');
+    expect(getActiveTopic(state).tasks[0].evidence).toContain('src/foo.ts');
   });
 
   it('auto-advances current_task to next pending', () => {
     startTask('T1', root);
     const state = completeTask('T1', ['evidence'], undefined, root);
-    expect(state.current_task).toBe('T2');
+    expect(getActiveTopic(state).current_task).toBe('T2');
   });
 
   it('sets status to completed when all tasks done', () => {
@@ -109,7 +112,7 @@ describe('startTask / completeTask', () => {
     completeTask('T1', ['e1'], undefined, root);
     startTask('T2', root);
     const state = completeTask('T2', ['e2'], undefined, root);
-    expect(state.status).toBe('completed');
+    expect(getActiveTopic(state).status).toBe('completed');
   });
 
   it('throws for unknown task ID', () => {
@@ -127,21 +130,21 @@ describe('blockTask / resumeTask', () => {
 
   it('marks task and overall state blocked', () => {
     const state = blockTask('T1', 'External API down', root);
-    expect(state.tasks[0].status).toBe('blocked');
-    expect(state.status).toBe('blocked');
-    expect(state.blockers?.length).toBeGreaterThan(0);
+    expect(getActiveTopic(state).tasks[0].status).toBe('blocked');
+    expect(getActiveTopic(state).status).toBe('blocked');
+    expect(getActiveTopic(state).blockers?.length).toBeGreaterThan(0);
   });
 
   it('records blocker reason', () => {
     blockTask('T1', 'API is broken', root);
     const state = readState(root)!;
-    expect(state.blockers?.[0].description).toBe('API is broken');
+    expect(getActiveTopic(state).blockers?.[0].description).toBe('API is broken');
   });
 
   it('can resume a blocked task', () => {
     blockTask('T1', 'reason', root);
     const state = resumeTask('T1', root);
-    expect(state.tasks[0].status).toBe('in_progress');
+    expect(getActiveTopic(state).tasks[0].status).toBe('in_progress');
   });
 });
 
@@ -155,7 +158,8 @@ describe('addTask', () => {
 
   it('assigns next sequential ID', () => {
     const state = addTask('New task', undefined, root);
-    const newTask = state.tasks[state.tasks.length - 1];
+    const topic = getActiveTopic(state);
+    const newTask = topic.tasks[topic.tasks.length - 1];
     expect(newTask.id).toBe('T3');
     expect(newTask.title).toBe('New task');
   });
@@ -163,7 +167,7 @@ describe('addTask', () => {
   it('does not create duplicate IDs after add', () => {
     addTask('T3', undefined, root);
     const state = addTask('T4', undefined, root);
-    const ids = state.tasks.map(t => t.id);
+    const ids = getActiveTopic(state).tasks.map(t => t.id);
     expect(new Set(ids).size).toBe(ids.length);
   });
 });
@@ -179,16 +183,77 @@ describe('recordAttempt', () => {
 
   it('appends attempt to task', () => {
     const state = recordAttempt('T1', 'used inline mock', 'too slow', root);
-    expect(state.tasks[0].attempts).toHaveLength(1);
-    expect(state.tasks[0].attempts?.[0].description).toBe('used inline mock');
-    expect(state.tasks[0].attempts?.[0].outcome).toBe('too slow');
+    expect(getActiveTopic(state).tasks[0].attempts).toHaveLength(1);
+    expect(getActiveTopic(state).tasks[0].attempts?.[0].description).toBe('used inline mock');
+    expect(getActiveTopic(state).tasks[0].attempts?.[0].outcome).toBe('too slow');
   });
 
   it('accumulates multiple attempts', () => {
     recordAttempt('T1', 'approach A', 'failed', root);
     recordAttempt('T1', 'approach B', 'also failed', root);
     const state = readState(root)!;
-    expect(state.tasks[0].attempts).toHaveLength(2);
+    expect(getActiveTopic(state).tasks[0].attempts).toHaveLength(2);
+  });
+});
+
+describe('topics', () => {
+  let root: string;
+  beforeEach(() => {
+    root = makeTmpDir();
+    initState('Ship API', ['Implement endpoint'], root);
+  });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  it('adds a topic without changing the active topic', () => {
+    const state = addTopic('docs', 'Write the guide', ['Draft', 'Review'], root);
+    expect(state.active_topic).toBe('default');
+    expect(state.topics.map(topic => topic.name)).toEqual(['default', 'docs']);
+    expect(state.topics[1].tasks.map(task => task.id)).toEqual(['T1', 'T2']);
+  });
+
+  it('rejects duplicate topic names', () => {
+    addTopic('docs', 'Write the guide', [], root);
+    expect(() => addTopic('docs', 'Another goal', [], root)).toThrow(StateError);
+  });
+
+  it('switches topics while preserving independent execution checkpoints', () => {
+    startTask('T1', root);
+    recordAttempt('T1', 'direct integration', 'API unavailable', root);
+    recordDecision('Keep retry logic local', 'Avoid a new dependency', root);
+    setNextAction('Add a deterministic fixture', root);
+
+    addTopic('docs', 'Write the guide', ['Draft guide'], root);
+    useTopic('docs', root);
+    startTask('T1', root);
+    completeTask('T1', ['docs/guide.md'], undefined, root);
+
+    const switchedBack = useTopic('default', root);
+    const original = getActiveTopic(switchedBack);
+    expect(original.current_task).toBe('T1');
+    expect(original.tasks[0].attempts?.[0]).toMatchObject({
+      description: 'direct integration',
+      outcome: 'API unavailable',
+    });
+    expect(original.decisions?.[0].summary).toBe('Keep retry logic local');
+    expect(original.next_action).toBe('Add a deterministic fixture');
+
+    const docs = switchedBack.topics.find(topic => topic.name === 'docs')!;
+    expect(docs.status).toBe('completed');
+    expect(docs.tasks[0].evidence).toEqual(['docs/guide.md']);
+  });
+
+  it('renders only the active topic in resume context', () => {
+    addTopic('docs', 'Write secret docs', ['Private draft'], root);
+    const defaultResume = buildResumeContext(readState(root)!);
+    expect(defaultResume).toContain('TOPIC: default');
+    expect(defaultResume).toContain('Ship API');
+    expect(defaultResume).not.toContain('Write secret docs');
+
+    useTopic('docs', root);
+    const docsResume = buildResumeContext(readState(root)!);
+    expect(docsResume).toContain('TOPIC: docs');
+    expect(docsResume).toContain('Write secret docs');
+    expect(docsResume).not.toContain('Ship API');
   });
 });
 
@@ -222,7 +287,7 @@ describe('buildResumeContext', () => {
 
   it('includes failed attempt for blocked tasks', () => {
     const state = readState(root)!;
-    const t2 = state.tasks.find(t => t.id === 'T2')!;
+    const t2 = getActiveTopic(state).tasks.find(t => t.id === 'T2')!;
     expect(t2.attempts).toHaveLength(1);
     expect(t2.attempts?.[0].description).toBe('JWT with redis');
     const ctx = buildResumeContext(state);
@@ -290,6 +355,53 @@ describe('validateState', () => {
       ], updated_at: '',
     })).toThrow(StateError);
   });
+
+  it('migrates version 1 state into a default topic without losing checkpoint data', () => {
+    const legacy = {
+      version: '1',
+      revision: 7,
+      goal: 'Legacy goal',
+      status: 'blocked',
+      current_task: 'T1',
+      tasks: [{
+        id: 'T1', title: 'Legacy task', status: 'blocked', notes: 'keep me',
+        evidence: ['proof'], attempts: [{ description: 'old way', outcome: 'failed' }],
+        started_at: '2024-01-01T00:00:00.000Z', completed_at: null,
+      }],
+      decisions: [{ summary: 'Legacy decision', rationale: 'Legacy rationale' }],
+      blockers: [{ description: 'Legacy blocker', task_id: 'T1' }],
+      next_action: 'Legacy next action',
+      created_at: '2024-01-01T00:00:00.000Z',
+      updated_at: '2024-01-02T00:00:00.000Z',
+      updated_by: 'legacy-agent',
+    };
+
+    const migrated = validateState(legacy);
+    expect(migrated).toMatchObject({
+      version: '2', revision: 7, active_topic: 'default',
+      updated_at: legacy.updated_at, updated_by: 'legacy-agent',
+    });
+    expect(getActiveTopic(migrated)).toMatchObject({
+      name: 'default', goal: legacy.goal, status: legacy.status,
+      current_task: legacy.current_task, tasks: legacy.tasks,
+      decisions: legacy.decisions, blockers: legacy.blockers,
+      next_action: legacy.next_action, created_at: legacy.created_at,
+      updated_at: legacy.updated_at,
+    });
+  });
+
+  it('rejects a missing active topic and duplicate topic names', () => {
+    const validationRoot = makeTmpDir();
+    try {
+      const state = initState('Goal', [], validationRoot);
+      const missing = { ...state, active_topic: 'missing' };
+      expect(() => validateState(missing)).toThrow('Active topic not found');
+      const duplicate = { ...state, topics: [...state.topics, { ...state.topics[0] }] };
+      expect(() => validateState(duplicate)).toThrow('Duplicate topic names');
+    } finally {
+      rmSync(validationRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('repairState', () => {
@@ -304,6 +416,6 @@ describe('repairState', () => {
 
     const recovered = repairState(root);
     expect(recovered).not.toBeNull();
-    expect(recovered?.goal).toBe('Goal');
+    expect(recovered && getActiveTopic(recovered).goal).toBe('Goal');
   });
 });

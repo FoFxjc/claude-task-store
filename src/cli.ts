@@ -10,6 +10,7 @@ import {
   archiveState, buildResumeContext, repairState, detectStaleTasks,
   compareAndWriteState, ConflictError, withStoreLock, LockError,
   stateFilePath, historyFilePath, StateError, findProjectRoot,
+  getActiveTopic, addTopic, useTopic,
 } from './core.js';
 import {
   readConfig, writeMode, markDirty, shouldReconcile, markReconcileRequested,
@@ -26,6 +27,9 @@ COMMANDS:
   init <goal> [task1] [task2] ...   Initialize a new task store
   status                            Show current state summary
   resume                            Print compact resume context (for session injection)
+  topic add <name> <goal> [tasks...] Add a named topic (does not switch to it)
+  topic list                        List topics and show which one is active
+  topic use <name>                  Switch the active topic
   add <title>                       Add a new task
   start <taskId>                    Mark task as in-progress (e.g. T1)
   done <taskId> -e <evidence> ...   Mark task done with evidence (--evidence works too)
@@ -113,10 +117,12 @@ function printState(projectRoot?: string): void {
     return;
   }
 
-  console.log(`\nGOAL: ${state.goal}`);
-  console.log(`STATUS: ${state.status.toUpperCase()}`);
+  const topic = getActiveTopic(state);
+  console.log(`\nTOPIC: ${topic.name}`);
+  console.log(`GOAL: ${topic.goal}`);
+  console.log(`STATUS: ${topic.status.toUpperCase()}`);
   console.log(`\nTASKS:`);
-  for (const t of state.tasks) {
+  for (const t of topic.tasks) {
     const icon = { done: '✓', in_progress: '▶', blocked: '✗', pending: '○', skipped: '–' }[t.status] ?? '?';
     console.log(`  ${icon} [${t.id}] ${t.title}  (${t.status})`);
     if (t.notes) console.log(`       ${t.notes}`);
@@ -128,17 +134,17 @@ function printState(projectRoot?: string): void {
     }
   }
 
-  if (state.decisions && state.decisions.length > 0) {
+  if (topic.decisions && topic.decisions.length > 0) {
     console.log(`\nDECISIONS:`);
-    for (const d of state.decisions) console.log(`  • ${d.summary}`);
+    for (const d of topic.decisions) console.log(`  • ${d.summary}`);
   }
 
-  if (state.blockers && state.blockers.length > 0) {
+  if (topic.blockers && topic.blockers.length > 0) {
     console.log(`\nBLOCKERS:`);
-    for (const b of state.blockers) console.log(`  ✗ [${b.task_id ?? '–'}] ${b.description}`);
+    for (const b of topic.blockers) console.log(`  ✗ [${b.task_id ?? '–'}] ${b.description}`);
   }
 
-  console.log(`\nNEXT ACTION: ${state.next_action ?? '(not set)'}`);
+  console.log(`\nNEXT ACTION: ${topic.next_action ?? '(not set)'}`);
 
   // Show stale task warnings
   const stale = detectStaleTasks(projectRoot);
@@ -171,6 +177,20 @@ function printState(projectRoot?: string): void {
   console.log(`Updated: ${state.updated_at}${state.updated_by ? ` by ${state.updated_by}` : ''} (rev ${state.revision ?? 0})`);
 }
 
+function printTopics(projectRoot?: string): void {
+  const state = readState(projectRoot);
+  if (!state) {
+    console.log('No task state found. Run `task-store init "<goal>" [tasks...]` to start.');
+    return;
+  }
+
+  console.log('TOPICS:');
+  for (const topic of state.topics) {
+    const marker = topic.name === state.active_topic ? '*' : ' ';
+    console.log(`${marker} ${topic.name}  (${topic.status}) — ${topic.goal}`);
+  }
+}
+
 async function main(): Promise<void> {
   const { command, args, flags, evidence } = parseArgs(process.argv.slice(2));
   const projectRoot = flags.root ? String(flags.root) : findProjectRoot();
@@ -189,10 +209,12 @@ async function main(): Promise<void> {
     // acceptable — reject it explicitly instead (see
     // docs/pre-release-remediation.md item 6).
     const READ_ONLY_COMMANDS = new Set(['status', 'resume', 'history', 'stale', 'token-estimate']);
+    const topicSubcommand = command === 'topic' ? args[0] : undefined;
+    const topicIsReadOnly = command === 'topic' && topicSubcommand === 'list';
     // `config` and `auto` write files, but never task state — recording an
     // author for them would be meaningless, so --by is rejected there too.
     const NON_STATE_COMMANDS = new Set(['config', 'auto']);
-    if (by !== undefined && (READ_ONLY_COMMANDS.has(command) || NON_STATE_COMMANDS.has(command))) {
+    if (by !== undefined && (READ_ONLY_COMMANDS.has(command) || topicIsReadOnly || NON_STATE_COMMANDS.has(command))) {
       console.error(`Error: --by is not supported on \`${command}\` (it never writes task state).`);
       process.exit(1);
     }
@@ -211,6 +233,7 @@ async function main(): Promise<void> {
       'init', 'add', 'start', 'done', 'block', 'resume-task',
       'attempt', 'decide', 'next', 'archive', 'repair',
     ]);
+    const topicIsMutating = command === 'topic' && (topicSubcommand === 'add' || topicSubcommand === 'use');
 
     // The revision check and the command's mutation both run inside
     // runCommand(), so when the whole thing runs under withStoreLock() the
@@ -235,11 +258,51 @@ async function main(): Promise<void> {
           if (!goal) { console.error('Error: goal is required\nUsage: task-store init "<goal>" [task1] [task2] ...'); process.exit(1); }
           const tasks = args.slice(1);
           const state = initState(goal, tasks, projectRoot, by);
-          console.log(`✓ Initialized task store for: ${state.goal}`);
-          console.log(`  ${state.tasks.length} task(s) created`);
+          const topic = getActiveTopic(state);
+          console.log(`✓ Initialized task store for: ${topic.goal}`);
+          console.log(`  Topic: ${topic.name}`);
+          console.log(`  ${topic.tasks.length} task(s) created`);
           console.log(`  State: ${stateFilePath(projectRoot)}`);
           break;
         }
+      case 'topic': {
+        const subcommand = args[0];
+        if (subcommand === 'list') {
+          if (args.length !== 1) {
+            console.error('Usage: task-store topic list');
+            process.exit(1);
+          }
+          printTopics(projectRoot);
+          break;
+        }
+        if (subcommand === 'add') {
+          const name = args[1];
+          const goal = args[2];
+          if (!name || !goal) {
+            console.error('Usage: task-store topic add <name> "<goal>" [task1] [task2] ...');
+            process.exit(1);
+          }
+          const state = addTopic(name, goal, args.slice(3), projectRoot, by);
+          const topic = state.topics.find(candidate => candidate.name === name)!;
+          console.log(`✓ Added topic: ${topic.name}`);
+          console.log(`  Goal: ${topic.goal}`);
+          console.log(`  ${topic.tasks.length} task(s) created`);
+          console.log(`  Active topic remains: ${state.active_topic}`);
+          break;
+        }
+        if (subcommand === 'use') {
+          const name = args[1];
+          if (!name || args.length !== 2) {
+            console.error('Usage: task-store topic use <name>');
+            process.exit(1);
+          }
+          const state = useTopic(name, projectRoot, by);
+          console.log(`✓ Active topic: ${state.active_topic}`);
+          break;
+        }
+        console.error('Usage: task-store topic <add|list|use>');
+        process.exit(1);
+      }
       case 'status': {
         printState(projectRoot);
         break;
@@ -254,7 +317,8 @@ async function main(): Promise<void> {
         const title = args.join(' ');
         if (!title) { console.error('Error: title required'); process.exit(1); }
         const state = addTask(title, undefined, projectRoot, by);
-        const t = state.tasks[state.tasks.length - 1];
+        const topic = getActiveTopic(state);
+        const t = topic.tasks[topic.tasks.length - 1];
         console.log(`✓ Added task [${t.id}] ${t.title}`);
         break;
       }
@@ -279,7 +343,8 @@ async function main(): Promise<void> {
         }
         const state = completeTask(taskId, evidenceList, undefined, projectRoot, by);
         console.log(`✓ Completed [${taskId}]`);
-        if (state.next_action) console.log(`  Next: ${state.next_action}`);
+        const nextAction = getActiveTopic(state).next_action;
+        if (nextAction) console.log(`  Next: ${nextAction}`);
         break;
       }
       case 'block': {
@@ -350,7 +415,7 @@ async function main(): Promise<void> {
       case 'repair': {
         const recovered = repairState(projectRoot, by);
         if (recovered) {
-          console.log(`✓ Recovered state from history. Goal: ${recovered.goal}`);
+          console.log(`✓ Recovered state from history. Goal: ${getActiveTopic(recovered).goal}`);
         } else {
           console.log('✗ Could not recover state from history.');
           process.exit(1);
@@ -490,7 +555,7 @@ async function main(): Promise<void> {
       }
     };
 
-    if (MUTATING_COMMANDS.has(command)) {
+    if (MUTATING_COMMANDS.has(command) || topicIsMutating) {
       withStoreLock(projectRoot, runCommand);
     } else {
       // Read-only and unknown commands: no lock, so `status` on a project

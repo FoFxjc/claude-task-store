@@ -16,7 +16,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 
-import { initState, readState, completeTask, setNextAction } from '../src/core.js';
+import { initState, readState, completeTask, setNextAction, getActiveTopic } from '../src/core.js';
 import {
   readConfig,
   writeMode,
@@ -140,8 +140,8 @@ describe('markDirty', () => {
     for (let i = 0; i < 10; i++) markDirty(root, 'Edit');
     const after = readState(root)!;
     expect(after.revision).toBe(before.revision);
-    expect(after.tasks.map(t => t.status)).toEqual(before.tasks.map(t => t.status));
-    expect(after.next_action).toBe(before.next_action);
+    expect(getActiveTopic(after).tasks.map(t => t.status)).toEqual(getActiveTopic(before).tasks.map(t => t.status));
+    expect(getActiveTopic(after).next_action).toBe(getActiveTopic(before).next_action);
     expect(after.updated_at).toBe(before.updated_at);
   });
 
@@ -352,8 +352,8 @@ describe('markReconciled', () => {
     markReconcileRequested(root);
     markReconciled(root);
     const after = readState(root)!;
-    expect(after.tasks.every(t => t.status !== 'done')).toBe(true);
-    expect(after.next_action).toBe(before.next_action);
+    expect(getActiveTopic(after).tasks.every(t => t.status !== 'done')).toBe(true);
+    expect(getActiveTopic(after).next_action).toBe(getActiveTopic(before).next_action);
     expect(after.revision).toBe(before.revision);
   });
 });
@@ -396,7 +396,7 @@ describe('evidence flag robustness', () => {
       new URL('../dist/cli.js', import.meta.url).pathname,
       'done', 'T1', '--evidence', 'src/lexer.ts: implemented', '--root', root,
     ]);
-    const task = readState(root)!.tasks.find(t => t.id === 'T1')!;
+    const task = getActiveTopic(readState(root)!).tasks.find(t => t.id === 'T1')!;
     expect(task.status).toBe('done');
     expect(task.evidence).toEqual(['src/lexer.ts: implemented']);
     expect(task.evidence).not.toContain('--evidence');
@@ -411,14 +411,14 @@ describe('no automatic completion inference', () => {
   it('a passing test signal never completes a task', () => {
     markDirty(root, 'Bash');   // e.g. `npm test` exiting 0
     markDirty(root, 'Bash');
-    expect(readState(root)!.tasks.every(t => t.status !== 'done')).toBe(true);
+    expect(getActiveTopic(readState(root)!).tasks.every(t => t.status !== 'done')).toBe(true);
   });
 
   it('completion still requires explicit evidence through the CLI', () => {
     markDirty(root, 'Edit');
     expect(() => completeTask('T1', [], undefined, root)).toThrow(/Evidence is required/);
     completeTask('T1', ['src/lexer.ts'], undefined, root);
-    expect(readState(root)!.tasks.find(t => t.id === 'T1')!.status).toBe('done');
+    expect(getActiveTopic(readState(root)!).tasks.find(t => t.id === 'T1')!.status).toBe('done');
   });
 
   it('the module exposes no way to mutate a task', () => {

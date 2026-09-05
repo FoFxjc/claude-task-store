@@ -107,7 +107,8 @@ python3 -c "
 import json
 from datetime import datetime, timezone, timedelta
 with open('$D/.claude-task/state.json') as f: s = json.load(f)
-s['tasks'][0]['started_at'] = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
+topic = next(t for t in s['topics'] if t['name'] == s['active_topic'])
+topic['tasks'][0]['started_at'] = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
 with open('$D/.claude-task/state.json', 'w') as f: json.dump(s, f, indent=2)
 "
 

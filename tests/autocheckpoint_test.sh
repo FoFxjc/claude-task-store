@@ -70,14 +70,16 @@ state_field() {
   STATE_PATH="$STATE" FIELD="$1" python3 -c '
 import json, os
 s = json.load(open(os.environ["STATE_PATH"]))
-print(s.get(os.environ["FIELD"]))
+topic = next(t for t in s["topics"] if t["name"] == s["active_topic"])
+print(s.get(os.environ["FIELD"], topic.get(os.environ["FIELD"])))
 '
 }
 task_status() {
   STATE_PATH="$STATE" TID="$1" python3 -c '
 import json, os
 s = json.load(open(os.environ["STATE_PATH"]))
-print(next(t["status"] for t in s["tasks"] if t["id"] == os.environ["TID"]))
+topic = next(t for t in s["topics"] if t["name"] == s["active_topic"])
+print(next(t["status"] for t in topic["tasks"] if t["id"] == os.environ["TID"]))
 '
 }
 
@@ -154,7 +156,8 @@ check "no task was auto-completed" \
   "$(STATE_PATH="$STATE" python3 -c '
 import json, os
 s = json.load(open(os.environ["STATE_PATH"]))
-print("true" if not any(t["status"] == "done" for t in s["tasks"]) else "false")')"
+topic = next(t for t in s["topics"] if t["name"] == s["active_topic"])
+print("true" if not any(t["status"] == "done" for t in topic["tasks"]) else "false")')"
 
 # ─── 5. Repeated activity does not repeatedly trigger reconciliation ─────────
 # Three dirty signals have accumulated; only the first boundary may ask.

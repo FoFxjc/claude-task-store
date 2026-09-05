@@ -132,6 +132,23 @@ describe('buildResumeInjection (OpenCode plugin)', () => {
     expect(calls).toEqual([]);
   });
 
+  it('returns null when the active version-2 topic is archived', () => {
+    const stateDir = join(root, '.claude-task');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'state.json'), JSON.stringify({
+      version: '2', revision: 1, active_topic: 'docs',
+      topics: [{
+        name: 'docs', goal: 'Write docs', status: 'archived', current_task: null,
+        tasks: [], decisions: [], blockers: [], next_action: null,
+        created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-02T00:00:00Z',
+      }],
+      updated_at: '2024-01-02T00:00:00Z',
+    }));
+    writeCli(root);
+    expect(buildResumeInjection(root)).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
   it('returns null when the project-local CLI runtime is missing', () => {
     writeState(root, 'active');
     // No CLI installed. Plugin must fail safe rather than half-injecting.
