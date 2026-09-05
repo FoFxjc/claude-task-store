@@ -399,6 +399,47 @@ describe('validateState', () => {
     });
   });
 
+  it('migrates schema-valid version 1 state when optional checkpoint fields are absent', () => {
+    const updatedAt = '2024-01-02T00:00:00.000Z';
+    const migrated = validateState({
+      version: '1', goal: 'Minimal legacy goal', status: 'active', tasks: [], updated_at: updatedAt,
+    });
+    expect(getActiveTopic(migrated)).toMatchObject({
+      current_task: null, decisions: [], blockers: [], next_action: null,
+      created_at: updatedAt, updated_at: updatedAt,
+    });
+  });
+
+  it('rejects malformed task entries with StateError instead of leaking TypeError', () => {
+    const validationRoot = makeTmpDir();
+    try {
+      const state = initState('Goal', ['Task'], validationRoot);
+      const malformed = {
+        ...state,
+        topics: [{ ...state.topics[0], tasks: [null] }],
+      };
+      expect(() => validateState(malformed)).toThrow(StateError);
+      expect(() => validateState(malformed)).toThrow('State.topics[0].tasks[0] must be a JSON object');
+    } finally {
+      rmSync(validationRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects invalid current_task and next_action types', () => {
+    const validationRoot = makeTmpDir();
+    try {
+      const state = initState('Goal', [], validationRoot);
+      expect(() => validateState({
+        ...state, topics: [{ ...state.topics[0], current_task: 1 }],
+      })).toThrow('State.topics[0].current_task must be a string or null');
+      expect(() => validateState({
+        ...state, topics: [{ ...state.topics[0], next_action: {} }],
+      })).toThrow('State.topics[0].next_action must be a string or null');
+    } finally {
+      rmSync(validationRoot, { recursive: true, force: true });
+    }
+  });
+
   it('rejects version 1 state with a missing or invalid updated_at', () => {
     const legacy = {
       version: '1', goal: 'Legacy goal', status: 'active', current_task: null,

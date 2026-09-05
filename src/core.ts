@@ -229,6 +229,29 @@ function validateTimestamp(value: unknown, label: string): string {
   return value;
 }
 
+function validateNullableString(value: unknown, label: string): void {
+  if (value !== null && typeof value !== 'string') {
+    throw new StateError(`${label} must be a string or null`);
+  }
+}
+
+function validateTask(data: unknown, label: string): Task {
+  if (typeof data !== 'object' || data === null) {
+    throw new StateError(`${label} must be a JSON object`);
+  }
+  const task = data as Record<string, unknown>;
+  if (typeof task.id !== 'string' || !/^T[0-9]+$/.test(task.id)) {
+    throw new StateError(`${label}.id must match T<number>`);
+  }
+  if (typeof task.title !== 'string') {
+    throw new StateError(`${label}.title must be a string`);
+  }
+  if (!['pending', 'in_progress', 'blocked', 'done', 'skipped'].includes(task.status as string)) {
+    throw new StateError(`Invalid task status in ${label}: ${task.status}`);
+  }
+  return data as Task;
+}
+
 function validateTopic(data: unknown, label: string): TopicState {
   if (typeof data !== 'object' || data === null) {
     throw new StateError(`${label} must be a JSON object`);
@@ -246,7 +269,10 @@ function validateTopic(data: unknown, label: string): TopicState {
   if (!Array.isArray(topic.tasks)) {
     throw new StateError(`${label}.tasks must be an array`);
   }
-  const ids = (topic.tasks as Task[]).map(t => t.id);
+  validateNullableString(topic.current_task, `${label}.current_task`);
+  validateNullableString(topic.next_action, `${label}.next_action`);
+  const tasks = topic.tasks.map((task, index) => validateTask(task, `${label}.tasks[${index}]`));
+  const ids = tasks.map(task => task.id);
   const unique = new Set(ids);
   if (unique.size !== ids.length) {
     throw new StateError(`Duplicate task IDs found in ${label}`);
@@ -262,12 +288,12 @@ function migrateV1State(data: Record<string, unknown>): TaskState {
     name: DEFAULT_TOPIC,
     goal: legacy.goal,
     status: legacy.status,
-    current_task: legacy.current_task,
+    current_task: legacy.current_task ?? null,
     tasks: legacy.tasks,
-    decisions: legacy.decisions,
-    blockers: legacy.blockers,
-    next_action: legacy.next_action,
-    created_at: legacy.created_at,
+    decisions: legacy.decisions ?? [],
+    blockers: legacy.blockers ?? [],
+    next_action: legacy.next_action ?? null,
+    created_at: legacy.created_at ?? legacy.updated_at,
     updated_at: legacy.updated_at,
   }, `Topic ${DEFAULT_TOPIC}`);
 
