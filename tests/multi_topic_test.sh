@@ -23,6 +23,13 @@ check() {
 }
 
 ts() { "${CLI[@]}" "$@" --root "$PROJECT"; }
+state_sha256() {
+  STATE="$PROJECT/.claude-task/state.json" python3 - <<'PYEOF'
+import hashlib, os
+with open(os.environ['STATE'], 'rb') as state_file:
+    print(hashlib.sha256(state_file.read()).hexdigest())
+PYEOF
+}
 
 echo "═══ multi-topic suite ═══"
 
@@ -103,9 +110,9 @@ with open(os.environ['STATE'], 'w') as f:
     f.write('\n')
 PYEOF
 
-BEFORE=$(shasum -a 256 "$PROJECT/.claude-task/state.json" | awk '{print $1}')
+BEFORE=$(state_sha256)
 LEGACY_STATUS=$(ts status)
-AFTER=$(shasum -a 256 "$PROJECT/.claude-task/state.json" | awk '{print $1}')
+AFTER=$(state_sha256)
 check "version-1 state is readable as the default topic" \
   "$(printf '%s' "$LEGACY_STATUS" | grep -q '^TOPIC: default$' && printf '%s' "$LEGACY_STATUS" | grep -q 'Legacy blocker' && echo true || echo false)"
 check "read-only migration does not dirty Git-trackable state" "$([[ "$BEFORE" == "$AFTER" ]] && echo true || echo false)"

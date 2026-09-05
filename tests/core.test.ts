@@ -216,6 +216,15 @@ describe('topics', () => {
     expect(() => addTopic('docs', 'Another goal', [], root)).toThrow(StateError);
   });
 
+  it('normalizes topic names before storing, matching, and duplicate checks', () => {
+    const added = addTopic('  docs  ', 'Write the guide', [], root);
+    expect(added.topics[1].name).toBe('docs');
+    expect(() => addTopic('docs', 'Another goal', [], root)).toThrow('Topic already exists: docs');
+
+    expect(useTopic('  docs  ', root).active_topic).toBe('docs');
+    expect(() => useTopic('   ', root)).toThrow('Topic name must be a non-empty string');
+  });
+
   it('switches topics while preserving independent execution checkpoints', () => {
     startTask('T1', root);
     recordAttempt('T1', 'direct integration', 'API unavailable', root);
@@ -388,6 +397,30 @@ describe('validateState', () => {
       next_action: legacy.next_action, created_at: legacy.created_at,
       updated_at: legacy.updated_at,
     });
+  });
+
+  it('rejects version 1 state with a missing or invalid updated_at', () => {
+    const legacy = {
+      version: '1', goal: 'Legacy goal', status: 'active', current_task: null,
+      tasks: [], decisions: [], blockers: [], next_action: null,
+      created_at: '2024-01-01T00:00:00.000Z',
+    };
+    expect(() => validateState(legacy)).toThrow('Topic default.updated_at must be a valid date-time string');
+    expect(() => validateState({ ...legacy, updated_at: 'not-a-date' }))
+      .toThrow('Topic default.updated_at must be a valid date-time string');
+  });
+
+  it('rejects version 2 state with a missing or invalid root updated_at', () => {
+    const validationRoot = makeTmpDir();
+    try {
+      const state = initState('Goal', [], validationRoot);
+      const { updated_at: _updatedAt, ...missingTimestamp } = state;
+      expect(() => validateState(missingTimestamp)).toThrow('State.updated_at must be a valid date-time string');
+      expect(() => validateState({ ...state, updated_at: 'not-a-date' }))
+        .toThrow('State.updated_at must be a valid date-time string');
+    } finally {
+      rmSync(validationRoot, { recursive: true, force: true });
+    }
   });
 
   it('rejects a missing active topic and duplicate topic names', () => {

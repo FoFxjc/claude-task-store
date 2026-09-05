@@ -222,6 +222,13 @@ export class StateError extends Error {
   }
 }
 
+function validateTimestamp(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.trim() === '' || Number.isNaN(Date.parse(value))) {
+    throw new StateError(`${label} must be a valid date-time string`);
+  }
+  return value;
+}
+
 function validateTopic(data: unknown, label: string): TopicState {
   if (typeof data !== 'object' || data === null) {
     throw new StateError(`${label} must be a JSON object`);
@@ -244,6 +251,8 @@ function validateTopic(data: unknown, label: string): TopicState {
   if (unique.size !== ids.length) {
     throw new StateError(`Duplicate task IDs found in ${label}`);
   }
+  validateTimestamp(topic.created_at, `${label}.created_at`);
+  validateTimestamp(topic.updated_at, `${label}.updated_at`);
   return data as TopicState;
 }
 
@@ -267,7 +276,7 @@ function migrateV1State(data: Record<string, unknown>): TaskState {
     revision: typeof legacy.revision === 'number' ? legacy.revision : 0,
     active_topic: DEFAULT_TOPIC,
     topics: [topic],
-    updated_at: legacy.updated_at,
+    updated_at: topic.updated_at,
     ...(legacy.updated_by !== undefined ? { updated_by: legacy.updated_by } : {}),
   };
 }
@@ -297,6 +306,7 @@ export function validateState(data: unknown): TaskState {
   if (!names.includes(s.active_topic)) {
     throw new StateError(`Active topic not found: ${s.active_topic}`);
   }
+  validateTimestamp(s.updated_at, 'State.updated_at');
   // Backfill revision for states created before it was added.
   if (typeof s.revision !== 'number') {
     s.revision = 0;
@@ -420,15 +430,16 @@ export function addTopic(
 ): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found. Run `task-store init` first.');
-  if (!name.trim()) throw new StateError('Topic name must be a non-empty string');
+  const normalizedName = name.trim();
+  if (!normalizedName) throw new StateError('Topic name must be a non-empty string');
   if (!goal.trim()) throw new StateError('Topic goal must be a non-empty string');
-  if (state.topics.some(topic => topic.name === name)) {
-    throw new StateError(`Topic already exists: ${name}`);
+  if (state.topics.some(topic => topic.name === normalizedName)) {
+    throw new StateError(`Topic already exists: ${normalizedName}`);
   }
 
   const now = new Date().toISOString();
   state.topics.push({
-    name,
+    name: normalizedName,
     goal,
     status: 'active',
     current_task: null,
@@ -450,19 +461,21 @@ export function addTopic(
   });
 
   writeState(state, projectRoot, updatedBy, false);
-  appendHistory({ event: 'topic_added', topic: name, goal, taskCount: tasks.length }, projectRoot);
+  appendHistory({ event: 'topic_added', topic: normalizedName, goal, taskCount: tasks.length }, projectRoot);
   return state;
 }
 
 export function useTopic(name: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found. Run `task-store init` first.');
-  if (!state.topics.some(topic => topic.name === name)) {
-    throw new StateError(`Topic not found: ${name}`);
+  const normalizedName = name.trim();
+  if (!normalizedName) throw new StateError('Topic name must be a non-empty string');
+  if (!state.topics.some(topic => topic.name === normalizedName)) {
+    throw new StateError(`Topic not found: ${normalizedName}`);
   }
-  state.active_topic = name;
+  state.active_topic = normalizedName;
   writeState(state, projectRoot, updatedBy, false);
-  appendHistory({ event: 'topic_selected', topic: name }, projectRoot);
+  appendHistory({ event: 'topic_selected', topic: normalizedName }, projectRoot);
   return state;
 }
 

@@ -309,7 +309,7 @@ async function main(): Promise<void> {
             process.exit(1);
           }
           const state = addTopic(name, goal, args.slice(3), projectRoot, by);
-          const topic = state.topics.find(candidate => candidate.name === name)!;
+          const topic = state.topics.find(candidate => candidate.name === name.trim())!;
           console.log(`✓ Added topic: ${topic.name}`);
           console.log(`  Goal: ${topic.goal}`);
           console.log(`  ${topic.tasks.length} task(s) created`);
