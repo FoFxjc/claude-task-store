@@ -10,8 +10,8 @@
 #
 # COST: this runs on every matched tool call, so the "is the feature even on?"
 # test is done in bash against the config file BEFORE spawning Node. A project
-# that has not opted in (the default) does no work here at all and pays only
-# the cost of this script starting.
+# that is configured off, including a configless legacy project, does no work
+# here at all and pays only the cost of this script starting.
 #
 # Path safety: all values are passed to the CLI as quoted arguments and to
 # Python via exported environment variables — never interpolated into source
@@ -29,10 +29,10 @@ INPUT=$(cat || true)
 # ── Fast path: bail out before spawning anything ────────────────────────────
 # No task store, or no config, or config does not mention conservative mode.
 # The CLI remains the authority on what the mode actually is; this is only a
-# cheap gate so the default-off case costs nothing.
+# cheap gate so off and configless legacy projects cost nothing.
 [[ -f "$STATE_FILE" ]] || exit 0
 [[ -f "$CONFIG_FILE" ]] || exit 0
-grep -q 'conservative' "$CONFIG_FILE" 2>/dev/null || exit 0
+grep -Eq '"auto_checkpoint"[[:space:]]*:[[:space:]]*"conservative"' "$CONFIG_FILE" 2>/dev/null || exit 0
 
 # ── Resolve the CLI ─────────────────────────────────────────────────────────
 # Same resolution order as session-start.sh: the project-local runtime that

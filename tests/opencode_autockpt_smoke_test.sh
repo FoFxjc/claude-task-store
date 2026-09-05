@@ -86,7 +86,7 @@ install_plugin() {
 
 # ── Test 1: auto_checkpoint = off ──────────────────────────────────────────
 echo ""
-echo "═══ Test 1: auto_checkpoint = off (default behavior) ═══"
+echo "═══ Test 1: auto_checkpoint = off (explicit opt-out) ═══"
 
 T1=$(mktemp -d)
 trap 'rm -rf "${T1:-}" "${T2:-}" "${T3:-}" "${T4:-}" "${T5:-}"' EXIT
@@ -95,7 +95,7 @@ git init -q "$T1"
 install_cli "$T1"
 
 CLI1="$T1/.claude/task-store/bin/task-store.js"
-node "$CLI1" init "Build the auth system" "Write models" --root "$T1" >/dev/null
+node "$CLI1" init "Build the auth system" "Write models" --auto-checkpoint off --root "$T1" >/dev/null
 node "$CLI1" start T1 --root "$T1" >/dev/null
 STATE_REV_BEFORE=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).revision)' "$T1/.claude-task/state.json")
 
