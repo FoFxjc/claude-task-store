@@ -26,9 +26,15 @@ try:
 except Exception:
     sys.exit(0)
 
-status = s.get('status', '')
-next_action = s.get('next_action')
-current_task = s.get('current_task')
+if s.get('version') == '2':
+    active = s.get('active_topic')
+    topic = next((t for t in s.get('topics', []) if t.get('name') == active), {})
+else:
+    topic = s
+
+status = topic.get('status', '')
+next_action = topic.get('next_action')
+current_task = topic.get('current_task')
 
 if status in ('active', 'blocked') and not next_action:
     # Output a reminder — prints to stderr which Claude Code may surface

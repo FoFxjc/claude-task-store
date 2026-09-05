@@ -51,12 +51,20 @@ try:
 except Exception:
     sys.exit(0)
 
+if state.get('version') == '2':
+    active = state.get('active_topic')
+    topic = next((t for t in state.get('topics', []) if t.get('name') == active), {})
+else:
+    active = 'default'
+    topic = state
+
 entry = {
     'event': 'pre_compact_checkpoint',
     'trigger': trigger,
-    'current_task': state.get('current_task'),
-    'status': state.get('status'),
-    'next_action': state.get('next_action'),
+    'topic': active,
+    'current_task': topic.get('current_task'),
+    'status': topic.get('status'),
+    'next_action': topic.get('next_action'),
     'at': datetime.now(timezone.utc).isoformat(),
 }
 

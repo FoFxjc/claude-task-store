@@ -38,7 +38,12 @@ state_file = os.environ['STATE_FILE']
 try:
     with open(state_file) as f:
         d = json.load(f)
-    print(d.get('status', ''))
+    if d.get('version') == '2':
+        active = d.get('active_topic')
+        topic = next((t for t in d.get('topics', []) if t.get('name') == active), {})
+        print(topic.get('status', ''))
+    else:
+        print(d.get('status', ''))
 except Exception:
     pass
 PYEOF
@@ -92,11 +97,19 @@ try:
 except Exception:
     raise SystemExit(0)
 
-goal = s.get('goal', '(unknown)')
-next_action = s.get('next_action') or '(not set — run `task-store status`)'
+if s.get('version') == '2':
+    active = s.get('active_topic')
+    topic = next((t for t in s.get('topics', []) if t.get('name') == active), {})
+else:
+    active = 'default'
+    topic = s
+
+goal = topic.get('goal', '(unknown)')
+next_action = topic.get('next_action') or '(not set — run `task-store status`)'
 
 print(
     "TASK STORE — RESUME CONTEXT (minimal fallback: task-store CLI unavailable)\n"
+    f"TOPIC: {active}\n"
     f"GOAL: {goal}\n"
     f"NEXT ACTION: {next_action}\n"
     "Run `task-store status` for full details."

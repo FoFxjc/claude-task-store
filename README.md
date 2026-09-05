@@ -388,6 +388,10 @@ task-store block T4 "need local HTTP fixture before streaming test works"
 
 # Always set next action before ending a session
 task-store next "Replace mock with local HTTP fixture, then complete T4"
+
+# Keep a second topic on the same branch without losing the first checkpoint
+task-store topic add docs "Refresh the API guide" "Draft examples" "Review links"
+task-store topic use docs
 ```
 
 On next session start (or in a fresh model session), the agent automatically receives the compact resume context shown above — identically in Claude Code and in OpenCode, since both render it through the same `task-store resume` CLI.
@@ -401,6 +405,9 @@ On next session start (or in a fresh model session), the agent automatically rec
 | `task-store init "<goal>" [tasks...] [--auto-checkpoint off\|conservative]` | Initialize a new task store; auto-checkpoint defaults to `conservative` |
 | `task-store status` | Show full current state |
 | `task-store resume` | Print compact resume context |
+| `task-store topic add <name> "<goal>" [tasks...]` | Add a named topic without switching |
+| `task-store topic list` | List topics and identify the active one |
+| `task-store topic use <name>` | Switch the active topic |
 | `task-store add "<title>"` | Add a new task |
 | `task-store start T1` | Mark task in-progress |
 | `task-store done T1 -e <evidence>` | Mark done with evidence |
@@ -425,7 +432,7 @@ task-store done T1 --by codex -e proof     # handoff provenance (informational)
 task-store next "action" --expect-rev 14   # reject write if another agent wrote first
 ```
 
-`--by` is accepted on every command that writes state (`init`, `add`, `start`, `done`, `block`, `resume-task`, `attempt`, `decide`, `next`, `archive`, `repair`) and is rejected as an unsupported flag if you pass it to a purely read-only command.
+`--by` is accepted on every command that writes state (`init`, `topic add`, `topic use`, `add`, `start`, `done`, `block`, `resume-task`, `attempt`, `decide`, `next`, `archive`, `repair`) and is rejected as an unsupported flag if you pass it to a purely read-only command.
 
 `--expect-rev` is enforced atomically: the revision check and the write both happen inside an O_EXCL lock file (`.claude-task/.lock`) held for the full read-compare-write cycle, so two concurrent `task-store` CLI invocations cannot race each other into a lost update. This protects concurrent **CLI** invocations specifically; code that imports `src/core.ts` directly and calls `writeState()` without going through `withStoreLock()` bypasses it. See [`docs/pre-release-remediation.md`](docs/pre-release-remediation.md) item 3 for the exact guarantee.
 
@@ -709,31 +716,44 @@ Several projects solve adjacent problems. This is a known area with multiple act
 
 ```json
 {
-  "version": "1",
+  "version": "2",
   "revision": 5,
-  "goal": "Add OAuth support",
-  "status": "active | blocked | completed | archived",
-  "current_task": "T4",
-  "tasks": [
+  "active_topic": "oauth",
+  "topics": [
     {
-      "id": "T4",
-      "title": "Write integration tests",
+      "name": "oauth",
+      "goal": "Add OAuth support",
       "status": "blocked",
-      "notes": "need local HTTP fixture before streaming test works",
-      "evidence": [],
-      "attempts": [
-        { "description": "mocked fetch", "outcome": "does not support streaming" }
-      ]
+      "current_task": "T4",
+      "tasks": [
+        {
+          "id": "T4",
+          "title": "Write integration tests",
+          "status": "blocked",
+          "notes": "need local HTTP fixture before streaming test works",
+          "evidence": [],
+          "attempts": [
+            { "description": "mocked fetch", "outcome": "does not support streaming" }
+          ]
+        }
+      ],
+      "decisions": [{ "summary": "Use PKCE flow", "rationale": "implicit flow is deprecated" }],
+      "blockers": [{ "description": "need local HTTP fixture", "task_id": "T4" }],
+      "next_action": "Replace mock with local HTTP fixture, then complete T4",
+      "created_at": "2024-01-01T00:00:00Z",
+      "updated_at": "2024-01-02T00:00:00Z"
     }
   ],
-  "decisions": [{ "summary": "Use PKCE flow — implicit flow deprecated", "rationale": "..." }],
-  "blockers": [{ "description": "need local HTTP fixture", "task_id": "T4" }],
-  "next_action": "Replace mock with local HTTP fixture, then complete T4",
   "updated_by": "claude-code",
-  "created_at": "2024-01-01T00:00:00Z",
   "updated_at": "2024-01-02T00:00:00Z"
 }
 ```
+
+Each topic owns its tasks, attempts, decisions, blockers, and next action. All
+ordinary task commands operate on `active_topic`, and session injection renders
+only that topic. Topic selection is explicit; there is no concurrent execution
+or orchestration. Version-1 files are read as a `default` topic without changing
+the file, then written as version 2 on the next normal state mutation.
 
 Full JSON schema: [`schemas/state.schema.json`](schemas/state.schema.json)
 
@@ -783,6 +803,7 @@ bash tests/acceptance.sh           # Cross-session recovery test
 bash tests/phase2/pressure_test.sh # 22-session pressure test
 bash tests/phase3/handoff_test.sh  # Cross-agent handoff test
 bash tests/autocheckpoint_test.sh  # Auto-checkpoint mode regression
+bash tests/multi_topic_test.sh     # Named topics and v1 migration regression
 bash tests/opencode_install_test.sh     # OpenCode install/uninstall regression
 bash tests/opencode_smoke_test.sh       # Real OpenCode resume-injection smoke
 bash tests/opencode_autockpt_smoke_test.sh # Real OpenCode auto-checkpoint smoke
@@ -792,8 +813,8 @@ The OpenCode smoke tests need a working `opencode` binary on `PATH`. They
 skip cleanly (`exit 77`) if it isn't installed; the other suites are pure
 shell and run anywhere.
 
-532 automated checks pass across 17 test files: 3 Jest and 14 shell
-— unit 134, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
+549 automated checks pass across 18 test files: 3 Jest and 15 shell
+— unit 141, acceptance 17, multi-topic 10, Phase 2 reliability 52, Phase 3 handoff 22,
 installer regression 17, path safety 32, project-local runtime 32,
 auto-checkpoint 68, OpenCode install regression 117, OpenCode resume smoke 21,
 OpenCode auto-checkpoint smoke 20.

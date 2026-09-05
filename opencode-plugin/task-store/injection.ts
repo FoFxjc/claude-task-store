@@ -171,8 +171,18 @@ export function buildResumeInjection(worktree: string): string | null {
   let status: string;
   try {
     const raw = readFileSync(stateFile, "utf8");
-    const parsed = JSON.parse(raw) as { status?: unknown };
-    status = typeof parsed.status === "string" ? parsed.status : "";
+    const parsed = JSON.parse(raw) as {
+      version?: unknown;
+      status?: unknown;
+      active_topic?: unknown;
+      topics?: Array<{ name?: unknown; status?: unknown }>;
+    };
+    if (parsed.version === "2" && typeof parsed.active_topic === "string") {
+      const topic = parsed.topics?.find(candidate => candidate.name === parsed.active_topic);
+      status = typeof topic?.status === "string" ? topic.status : "";
+    } else {
+      status = typeof parsed.status === "string" ? parsed.status : "";
+    }
   } catch {
     // Corrupt state file. Fail safe: inject nothing rather than
     // a half-parsed blob.

@@ -14,7 +14,8 @@ const STORE_DIR = '.claude-task';
 const STATE_FILE = 'state.json';
 const HISTORY_FILE = 'history.jsonl';
 const LOCK_FILE = '.lock';
-export const SCHEMA_VERSION = '1';
+export const SCHEMA_VERSION = '2';
+export const DEFAULT_TOPIC = 'default';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -47,10 +48,8 @@ export interface Blocker {
   since?: string | null;
 }
 
-export interface TaskState {
-  version: string;
-  /** Monotonically increasing integer. Incremented on every write. Used for optimistic concurrency. */
-  revision: number;
+export interface TopicState {
+  name: string;
   goal: string;
   status: 'active' | 'blocked' | 'completed' | 'archived';
   current_task: string | null;
@@ -60,7 +59,22 @@ export interface TaskState {
   next_action: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface TaskState {
+  version: string;
+  /** Monotonically increasing integer. Incremented on every write. Used for optimistic concurrency. */
+  revision: number;
+  active_topic: string;
+  topics: TopicState[];
+  updated_at: string;
   /** Optional agent/tool that last wrote this state. Never affects execution semantics. */
+  updated_by?: string | null;
+}
+
+interface LegacyTaskStateV1 extends Omit<TopicState, 'name'> {
+  version: '1';
+  revision?: number;
   updated_by?: string | null;
 }
 
@@ -208,33 +222,128 @@ export class StateError extends Error {
   }
 }
 
+function validateTimestamp(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.trim() === '' || Number.isNaN(Date.parse(value))) {
+    throw new StateError(`${label} must be a valid date-time string`);
+  }
+  return value;
+}
+
+function validateNullableString(value: unknown, label: string): void {
+  if (value !== null && typeof value !== 'string') {
+    throw new StateError(`${label} must be a string or null`);
+  }
+}
+
+function validateTask(data: unknown, label: string): Task {
+  if (typeof data !== 'object' || data === null) {
+    throw new StateError(`${label} must be a JSON object`);
+  }
+  const task = data as Record<string, unknown>;
+  if (typeof task.id !== 'string' || !/^T[0-9]+$/.test(task.id)) {
+    throw new StateError(`${label}.id must match T<number>`);
+  }
+  if (typeof task.title !== 'string') {
+    throw new StateError(`${label}.title must be a string`);
+  }
+  if (!['pending', 'in_progress', 'blocked', 'done', 'skipped'].includes(task.status as string)) {
+    throw new StateError(`Invalid task status in ${label}: ${task.status}`);
+  }
+  return data as Task;
+}
+
+function validateTopic(data: unknown, label: string): TopicState {
+  if (typeof data !== 'object' || data === null) {
+    throw new StateError(`${label} must be a JSON object`);
+  }
+  const topic = data as Record<string, unknown>;
+  if (typeof topic.name !== 'string' || topic.name.trim() === '') {
+    throw new StateError(`${label}.name must be a non-empty string`);
+  }
+  if (typeof topic.goal !== 'string' || topic.goal.trim() === '') {
+    throw new StateError(`${label}.goal must be a non-empty string`);
+  }
+  if (!['active', 'blocked', 'completed', 'archived'].includes(topic.status as string)) {
+    throw new StateError(`Invalid status: ${topic.status}`);
+  }
+  if (!Array.isArray(topic.tasks)) {
+    throw new StateError(`${label}.tasks must be an array`);
+  }
+  validateNullableString(topic.current_task, `${label}.current_task`);
+  validateNullableString(topic.next_action, `${label}.next_action`);
+  const tasks = topic.tasks.map((task, index) => validateTask(task, `${label}.tasks[${index}]`));
+  const ids = tasks.map(task => task.id);
+  const unique = new Set(ids);
+  if (unique.size !== ids.length) {
+    throw new StateError(`Duplicate task IDs found in ${label}`);
+  }
+  validateTimestamp(topic.created_at, `${label}.created_at`);
+  validateTimestamp(topic.updated_at, `${label}.updated_at`);
+  return data as TopicState;
+}
+
+function migrateV1State(data: Record<string, unknown>): TaskState {
+  const legacy = data as unknown as LegacyTaskStateV1;
+  const topic = validateTopic({
+    name: DEFAULT_TOPIC,
+    goal: legacy.goal,
+    status: legacy.status,
+    current_task: legacy.current_task ?? null,
+    tasks: legacy.tasks,
+    decisions: legacy.decisions ?? [],
+    blockers: legacy.blockers ?? [],
+    next_action: legacy.next_action ?? null,
+    created_at: legacy.created_at ?? legacy.updated_at,
+    updated_at: legacy.updated_at,
+  }, `Topic ${DEFAULT_TOPIC}`);
+
+  return {
+    version: SCHEMA_VERSION,
+    revision: typeof legacy.revision === 'number' ? legacy.revision : 0,
+    active_topic: DEFAULT_TOPIC,
+    topics: [topic],
+    updated_at: topic.updated_at,
+    ...(legacy.updated_by !== undefined ? { updated_by: legacy.updated_by } : {}),
+  };
+}
+
 export function validateState(data: unknown): TaskState {
   if (typeof data !== 'object' || data === null) {
     throw new StateError('State must be a JSON object');
   }
   const s = data as Record<string, unknown>;
+  if (s.version === '1') {
+    return migrateV1State(s);
+  }
   if (s.version !== SCHEMA_VERSION) {
     throw new StateError(`Unknown schema version: ${s.version}`);
   }
-  if (typeof s.goal !== 'string' || s.goal.trim() === '') {
-    throw new StateError('State.goal must be a non-empty string');
+  if (typeof s.active_topic !== 'string' || s.active_topic.trim() === '') {
+    throw new StateError('State.active_topic must be a non-empty string');
   }
-  if (!['active', 'blocked', 'completed', 'archived'].includes(s.status as string)) {
-    throw new StateError(`Invalid status: ${s.status}`);
+  if (!Array.isArray(s.topics) || s.topics.length === 0) {
+    throw new StateError('State.topics must be a non-empty array');
   }
-  if (!Array.isArray(s.tasks)) {
-    throw new StateError('State.tasks must be an array');
+  const topics = s.topics.map((topic, index) => validateTopic(topic, `State.topics[${index}]`));
+  const names = topics.map(topic => topic.name);
+  if (new Set(names).size !== names.length) {
+    throw new StateError('Duplicate topic names found in state');
   }
-  const ids = (s.tasks as Task[]).map(t => t.id);
-  const unique = new Set(ids);
-  if (unique.size !== ids.length) {
-    throw new StateError('Duplicate task IDs found in state');
+  if (!names.includes(s.active_topic)) {
+    throw new StateError(`Active topic not found: ${s.active_topic}`);
   }
-  // Backfill revision for states created before it was added
+  validateTimestamp(s.updated_at, 'State.updated_at');
+  // Backfill revision for states created before it was added.
   if (typeof s.revision !== 'number') {
     s.revision = 0;
   }
   return data as TaskState;
+}
+
+export function getActiveTopic(state: TaskState): TopicState {
+  const topic = state.topics.find(candidate => candidate.name === state.active_topic);
+  if (!topic) throw new StateError(`Active topic not found: ${state.active_topic}`);
+  return topic;
 }
 
 // ─── Read / Write ─────────────────────────────────────────────────────────────
@@ -260,13 +369,20 @@ export function readState(projectRoot?: string): TaskState | null {
   return validateState(parsed);
 }
 
-export function writeState(state: TaskState, projectRoot?: string, updatedBy?: string): void {
+export function writeState(
+  state: TaskState,
+  projectRoot?: string,
+  updatedBy?: string,
+  touchActiveTopic = true,
+): void {
   const dir = storePath(projectRoot);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
 
-  state.updated_at = new Date().toISOString();
+  const now = new Date().toISOString();
+  state.updated_at = now;
+  if (touchActiveTopic) getActiveTopic(state).updated_at = now;
   state.revision = (state.revision ?? 0) + 1;
   if (updatedBy !== undefined) {
     state.updated_by = updatedBy || null;
@@ -286,9 +402,14 @@ function appendHistory(entry: Record<string, unknown>, projectRoot?: string): vo
 
 export function initState(goal: string, tasks: string[], projectRoot?: string, updatedBy?: string): TaskState {
   const existing = readState(projectRoot);
-  if (existing && existing.status !== 'archived') {
+  if (existing && getActiveTopic(existing).status !== 'archived') {
     throw new StateError(
       'Active state already exists. Use `task-store status` to view or `task-store archive` to archive it first.'
+    );
+  }
+  if (existing && existing.topics.length > 1) {
+    throw new StateError(
+      'Cannot reinitialize a multi-topic store. Use `task-store topic add` or `task-store topic use` instead.'
     );
   }
 
@@ -296,6 +417,55 @@ export function initState(goal: string, tasks: string[], projectRoot?: string, u
   const state: TaskState = {
     version: SCHEMA_VERSION,
     revision: 0,
+    active_topic: DEFAULT_TOPIC,
+    topics: [{
+      name: DEFAULT_TOPIC,
+      goal,
+      status: 'active',
+      current_task: null,
+      tasks: tasks.map((title, i) => ({
+        id: `T${i + 1}`,
+        title,
+        status: 'pending',
+        notes: null,
+        evidence: [],
+        attempts: [],
+        started_at: null,
+        completed_at: null,
+      })),
+      decisions: [],
+      blockers: [],
+      next_action: tasks.length > 0 ? `Start task T1: ${tasks[0]}` : null,
+      created_at: now,
+      updated_at: now,
+    }],
+    updated_at: now,
+  };
+
+  writeState(state, projectRoot, updatedBy);
+  appendHistory({ event: 'init', topic: DEFAULT_TOPIC, goal, taskCount: tasks.length }, projectRoot);
+  return state;
+}
+
+export function addTopic(
+  name: string,
+  goal: string,
+  tasks: string[],
+  projectRoot?: string,
+  updatedBy?: string,
+): TaskState {
+  const state = readState(projectRoot);
+  if (!state) throw new StateError('No state found. Run `task-store init` first.');
+  const normalizedName = name.trim();
+  if (!normalizedName) throw new StateError('Topic name must be a non-empty string');
+  if (!goal.trim()) throw new StateError('Topic goal must be a non-empty string');
+  if (state.topics.some(topic => topic.name === normalizedName)) {
+    throw new StateError(`Topic already exists: ${normalizedName}`);
+  }
+
+  const now = new Date().toISOString();
+  state.topics.push({
+    name: normalizedName,
     goal,
     status: 'active',
     current_task: null,
@@ -314,17 +484,31 @@ export function initState(goal: string, tasks: string[], projectRoot?: string, u
     next_action: tasks.length > 0 ? `Start task T1: ${tasks[0]}` : null,
     created_at: now,
     updated_at: now,
-  };
+  });
 
-  writeState(state, projectRoot, updatedBy);
-  appendHistory({ event: 'init', goal, taskCount: tasks.length }, projectRoot);
+  writeState(state, projectRoot, updatedBy, false);
+  appendHistory({ event: 'topic_added', topic: normalizedName, goal, taskCount: tasks.length }, projectRoot);
+  return state;
+}
+
+export function useTopic(name: string, projectRoot?: string, updatedBy?: string): TaskState {
+  const state = readState(projectRoot);
+  if (!state) throw new StateError('No state found. Run `task-store init` first.');
+  const normalizedName = name.trim();
+  if (!normalizedName) throw new StateError('Topic name must be a non-empty string');
+  if (!state.topics.some(topic => topic.name === normalizedName)) {
+    throw new StateError(`Topic not found: ${normalizedName}`);
+  }
+  state.active_topic = normalizedName;
+  writeState(state, projectRoot, updatedBy, false);
+  appendHistory({ event: 'topic_selected', topic: normalizedName }, projectRoot);
   return state;
 }
 
 // ─── Task operations ──────────────────────────────────────────────────────────
 
-function getTask(state: TaskState, taskId: string): Task {
-  const task = state.tasks.find(t => t.id === taskId);
+function getTask(topic: TopicState, taskId: string): Task {
+  const task = topic.tasks.find(t => t.id === taskId);
   if (!task) throw new StateError(`Task ${taskId} not found`);
   return task;
 }
@@ -332,20 +516,22 @@ function getTask(state: TaskState, taskId: string): Task {
 export function startTask(taskId: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found. Run `task-store init` first.');
+  const topic = getActiveTopic(state);
 
-  const existing = state.tasks.find(t => t.status === 'in_progress' && t.id !== taskId);
+  const existing = topic.tasks.find(t => t.status === 'in_progress' && t.id !== taskId);
   if (existing) {
     appendHistory({
       event: 'warning',
+      topic: topic.name,
       message: `Starting ${taskId} while ${existing.id} is still in_progress`,
     }, projectRoot);
   }
 
-  const task = getTask(state, taskId);
+  const task = getTask(topic, taskId);
   task.status = 'in_progress';
   task.started_at = new Date().toISOString();
-  state.current_task = taskId;
-  state.status = 'active';
+  topic.current_task = taskId;
+  topic.status = 'active';
 
   writeState(state, projectRoot, updatedBy);
   return state;
@@ -354,8 +540,9 @@ export function startTask(taskId: string, projectRoot?: string, updatedBy?: stri
 export function completeTask(taskId: string, evidence: string[], notes?: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
+  const topic = getActiveTopic(state);
 
-  const task = getTask(state, taskId);
+  const task = getTask(topic, taskId);
   if (!evidence || evidence.length === 0) {
     throw new StateError(
       `Evidence is required to mark ${taskId} done. Provide file paths, test output, or other proof.`
@@ -367,43 +554,44 @@ export function completeTask(taskId: string, evidence: string[], notes?: string,
   if (notes) task.notes = notes;
   task.completed_at = new Date().toISOString();
 
-  if (state.current_task === taskId) {
-    const next = state.tasks.find(t => t.status === 'pending');
-    state.current_task = next?.id ?? null;
+  if (topic.current_task === taskId) {
+    const next = topic.tasks.find(t => t.status === 'pending');
+    topic.current_task = next?.id ?? null;
     if (next) {
-      state.next_action = `Start task ${next.id}: ${next.title}`;
+      topic.next_action = `Start task ${next.id}: ${next.title}`;
     }
   }
 
   // Check if all tasks are done
-  const allDone = state.tasks.every(t => t.status === 'done' || t.status === 'skipped');
+  const allDone = topic.tasks.every(t => t.status === 'done' || t.status === 'skipped');
   if (allDone) {
-    state.status = 'completed';
-    state.next_action = 'All tasks completed. Consider archiving with `task-store archive`.';
+    topic.status = 'completed';
+    topic.next_action = 'All tasks completed. Consider archiving with `task-store archive`.';
   }
 
   writeState(state, projectRoot, updatedBy);
-  appendHistory({ event: 'task_completed', taskId, evidence }, projectRoot);
+  appendHistory({ event: 'task_completed', topic: topic.name, taskId, evidence }, projectRoot);
   return state;
 }
 
 export function blockTask(taskId: string, reason: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
+  const topic = getActiveTopic(state);
 
-  const task = getTask(state, taskId);
+  const task = getTask(topic, taskId);
   task.status = 'blocked';
   // Preserve any existing task notes — do not destroy prior context by
   // overwriting it with the blocker reason. The reason is always recorded
-  // in state.blockers below; task.notes is only backfilled here when there
+  // in topic.blockers below; task.notes is only backfilled here when there
   // isn't already a note, to keep prior display behavior for the common case.
   if (!task.notes) {
     task.notes = reason;
   }
-  state.status = 'blocked';
+  topic.status = 'blocked';
 
-  state.blockers = state.blockers ?? [];
-  state.blockers.push({
+  topic.blockers = topic.blockers ?? [];
+  topic.blockers.push({
     description: reason,
     task_id: taskId,
     since: new Date().toISOString(),
@@ -416,15 +604,16 @@ export function blockTask(taskId: string, reason: string, projectRoot?: string, 
 export function resumeTask(taskId: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
+  const topic = getActiveTopic(state);
 
-  const task = getTask(state, taskId);
+  const task = getTask(topic, taskId);
   task.status = 'in_progress';
-  state.current_task = taskId;
+  topic.current_task = taskId;
 
   // Remove resolved blocker for this task
-  state.blockers = (state.blockers ?? []).filter(b => b.task_id !== taskId);
+  topic.blockers = (topic.blockers ?? []).filter(b => b.task_id !== taskId);
   // Unblock overall status if no blockers remain
-  state.status = state.blockers.length === 0 ? 'active' : 'blocked';
+  topic.status = topic.blockers.length === 0 ? 'active' : 'blocked';
 
   writeState(state, projectRoot, updatedBy);
   return state;
@@ -433,13 +622,14 @@ export function resumeTask(taskId: string, projectRoot?: string, updatedBy?: str
 export function addTask(title: string, notes?: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
+  const topic = getActiveTopic(state);
 
-  const maxId = state.tasks.reduce((max, t) => {
+  const maxId = topic.tasks.reduce((max, t) => {
     const n = parseInt(t.id.slice(1), 10);
     return n > max ? n : max;
   }, 0);
 
-  state.tasks.push({
+  topic.tasks.push({
     id: `T${maxId + 1}`,
     title,
     status: 'pending',
@@ -457,8 +647,9 @@ export function addTask(title: string, notes?: string, projectRoot?: string, upd
 export function recordAttempt(taskId: string, description: string, outcome: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
+  const topic = getActiveTopic(state);
 
-  const task = getTask(state, taskId);
+  const task = getTask(topic, taskId);
   task.attempts = task.attempts ?? [];
   task.attempts.push({ description, outcome, at: new Date().toISOString() });
 
@@ -469,9 +660,10 @@ export function recordAttempt(taskId: string, description: string, outcome: stri
 export function recordDecision(summary: string, rationale?: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
+  const topic = getActiveTopic(state);
 
-  state.decisions = state.decisions ?? [];
-  state.decisions.push({ summary, rationale: rationale ?? null, at: new Date().toISOString() });
+  topic.decisions = topic.decisions ?? [];
+  topic.decisions.push({ summary, rationale: rationale ?? null, at: new Date().toISOString() });
 
   writeState(state, projectRoot, updatedBy);
   return state;
@@ -481,7 +673,7 @@ export function setNextAction(nextAction: string, projectRoot?: string, updatedB
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
 
-  state.next_action = nextAction;
+  getActiveTopic(state).next_action = nextAction;
   writeState(state, projectRoot, updatedBy);
   return state;
 }
@@ -490,9 +682,10 @@ export function archiveState(projectRoot?: string, updatedBy?: string): void {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found.');
 
-  state.status = 'archived';
+  const topic = getActiveTopic(state);
+  topic.status = 'archived';
   writeState(state, projectRoot, updatedBy);
-  appendHistory({ event: 'archived', goal: state.goal }, projectRoot);
+  appendHistory({ event: 'archived', topic: topic.name, goal: topic.goal }, projectRoot);
 }
 
 // ─── Compact resume summary ───────────────────────────────────────────────────
@@ -502,18 +695,20 @@ export function archiveState(projectRoot?: string, updatedBy?: string): void {
  * Target: < 400 tokens, hard cap ~800.
  */
 export function buildResumeContext(state: TaskState): string {
-  const done = state.tasks.filter(t => t.status === 'done');
-  const remaining = state.tasks.filter(t => t.status === 'pending');
-  const inProgress = state.tasks.filter(t => t.status === 'in_progress');
-  const blocked = state.tasks.filter(t => t.status === 'blocked');
+  const topic = getActiveTopic(state);
+  const done = topic.tasks.filter(t => t.status === 'done');
+  const remaining = topic.tasks.filter(t => t.status === 'pending');
+  const inProgress = topic.tasks.filter(t => t.status === 'in_progress');
+  const blocked = topic.tasks.filter(t => t.status === 'blocked');
 
   const lines: string[] = [
     '╔══════════════════════════════════════╗',
     '║  TASK STORE — RESUME CONTEXT         ║',
     '╚══════════════════════════════════════╝',
     '',
-    `GOAL: ${state.goal}`,
-    `STATUS: ${state.status.toUpperCase()}`,
+    `TOPIC: ${topic.name}`,
+    `GOAL: ${topic.goal}`,
+    `STATUS: ${topic.status.toUpperCase()}`,
     '',
   ];
 
@@ -557,10 +752,10 @@ export function buildResumeContext(state: TaskState): string {
   if (blocked.length > 0) {
     lines.push('BLOCKED:');
     for (const t of blocked) {
-      // The blocker reason lives in state.blockers (task.notes is preserved,
+      // The blocker reason lives in topic.blockers (task.notes is preserved,
       // not overwritten, when a task is blocked) — look up the most recent
       // blocker entry for this task to render the reason.
-      const blocker = (state.blockers ?? []).slice().reverse().find(b => b.task_id === t.id);
+      const blocker = (topic.blockers ?? []).slice().reverse().find(b => b.task_id === t.id);
       lines.push(`  ✗ [${t.id}] ${blocker?.description ?? t.notes ?? t.title}`);
       if (t.attempts && t.attempts.length > 0) {
         for (const a of t.attempts.slice(-2)) {
@@ -571,14 +766,14 @@ export function buildResumeContext(state: TaskState): string {
     lines.push('');
   }
 
-  if (state.decisions && state.decisions.length > 0) {
-    const recent = state.decisions.slice(-3);
+  if (topic.decisions && topic.decisions.length > 0) {
+    const recent = topic.decisions.slice(-3);
     lines.push('KEY DECISIONS:');
     for (const d of recent) lines.push(`  • ${d.summary}`);
     lines.push('');
   }
 
-  lines.push(`NEXT ACTION: ${state.next_action ?? '(not set — run /task-status)'}`);
+  lines.push(`NEXT ACTION: ${topic.next_action ?? '(not set — run /task-status)'}`);
   lines.push('');
   lines.push(`Updated: ${state.updated_at.slice(0, 16).replace('T', ' ')} UTC`);
   lines.push('─── /task-status for details | /task-history for audit ───');
@@ -649,11 +844,12 @@ export interface StaleTaskWarning {
 export function detectStaleTasks(projectRoot?: string): StaleTaskWarning[] {
   const state = readState(projectRoot);
   if (!state) return [];
+  const topic = getActiveTopic(state);
 
   const now = Date.now();
   const warnings: StaleTaskWarning[] = [];
 
-  for (const task of state.tasks) {
+  for (const task of topic.tasks) {
     if (task.status === 'in_progress' && task.started_at) {
       const startMs = new Date(task.started_at).getTime();
       const hoursElapsed = (now - startMs) / (1000 * 60 * 60);

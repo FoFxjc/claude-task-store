@@ -33,6 +33,14 @@ Or for the compact resume context:
 task-store resume
 ```
 
+If the store has multiple named topics, both commands use the selected topic.
+Inspect or change that selection explicitly:
+
+```bash
+task-store topic list
+task-store topic use <name>
+```
+
 ## Critical Behavioral Rules
 
 **ALWAYS** follow these rules when using the task store:
@@ -161,11 +169,24 @@ task-store status
 task-store add "Fix discovered memory leak in connection pool"
 ```
 
+### Keeping another topic on the same branch
+
+```bash
+task-store topic add docs "Refresh the API guide" "Draft examples" "Review links"
+task-store topic use docs
+```
+
+Adding a topic does not switch to it. Each topic keeps its own goal, tasks,
+attempts, decisions, blockers, and next action. All ordinary task commands act
+only on the active topic; topic support does not imply concurrent execution or
+orchestration.
+
 ## Compact State Injection Format
 
 When state is injected at session start, it looks like:
 
 ```
+TOPIC: <name>
 GOAL: <goal>
 STATUS: ACTIVE
 
