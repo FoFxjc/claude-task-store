@@ -33,11 +33,11 @@ CONFIG_FILE="$PROJECT_DIR/.claude-task/config.json"
 # Drain stdin so Claude Code's writer never sees an early-closed pipe.
 INPUT=$(cat || true)
 
-# Fast path: same cheap bail-out as post-tool-use.sh. Default-off projects
-# never spawn Node here.
+# Fast path: same cheap bail-out as post-tool-use.sh. Off and configless
+# legacy projects never spawn Node here.
 [[ -f "$STATE_FILE" ]] || exit 0
 [[ -f "$CONFIG_FILE" ]] || exit 0
-grep -q 'conservative' "$CONFIG_FILE" 2>/dev/null || exit 0
+grep -Eq '"auto_checkpoint"[[:space:]]*:[[:space:]]*"conservative"' "$CONFIG_FILE" 2>/dev/null || exit 0
 
 LOCAL_RUNTIME="$PROJECT_DIR/.claude/task-store/bin/task-store.js"
 TASK_STORE_CMD=()

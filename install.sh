@@ -86,10 +86,10 @@ cp "$SCRIPT_DIR/hooks/scripts/session-start.sh" "$CLAUDE_DIR/hooks/scripts/sessi
 cp "$SCRIPT_DIR/hooks/scripts/pre-compact.sh" "$CLAUDE_DIR/hooks/scripts/pre-compact.sh"
 cp "$SCRIPT_DIR/hooks/scripts/session-end.sh" "$CLAUDE_DIR/hooks/scripts/session-end.sh"
 # Auto-checkpoint hooks. These are installed unconditionally but are inert
-# unless the project opts in — each one bails out in bash, before spawning
-# anything, when .claude-task/config.json is absent or not set to
-# conservative. Installing them up front means enabling the feature is a
-# single `task-store config auto-checkpoint conservative` with no reinstall.
+# unless project config selects conservative mode — each one bails out in
+# bash, before spawning anything, when .claude-task/config.json is absent or
+# not set to conservative. Installing them up front keeps mode changes from
+# requiring a reinstall.
 cp "$SCRIPT_DIR/hooks/scripts/post-tool-use.sh" "$CLAUDE_DIR/hooks/scripts/post-tool-use.sh"
 cp "$SCRIPT_DIR/hooks/scripts/stop.sh" "$CLAUDE_DIR/hooks/scripts/stop.sh"
 chmod +x "$CLAUDE_DIR/hooks/scripts/"*.sh
@@ -194,7 +194,7 @@ OWNED_COMMANDS = {
     'SessionStart': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-start.sh',
     'PreCompact': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/pre-compact.sh',
     'SessionEnd': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/session-end.sh',
-    # Auto-checkpoint (inert unless the project opts in to conservative mode).
+    # Auto-checkpoint (inert unless project config selects conservative mode).
     'PostToolUse': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/post-tool-use.sh',
     'Stop': '${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/stop.sh',
 }

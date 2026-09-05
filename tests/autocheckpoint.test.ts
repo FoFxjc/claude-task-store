@@ -31,6 +31,7 @@ import {
   runtimeFilePath,
   debounceSeconds,
   DEFAULT_MODE,
+  NEW_STORE_MODE,
   DEFAULT_DEBOUNCE_SECONDS,
   RECONCILE_INSTRUCTION,
 } from '../src/autocheckpoint.js';
@@ -61,6 +62,11 @@ describe('configuration', () => {
     expect(readConfig(root).auto_checkpoint).toBe('off');
     expect(DEFAULT_MODE).toBe('off');
     expect(isEnabled(root)).toBe(false);
+  });
+
+  it('keeps the new-store default separate from the legacy fallback', () => {
+    expect(DEFAULT_MODE).toBe('off');
+    expect(NEW_STORE_MODE).toBe('conservative');
   });
 
   it('enables and disables conservative mode', () => {

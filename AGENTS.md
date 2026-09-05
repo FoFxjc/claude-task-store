@@ -81,8 +81,9 @@ or evidence.
 
 ### 5. Auto-checkpoint semantics
 
-Auto-checkpoint is **default off**, and **conservative** when enabled
-(`DEFAULT_MODE = 'off'`).
+New stores explicitly persist **conservative** mode. Missing or invalid config
+must still fail closed to **off** (`DEFAULT_MODE = 'off'`) so configless legacy
+stores never change behavior silently.
 
 Core semantics live in the provider-neutral implementation. Hosts map their
 lifecycle onto the existing primitives:
