@@ -247,7 +247,7 @@ If the task store claims something is complete but the repository or tests disag
 
 ## Validated results
 
-Measured across the 530 automated checks that make up the current suite:
+Measured across the 532 automated checks that make up the current suite:
 
 | Scenario | Resume context |
 |----------|---------------:|
@@ -792,10 +792,10 @@ The OpenCode smoke tests need a working `opencode` binary on `PATH`. They
 skip cleanly (`exit 77`) if it isn't installed; the other suites are pure
 shell and run anywhere.
 
-530 automated checks pass across 17 test files: 3 Jest and 14 shell
+532 automated checks pass across 17 test files: 3 Jest and 14 shell
 — unit 134, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
 installer regression 17, path safety 32, project-local runtime 32,
-auto-checkpoint 66, OpenCode install regression 117, OpenCode resume smoke 21,
+auto-checkpoint 68, OpenCode install regression 117, OpenCode resume smoke 21,
 OpenCode auto-checkpoint smoke 20.
 
 CI runs every suite on Node 18/20/22 **except** the two real-OpenCode smoke

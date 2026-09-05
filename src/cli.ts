@@ -24,7 +24,7 @@ const HELP = `
 claude-task-store — persistent execution checkpoint for Claude Code
 
 COMMANDS:
-  init <goal> [task1] [task2] ...   Initialize a new task store (auto-checkpoint: conservative)
+  init <goal> [task1] [task2] ...   Initialize a new task store (auto-checkpoint: ${NEW_STORE_MODE})
   status                            Show current state summary
   resume                            Print compact resume context (for session injection)
   add <title>                       Add a new task
@@ -58,7 +58,7 @@ AUTO-CHECKPOINT (adapter plumbing — used by hooks/plugins, rarely by hand):
 FLAGS:
   --root <path>         Use a specific project root (default: auto-detect from cwd)
   --auto-checkpoint <mode>
-                        Set the initial mode: conservative (default) | off
+                        Set the initial mode: ${NEW_STORE_MODE} (default) | off
   --by <agent>          Record who/what is writing (e.g. --by claude-code, --by codex)
   --expect-rev <N>      Optimistic concurrency: fail if on-disk revision != N.
                          Enforced atomically via an O_EXCL lock file around the

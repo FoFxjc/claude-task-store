@@ -135,6 +135,29 @@ ts next "Implement expression parsing" >/dev/null
 check "explicit-off mode is persisted" "$([[ -f "$CONFIG" && "$(ts config auto-checkpoint)" == "off" ]] && echo true)"
 check "status shows Auto-checkpoint: off" "$(ts status | grep -q '^Auto-checkpoint: off$' && echo true)"
 
+# writeMode() preserves unrelated config keys. A value containing the word
+# "conservative" must not fool either shell fast path into spawning Node when
+# the actual auto_checkpoint mode is off.
+CONFIG_PATH="$CONFIG" python3 -c '
+import json, os
+p = os.environ["CONFIG_PATH"]
+cfg = json.load(open(p))
+cfg["note"] = "conservative guidance for another tool"
+json.dump(cfg, open(p, "w"))
+'
+SPAWN_PROBE="$BASE/node-spawn-probe.cjs"
+SPAWN_MARKER="$BASE/node-spawned"
+printf '%s\n' "require('node:fs').writeFileSync(process.env.NODE_SPAWN_MARKER, 'spawned');" > "$SPAWN_PROBE"
+export NODE_OPTIONS="--require=$SPAWN_PROBE"
+export NODE_SPAWN_MARKER="$SPAWN_MARKER"
+post_tool "$edit_event"
+check "PostToolUse does not spawn Node for off mode with unrelated conservative text" \
+  "$([[ ! -e "$SPAWN_MARKER" ]] && echo true)"
+stop_hook >/dev/null
+check "Stop does not spawn Node for off mode with unrelated conservative text" \
+  "$([[ ! -e "$SPAWN_MARKER" ]] && echo true)"
+unset NODE_OPTIONS NODE_SPAWN_MARKER
+
 # ─── 2. Off == unchanged v0.1.0 behavior ─────────────────────────────────────
 REV_BEFORE=$(state_field revision)
 post_tool "$edit_event"; post_tool "$bash_event"
