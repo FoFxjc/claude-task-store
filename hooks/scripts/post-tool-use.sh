@@ -29,7 +29,7 @@ INPUT=$(cat || true)
 # ── Fast path: bail out before spawning anything ────────────────────────────
 # No task store, or no config, or config does not mention conservative mode.
 # The CLI remains the authority on what the mode actually is; this is only a
-# cheap gate so the default-off case costs nothing.
+# cheap gate so off and configless legacy projects cost nothing.
 [[ -f "$STATE_FILE" ]] || exit 0
 [[ -f "$CONFIG_FILE" ]] || exit 0
 grep -q 'conservative' "$CONFIG_FILE" 2>/dev/null || exit 0

@@ -15,6 +15,7 @@ import {
   readConfig, writeMode, markDirty, shouldReconcile, markReconcileRequested,
   markReconciled, freshness, readRuntime, RECONCILE_INSTRUCTION,
   DEFAULT_DEBOUNCE_SECONDS, debounceSeconds, configFilePath,
+  NEW_STORE_MODE,
   type AutoCheckpointMode,
 } from './autocheckpoint.js';
 import { readFileSync, existsSync } from 'fs';
@@ -23,7 +24,7 @@ const HELP = `
 claude-task-store — persistent execution checkpoint for Claude Code
 
 COMMANDS:
-  init <goal> [task1] [task2] ...   Initialize a new task store
+  init <goal> [task1] [task2] ...   Initialize a new task store (auto-checkpoint: conservative)
   status                            Show current state summary
   resume                            Print compact resume context (for session injection)
   add <title>                       Add a new task
@@ -43,7 +44,7 @@ COMMANDS:
 CONFIG:
   config                            Show project-local task-store configuration
   config auto-checkpoint            Show the current auto-checkpoint mode
-  config auto-checkpoint <mode>     Set the mode: off (default) | conservative
+  config auto-checkpoint <mode>     Set the mode: off | conservative
 
 AUTO-CHECKPOINT (adapter plumbing — used by hooks/plugins, rarely by hand):
   auto status                       Show dirty/freshness state and why
@@ -56,6 +57,8 @@ AUTO-CHECKPOINT (adapter plumbing — used by hooks/plugins, rarely by hand):
 
 FLAGS:
   --root <path>         Use a specific project root (default: auto-detect from cwd)
+  --auto-checkpoint <mode>
+                        Set the initial mode: conservative (default) | off
   --by <agent>          Record who/what is writing (e.g. --by claude-code, --by codex)
   --expect-rev <N>      Optimistic concurrency: fail if on-disk revision != N.
                          Enforced atomically via an O_EXCL lock file around the
@@ -97,6 +100,14 @@ function parseArgs(argv: string[]): { command: string; args: string[]; flags: Re
       evidence.push(value);
     }
     else if (a === '--tail') { flags.tail = argv[++i] ?? '20'; }
+    else if (a === '--auto-checkpoint') {
+      const value = argv[++i];
+      if (value === undefined) {
+        console.error('Error: --auto-checkpoint requires a value');
+        process.exit(1);
+      }
+      flags['auto-checkpoint'] = value;
+    }
     else if (a === '--by') { flags.by = argv[++i] ?? ''; }
     else if (a === '--expect-rev') { flags['expect-rev'] = argv[++i] ?? ''; }
     else if (!command) { command = a; }
@@ -183,6 +194,14 @@ async function main(): Promise<void> {
   try {
     const by = flags.by ? String(flags.by) : undefined;
     const expectRev = flags['expect-rev'] !== undefined ? parseInt(String(flags['expect-rev']), 10) : undefined;
+    const initialAutoCheckpoint = flags['auto-checkpoint'] !== undefined
+      ? String(flags['auto-checkpoint'])
+      : NEW_STORE_MODE;
+
+    if (flags['auto-checkpoint'] !== undefined && command !== 'init') {
+      console.error('Error: --auto-checkpoint is only supported on `init`.');
+      process.exit(1);
+    }
 
     // --by is only meaningful on commands that write state. Passing it to a
     // read-only command was previously silently ignored, which is not
@@ -232,9 +251,16 @@ async function main(): Promise<void> {
       switch (command) {
         case 'init': {
           const goal = args[0];
-          if (!goal) { console.error('Error: goal is required\nUsage: task-store init "<goal>" [task1] [task2] ...'); process.exit(1); }
+          if (!goal) { console.error('Error: goal is required\nUsage: task-store init "<goal>" [task1] [task2] ... [--auto-checkpoint off|conservative]'); process.exit(1); }
+          if (initialAutoCheckpoint !== 'off' && initialAutoCheckpoint !== 'conservative') {
+            console.error(`Error: invalid auto-checkpoint mode \`${initialAutoCheckpoint}\`. Supported modes: off, conservative`);
+            process.exit(1);
+          }
           const tasks = args.slice(1);
           const state = initState(goal, tasks, projectRoot, by);
+          // Persist the new-store choice explicitly. readConfig() deliberately
+          // continues to fail closed to `off` for configless legacy stores.
+          writeMode(initialAutoCheckpoint as AutoCheckpointMode, projectRoot);
           console.log(`✓ Initialized task store for: ${state.goal}`);
           console.log(`  ${state.tasks.length} task(s) created`);
           console.log(`  State: ${stateFilePath(projectRoot)}`);

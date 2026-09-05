@@ -10,7 +10,7 @@
 # dedicated check.
 #
 # The invariants under test, in priority order:
-#   1. Default is off, and off means "byte-for-byte v0.1.0 behavior".
+#   1. New stores persist conservative; configless legacy stores stay off.
 #   2. Tool activity marks dirty and NEVER mutates task state.
 #   3. No task is ever auto-completed and next_action is never invented.
 #   4. Reconciliation is requested at a boundary, once, then debounced.
@@ -97,13 +97,42 @@ sys.exit(0 if ok else 1)
 ' && REG=true || REG=false
 check "PostToolUse+Stop registered, PostToolUse scoped to mutating tools only" "$REG"
 
-# ─── 1. Default is off ───────────────────────────────────────────────────────
-ts init "Ship the parser" "Write lexer" "Write parser" >/dev/null
+# ─── 1. Init defaults and legacy fallback ───────────────────────────────────
+NEW_STORE="$BASE/new store"
+mkdir -p "$NEW_STORE"
+node "$CLI" init "New project" "First task" --root "$NEW_STORE" >/dev/null
+check "new init persists a config file" "$([[ -f "$NEW_STORE/.claude-task/config.json" ]] && echo true)"
+check "new init defaults to conservative" \
+  "$([[ "$(node "$CLI" config auto-checkpoint --root "$NEW_STORE")" == "conservative" ]] && echo true)"
+
+LEGACY_STORE="$BASE/legacy store"
+mkdir -p "$LEGACY_STORE/.claude-task"
+cp "$NEW_STORE/.claude-task/state.json" "$LEGACY_STORE/.claude-task/state.json"
+check "configless legacy store has no config file" \
+  "$([[ ! -f "$LEGACY_STORE/.claude-task/config.json" ]] && echo true)"
+check "configless legacy store remains off" \
+  "$([[ "$(node "$CLI" config auto-checkpoint --root "$LEGACY_STORE")" == "off" ]] && echo true)"
+
+INVALID_STORE="$BASE/invalid config store"
+mkdir -p "$INVALID_STORE/.claude-task"
+cp "$NEW_STORE/.claude-task/state.json" "$INVALID_STORE/.claude-task/state.json"
+printf '%s\n' '{invalid json' > "$INVALID_STORE/.claude-task/config.json"
+check "invalid legacy config falls back to off" \
+  "$([[ "$(node "$CLI" config auto-checkpoint --root "$INVALID_STORE")" == "off" ]] && echo true)"
+
+EXPLICIT_OFF_STORE="$BASE/explicit off store"
+mkdir -p "$EXPLICIT_OFF_STORE"
+node "$CLI" init "Opted-out project" "First task" --auto-checkpoint off --root "$EXPLICIT_OFF_STORE" >/dev/null
+check "init --auto-checkpoint off persists off" \
+  "$([[ "$(node "$CLI" config auto-checkpoint --root "$EXPLICIT_OFF_STORE")" == "off" ]] && echo true)"
+check "init rejects an invalid auto-checkpoint mode without creating state" \
+  "$(BAD_INIT="$BASE/bad init"; mkdir -p "$BAD_INIT"; node "$CLI" init "Bad" --auto-checkpoint sideways --root "$BAD_INIT" >/dev/null 2>&1 || true; [[ ! -e "$BAD_INIT/.claude-task/state.json" ]] && echo true)"
+
+ts init "Ship the parser" "Write lexer" "Write parser" --auto-checkpoint off >/dev/null
 ts start T2 >/dev/null
 ts next "Implement expression parsing" >/dev/null
 
-check "no config file is created by init (default is implicit)" "$([[ ! -f "$CONFIG" ]] && echo true)"
-check "default mode reports off" "$([[ "$(ts config auto-checkpoint)" == "off" ]] && echo true)"
+check "explicit-off mode is persisted" "$([[ -f "$CONFIG" && "$(ts config auto-checkpoint)" == "off" ]] && echo true)"
 check "status shows Auto-checkpoint: off" "$(ts status | grep -q '^Auto-checkpoint: off$' && echo true)"
 
 # ─── 2. Off == unchanged v0.1.0 behavior ─────────────────────────────────────

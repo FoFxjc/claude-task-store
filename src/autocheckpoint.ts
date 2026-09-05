@@ -53,7 +53,10 @@ const RUNTIME_FILE = 'auto-checkpoint.json';
  */
 export type AutoCheckpointMode = 'off' | 'conservative';
 
+// Missing or invalid configuration must remain off for legacy stores. New
+// stores use a separate, explicit default that the CLI persists during init.
 export const DEFAULT_MODE: AutoCheckpointMode = 'off';
+export const NEW_STORE_MODE: AutoCheckpointMode = 'conservative';
 
 /**
  * Minimum seconds between two reconciliation requests. A reconciliation is

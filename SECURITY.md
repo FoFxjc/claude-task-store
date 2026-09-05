@@ -57,8 +57,8 @@ state in place.
 - `session-start.sh` (`SessionStart`) — injects the resume projection
 - `pre-compact.sh` (`PreCompact`) — writes a history marker before compaction
 - `session-end.sh` (`SessionEnd`) — session-boundary bookkeeping
-- `post-tool-use.sh` (`PostToolUse`) — auto-checkpoint dirty marking; inert unless the project opts in
-- `stop.sh` (`Stop`) — auto-checkpoint reconciliation boundary; inert unless the project opts in
+- `post-tool-use.sh` (`PostToolUse`) — auto-checkpoint dirty marking; inert when the project is configured off
+- `stop.sh` (`Stop`) — auto-checkpoint reconciliation boundary; inert when the project is configured off
 
 Each script reads the state file, optionally runs the `task-store` CLI, and prints JSON to stdout.
 

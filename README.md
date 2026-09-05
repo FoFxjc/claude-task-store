@@ -247,7 +247,7 @@ If the task store claims something is complete but the repository or tests disag
 
 ## Validated results
 
-Measured across the 503 automated checks that make up the v0.2.0 suite:
+Measured across the 530 automated checks that make up the current suite:
 
 | Scenario | Resume context |
 |----------|---------------:|
@@ -398,7 +398,7 @@ On next session start (or in a fresh model session), the agent automatically rec
 
 | Command | Description |
 |---------|-------------|
-| `task-store init "<goal>" [tasks...]` | Initialize a new task store |
+| `task-store init "<goal>" [tasks...] [--auto-checkpoint off\|conservative]` | Initialize a new task store; auto-checkpoint defaults to `conservative` |
 | `task-store status` | Show full current state |
 | `task-store resume` | Print compact resume context |
 | `task-store add "<title>"` | Add a new task |
@@ -443,7 +443,7 @@ After installation, these hooks run automatically:
 | `post-tool-use.sh` | `PostToolUse` | Auto-checkpoint only — marks the checkpoint possibly stale |
 | `stop.sh` | `Stop` | Auto-checkpoint only — asks the agent to reconcile at a boundary |
 
-The last two are installed unconditionally but are **inert unless you opt in**: each exits in a few milliseconds of shell, before starting Node, when `.claude-task/config.json` is absent or not set to `conservative`. See [Optional auto-checkpoint mode](#optional-auto-checkpoint-mode).
+The last two are installed unconditionally. New stores enable conservative mode during `task-store init`; use `--auto-checkpoint off` to opt out. Configless legacy stores remain inert: each hook exits in a few milliseconds of shell, before starting Node, when `.claude-task/config.json` is absent or not set to `conservative`. See [Auto-checkpoint mode](#auto-checkpoint-mode).
 
 The `/task-store` skill is also installed. Claude uses it when starting long-running tasks, after milestones, and before ending sessions. Invoke directly with `/task-store`.
 
@@ -547,9 +547,9 @@ the locally installed `opencode` binary:
 
 ---
 
-## Optional auto-checkpoint mode
+## Auto-checkpoint mode
 
-**Default: off.** Nothing below happens unless you turn it on.
+**New stores default to `conservative`.** `task-store init` writes that choice explicitly to `.claude-task/config.json`. Use `task-store init ... --auto-checkpoint off` to opt out. Existing stores with no config file—and stores with missing or invalid configuration—continue to resolve to `off`, so upgrading does not silently change their behavior.
 
 `claude-task-store` covers session boundaries well, but not the middle of a long session. The agent can edit files, run tests and finish milestones without ever calling the CLI, and `.claude-task/state.json` quietly falls behind the repository. Auto-checkpoint is a conservative fix for exactly that drift.
 
@@ -565,7 +565,7 @@ completion still requires an explicit `task-store done` with evidence.
 
 ```bash
 task-store config auto-checkpoint conservative   # turn it on
-task-store config auto-checkpoint off            # turn it off (default)
+task-store config auto-checkpoint off            # turn it off
 task-store config auto-checkpoint                # print the current mode
 ```
 
@@ -632,7 +632,7 @@ repository / tests  >  git state  >  task-store  >  model memory
 
 ### Cost when off
 
-Zero writes and no Node process. The hooks bail out in bash before spawning anything, so a project that never opts in behaves byte-for-byte as it did before auto-checkpoint existed. When it *is* on, each matched tool call spawns one short-lived Node process to record the signal.
+Zero writes and no Node process. When auto-checkpoint is off—including in a configless legacy project—the hooks bail out in bash before spawning anything. Each matched tool call in conservative mode spawns one short-lived Node process to record the signal.
 
 ### Provider neutrality
 
@@ -756,7 +756,7 @@ Options:
 - **Gitignore everything** — For private or transient work
 - **Commit both** — Full audit trail in git (history.jsonl grows unbounded)
 
-`.claude-task/config.json` is yours and is committable — commit it if you want auto-checkpoint enabled for everyone on the project. `.claude-task/auto-checkpoint.json` is ephemeral machine-local bookkeeping (dirty/debounce timestamps) and is gitignored by the installer.
+`.claude-task/config.json` is yours and is committable — commit it to share the project's auto-checkpoint choice. `.claude-task/auto-checkpoint.json` is ephemeral machine-local bookkeeping (dirty/debounce timestamps) and is gitignored by the installer.
 
 ---
 
@@ -792,15 +792,15 @@ The OpenCode smoke tests need a working `opencode` binary on `PATH`. They
 skip cleanly (`exit 77`) if it isn't installed; the other suites are pure
 shell and run anywhere.
 
-503 automated checks pass across 17 test files: 3 Jest and 14 shell
-— unit 116, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
+530 automated checks pass across 17 test files: 3 Jest and 14 shell
+— unit 134, acceptance 17, Phase 2 reliability 52, Phase 3 handoff 22,
 installer regression 17, path safety 32, project-local runtime 32,
-auto-checkpoint 60, OpenCode install regression 117, OpenCode resume smoke 18,
+auto-checkpoint 66, OpenCode install regression 117, OpenCode resume smoke 21,
 OpenCode auto-checkpoint smoke 20.
 
 CI runs every suite on Node 18/20/22 **except** the two real-OpenCode smoke
 suites: GitHub runners have no `opencode` binary, so those two steps report
-themselves as skipped. The 38 checks they contribute are verified locally
+themselves as skipped. The 41 checks they contribute are verified locally
 against an installed OpenCode, not by CI.
 
 ---
