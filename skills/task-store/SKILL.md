@@ -21,7 +21,7 @@ The task store lives in `.claude-task/state.json` in the project root. It answer
 
 ## Agent-first operating model
 
-Task-store is an agent-facing execution checkpoint. Coding agents are its
+The task store is an agent-facing execution checkpoint. Coding agents are its
 primary operators; humans mainly consume the results agents report. Commands
 must therefore be non-interactive, deterministic, and easy to invoke. Resume
 and command output should keep context cost low while clearly exposing state
