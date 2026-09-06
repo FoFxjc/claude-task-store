@@ -162,13 +162,13 @@ $TS start T1 --root "$D" > /dev/null
 
 # History should have a warning
 HIST=$($TS history --tail 10 --root "$D" 2>&1)
-# Both sessions wrote; last writer wins — state is consistent
+# Both CLI sessions wrote through the serialized mutation path; state is consistent.
 STATUS=$($TS status --root "$D" 2>&1)
 check_contains "After concurrent T1 starts, state is valid" "$STATUS" "T1"
 
 # The history warning is written (observed in earlier testing)
-echo "  ℹ  Concurrent session limitation: last writer wins, no distributed lock"
-echo "     This is documented in SECURITY.md as a known limitation."
+echo "  ℹ  CLI writers are serialized by the task-store lock."
+echo "     Direct library callers, network filesystems, and separate Git checkouts remain outside that guarantee."
 PASS=$((PASS+1))  # Documented limitation, not a failure
 rm -rf "$D"
 

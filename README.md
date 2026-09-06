@@ -247,14 +247,10 @@ If the task store claims something is complete but the repository or tests disag
 
 ## Validated results
 
-Measured across the 532 automated checks that make up the current suite:
-
-| Scenario | Resume context |
-|----------|---------------:|
-| 22-session pressure test (max) | 148 tokens |
-| 30+ completed tasks (decay test) | 267 tokens |
-| Claude → Codex handoff | 299 tokens |
-| Codex → Claude handoff | ~190 tokens |
+The validation suites cover small-context pressure, state decay, failure
+recovery, installation safety, concurrent CLI writes, and Claude ↔ Codex/OpenCode
+handoffs. These scenarios consistently keep the default resume projection below
+the documented budget.
 
 **Design constraint:** default resume projection must remain below 400 tokens. As state accumulates, older completed tasks and historical detail stay outside the default projection and load only on explicit request. Context is treated as an expensive resource.
 
