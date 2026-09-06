@@ -474,7 +474,7 @@ async function main(): Promise<void> {
           input.expect_rev = n;
         }
 
-        const result = commitBatch(rawInput, projectRoot, by);
+        const result = commitBatch(input, projectRoot, by);
         console.log(`✓ Committed ${result.operationsApplied} operation(s) on topic ${result.topic}`);
         console.log(`  State revision: ${result.revision}`);
         break;

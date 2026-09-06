@@ -255,7 +255,7 @@ export interface BatchResult {
  * Does NOT read or write any files.
  */
 export function parseBatchInput(raw: unknown): { topic: string; expectRev: number | undefined; operations: BatchOperationInput[] } {
-  if (raw === null || raw === undefined || typeof raw !== 'object') {
+  if (raw === null || raw === undefined || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new StateError('Batch input must be a JSON object');
   }
   const obj = raw as Record<string, unknown>;
@@ -283,7 +283,7 @@ export function parseBatchInput(raw: unknown): { topic: string; expectRev: numbe
   const operations: BatchOperationInput[] = [];
   for (let i = 0; i < obj.operations.length; i++) {
     const op = obj.operations[i];
-    if (op === null || op === undefined || typeof op !== 'object') {
+    if (op === null || op === undefined || typeof op !== 'object' || Array.isArray(op)) {
       throw new StateError(`operations[${i}] must be a JSON object`);
     }
     const o = op as Record<string, unknown>;
@@ -391,7 +391,10 @@ function applyOperation(state: TaskState, topicName: string, op: BatchOperationI
 
   switch (op.type) {
     case 'add': {
-      const maxId = topic.tasks.reduce((max, t) => Math.max(max, parseInt(t.id.slice(1), 10)), 0);
+      const maxId = topic.tasks.reduce((max, t) => {
+        const n = parseInt(t.id.slice(1), 10);
+        return Number.isFinite(n) && n > max ? n : max;
+      }, 0);
       topic.tasks.push({
         id: `T${maxId + 1}`,
         title: op.title,

@@ -1054,6 +1054,7 @@ describe('parseBatchInput', () => {
     expect(() => parseBatchInput(null)).toThrow('Batch input must be a JSON object');
     expect(() => parseBatchInput('string')).toThrow('Batch input must be a JSON object');
     expect(() => parseBatchInput(42)).toThrow('Batch input must be a JSON object');
+    expect(() => parseBatchInput([])).toThrow('Batch input must be a JSON object');
   });
 
   it('rejects non-array operations', () => {
@@ -1066,6 +1067,10 @@ describe('parseBatchInput', () => {
 
   it('rejects missing operation type', () => {
     expect(() => parseBatchInput({ topic: 'default', operations: [{ title: 'x' }] })).toThrow('operations[0].type must be a string');
+  });
+
+  it('rejects an operation array', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [[]] })).toThrow('operations[0] must be a JSON object');
   });
 
   it('rejects unknown operation type', () => {
