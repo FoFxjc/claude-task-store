@@ -262,7 +262,10 @@ Runs on push/PR to main, tests Node.js 18/20/22:
 
 ## 14. Known Limitations
 
-1. **No distributed lock** — concurrent agent sessions use last-writer-wins by default. `--expect-rev` provides opt-in conflict detection but is not atomic CAS. Documented in SECURITY.md.
+1. **Lock scope** — mutating CLI invocations on one machine are serialized by
+   `withStoreLock()`, and `--expect-rev` is an atomic compare-and-write for
+   CLI callers. Direct library callers that bypass the lock, network
+   filesystems, and separate Git checkouts remain outside that guarantee.
 
 2. **`updated_by` is unauthenticated** — any agent can claim any identity string. Informational only.
 

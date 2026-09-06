@@ -259,9 +259,9 @@ All suites pass in the working tree:
 
 ---
 
-## Remaining before tagging v0.1.0
+## Historical release note
 
-Nothing in this document is outstanding. The pre-existing release steps in
+Nothing in this document is outstanding. The original v0.1.0 release steps in
 [`pre-publish-review.md`](pre-publish-review.md) §"Commands to Tag and Release" still apply, with one
 addition: commit the working tree, and confirm CI passes on the branch now that
 it actually runs all eight suites.

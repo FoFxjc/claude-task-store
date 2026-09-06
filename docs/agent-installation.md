@@ -145,12 +145,16 @@ Completion requires an explicit `task-store done` with evidence.
 
 ## Auto-checkpoint
 
-Default off. Leave it off.
+Installation alone does not initialize a task store, so installation does not
+enable auto-checkpoint. Existing stores without an explicit config remain
+`off`. When a new store is initialized, it defaults to `conservative` unless
+the user explicitly chooses `--auto-checkpoint off`.
 
-Only enable when the user explicitly requests it:
+When initializing a new store, preserve the default unless the user requests
+the opt-out:
 
 ```bash
-node .claude/task-store/bin/task-store.js config auto-checkpoint conservative
+node .claude/task-store/bin/task-store.js init "<goal>" "<task>" --auto-checkpoint off
 ```
 
 Auto-checkpoint is interruption insurance and stale-state detection: it reduces

@@ -1,289 +1,296 @@
 {
-  "version": "1",
-  "revision": 32,
-  "goal": "Prepare claude-task-store v0.1.0 for public release: implement, harden, audit, and verify the installation path",
-  "status": "completed",
-  "current_task": null,
-  "tasks": [
+  "version": "2",
+  "revision": 34,
+  "active_topic": "default",
+  "topics": [
     {
-      "id": "T1",
-      "title": "Item 1: installer/uninstaller must not delete hooks they do not own",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "install.sh + uninstall.sh: OWNED_COMMANDS exact-match",
-        "tests/install_regression_test.sh 17/17 pass"
+      "name": "default",
+      "goal": "Prepare claude-task-store v0.1.0 for public release: implement, harden, audit, and verify the installation path",
+      "status": "archived",
+      "current_task": null,
+      "tasks": [
+        {
+          "id": "T1",
+          "title": "Item 1: installer/uninstaller must not delete hooks they do not own",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "install.sh + uninstall.sh: OWNED_COMMANDS exact-match",
+            "tests/install_regression_test.sh 17/17 pass"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.184Z"
+        },
+        {
+          "id": "T2",
+          "title": "Item 2: back up settings.json before rewriting",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "install.sh + uninstall.sh cp to settings.json.bak",
+            "install_regression_test.sh asserts .bak exists"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.243Z"
+        },
+        {
+          "id": "T3",
+          "title": "Item 3: serialize all mutating CLI writes behind O_EXCL lock",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "src/core.ts:withStoreLock + process.once('exit') release",
+            "src/cli.ts:MUTATING_COMMANDS locks all writers",
+            "path_safety_test.sh scenario 8: 12/12 concurrent adds survive; unlocked build loses 3"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.302Z"
+        },
+        {
+          "id": "T4",
+          "title": "Item 4: stop comma-joining/splitting evidence strings",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "src/cli.ts:parseArgs evidence string[] end-to-end",
+            "path_safety_test.sh scenario 2"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.359Z"
+        },
+        {
+          "id": "T5",
+          "title": "Item 5: remove duplicate resume renderer from session-start.sh",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "hooks/scripts/session-start.sh: minimal fallback, CLI is canonical renderer",
+            "path_safety_test.sh scenario 4"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.416Z"
+        },
+        {
+          "id": "T6",
+          "title": "Item 6: reject --by on read-only commands",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "src/cli.ts:READ_ONLY_COMMANDS rejects --by",
+            "path_safety_test.sh scenario 6"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.476Z"
+        },
+        {
+          "id": "T7",
+          "title": "Item 7: block must not destroy pre-existing task notes",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "src/core.ts:blockTask backfills notes only if empty; buildResumeContext reads state.blockers",
+            "path_safety_test.sh scenario 3"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.533Z"
+        },
+        {
+          "id": "T8",
+          "title": "Item 8: path safety for spaces/quotes in project paths",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "python inlines use os.environ under quoted heredocs; TASK_STORE_CMD is a bash array",
+            "path_safety_test.sh runs full surface against a path with space, apostrophe and dollar"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.592Z"
+        },
+        {
+          "id": "T9",
+          "title": "Item 9: fix SKILL.md frontmatter and authority overclaim",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "skills/task-store/SKILL.md: name added, invocation removed, authority overclaim replaced"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.649Z"
+        },
+        {
+          "id": "T10",
+          "title": "Item 10: document token-estimate in --help",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "src/cli.ts USAGE lists token-estimate; case arm reformatted"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.707Z"
+        },
+        {
+          "id": "T11",
+          "title": "Item 11: make global npm install opt-in",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "install.sh: TASK_STORE_INSTALL_GLOBAL=1 opt-in",
+            "path_safety_test.sh scenario 5"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.765Z"
+        },
+        {
+          "id": "T12",
+          "title": "Item 12: run all 8 test suites in CI",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            ".github/workflows/ci.yml runs all 8 suites on node 18/20/22"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.822Z"
+        },
+        {
+          "id": "T13",
+          "title": "Item 13: sync package-lock license to MPL-2.0",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "package-lock.json license MPL-2.0"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.880Z"
+        },
+        {
+          "id": "T14",
+          "title": "Item 14: gitignore .lock and settings.json.bak",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            ".gitignore + install.sh template ignore .claude-task/.lock and .claude/settings.json.bak",
+            "git check-ignore confirms both"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.938Z"
+        },
+        {
+          "id": "T15",
+          "title": "Write docs/pre-release-remediation.md (referenced by code/docs)",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "docs/pre-release-remediation.md: 14 items, resolves all dangling references"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:01.996Z"
+        },
+        {
+          "id": "T16",
+          "title": "Add tests/path_safety_test.sh (referenced by CI)",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "tests/path_safety_test.sh 32/32 pass; referenced by ci.yml"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T04:25:02.055Z"
+        },
+        {
+          "id": "T17",
+          "title": "Commit the remediation work",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "merged into main via PR #3",
+            "171 checks passing at that commit (203 after release hardening)"
+          ],
+          "attempts": [],
+          "started_at": "2026-08-31T04:25:02.289Z",
+          "completed_at": "2026-08-31T07:56:06.271Z"
+        },
+        {
+          "id": "T18",
+          "title": "Final pre-publish audit of merged main",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "README: corrected false install claim; test counts 122 -> 203",
+            "SKILL.md: removed absolutist wording contradicting the trust hierarchy",
+            "tests/phase2/safety_test.sh: replaced unconditional PASS with a real assertion"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T08:25:20.651Z"
+        },
+        {
+          "id": "T19",
+          "title": "Make default install self-contained (project-local CLI runtime)",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "install.sh copies built runtime to .claude/task-store/ (ESM marker + ownership marker)",
+            "session-start.sh resolves project-local runtime -> PATH -> minimal fallback",
+            "uninstall.sh removes it only when the ownership marker matches",
+            "tests/local_runtime_test.sh 32/32; verified non-vacuous (21/32 pre-fix)"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T08:25:20.708Z"
+        },
+        {
+          "id": "T20",
+          "title": "Position task-store relative to automatic context compaction",
+          "status": "done",
+          "notes": null,
+          "evidence": [
+            "README.md: 'What about automatic compaction?' section + comparison table",
+            "DESIGN.md: 'Relationship to Automatic Context Compaction' design note"
+          ],
+          "attempts": [],
+          "started_at": null,
+          "completed_at": "2026-08-31T08:27:57.174Z"
+        }
       ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.184Z"
-    },
-    {
-      "id": "T2",
-      "title": "Item 2: back up settings.json before rewriting",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "install.sh + uninstall.sh cp to settings.json.bak",
-        "install_regression_test.sh asserts .bak exists"
+      "decisions": [
+        {
+          "summary": "docs/pre-release-remediation.md item numbers are load-bearing — cited by exact number from README, SECURITY.md, src/, and the installers. Never renumber.",
+          "rationale": null,
+          "at": "2026-08-31T04:25:02.114Z"
+        },
+        {
+          "summary": "Deleting hooks/hooks.json was correct: nothing referenced it, and install.sh writes hook config into settings.json inline, so it was a dead second source of truth.",
+          "rationale": null,
+          "at": "2026-08-31T04:25:02.171Z"
+        },
+        {
+          "summary": "The store lock covers every mutating CLI command, not just --expect-rev, because SECURITY.md/README promise general serialization. Read-only commands stay unlocked so `status` does not create .claude-task/.",
+          "rationale": null,
+          "at": "2026-08-31T04:25:02.230Z"
+        }
       ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.243Z"
-    },
-    {
-      "id": "T3",
-      "title": "Item 3: serialize all mutating CLI writes behind O_EXCL lock",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "src/core.ts:withStoreLock + process.once('exit') release",
-        "src/cli.ts:MUTATING_COMMANDS locks all writers",
-        "path_safety_test.sh scenario 8: 12/12 concurrent adds survive; unlocked build loses 3"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.302Z"
-    },
-    {
-      "id": "T4",
-      "title": "Item 4: stop comma-joining/splitting evidence strings",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "src/cli.ts:parseArgs evidence string[] end-to-end",
-        "path_safety_test.sh scenario 2"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.359Z"
-    },
-    {
-      "id": "T5",
-      "title": "Item 5: remove duplicate resume renderer from session-start.sh",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "hooks/scripts/session-start.sh: minimal fallback, CLI is canonical renderer",
-        "path_safety_test.sh scenario 4"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.416Z"
-    },
-    {
-      "id": "T6",
-      "title": "Item 6: reject --by on read-only commands",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "src/cli.ts:READ_ONLY_COMMANDS rejects --by",
-        "path_safety_test.sh scenario 6"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.476Z"
-    },
-    {
-      "id": "T7",
-      "title": "Item 7: block must not destroy pre-existing task notes",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "src/core.ts:blockTask backfills notes only if empty; buildResumeContext reads state.blockers",
-        "path_safety_test.sh scenario 3"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.533Z"
-    },
-    {
-      "id": "T8",
-      "title": "Item 8: path safety for spaces/quotes in project paths",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "python inlines use os.environ under quoted heredocs; TASK_STORE_CMD is a bash array",
-        "path_safety_test.sh runs full surface against a path with space, apostrophe and dollar"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.592Z"
-    },
-    {
-      "id": "T9",
-      "title": "Item 9: fix SKILL.md frontmatter and authority overclaim",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "skills/task-store/SKILL.md: name added, invocation removed, authority overclaim replaced"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.649Z"
-    },
-    {
-      "id": "T10",
-      "title": "Item 10: document token-estimate in --help",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "src/cli.ts USAGE lists token-estimate; case arm reformatted"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.707Z"
-    },
-    {
-      "id": "T11",
-      "title": "Item 11: make global npm install opt-in",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "install.sh: TASK_STORE_INSTALL_GLOBAL=1 opt-in",
-        "path_safety_test.sh scenario 5"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.765Z"
-    },
-    {
-      "id": "T12",
-      "title": "Item 12: run all 8 test suites in CI",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        ".github/workflows/ci.yml runs all 8 suites on node 18/20/22"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.822Z"
-    },
-    {
-      "id": "T13",
-      "title": "Item 13: sync package-lock license to MPL-2.0",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "package-lock.json license MPL-2.0"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.880Z"
-    },
-    {
-      "id": "T14",
-      "title": "Item 14: gitignore .lock and settings.json.bak",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        ".gitignore + install.sh template ignore .claude-task/.lock and .claude/settings.json.bak",
-        "git check-ignore confirms both"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.938Z"
-    },
-    {
-      "id": "T15",
-      "title": "Write docs/pre-release-remediation.md (referenced by code/docs)",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "docs/pre-release-remediation.md: 14 items, resolves all dangling references"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:01.996Z"
-    },
-    {
-      "id": "T16",
-      "title": "Add tests/path_safety_test.sh (referenced by CI)",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "tests/path_safety_test.sh 32/32 pass; referenced by ci.yml"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T04:25:02.055Z"
-    },
-    {
-      "id": "T17",
-      "title": "Commit the remediation work",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "merged into main via PR #3",
-        "171 checks passing at that commit (203 after release hardening)"
-      ],
-      "attempts": [],
-      "started_at": "2026-08-31T04:25:02.289Z",
-      "completed_at": "2026-08-31T07:56:06.271Z"
-    },
-    {
-      "id": "T18",
-      "title": "Final pre-publish audit of merged main",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "README: corrected false install claim; test counts 122 -> 203",
-        "SKILL.md: removed absolutist wording contradicting the trust hierarchy",
-        "tests/phase2/safety_test.sh: replaced unconditional PASS with a real assertion"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T08:25:20.651Z"
-    },
-    {
-      "id": "T19",
-      "title": "Make default install self-contained (project-local CLI runtime)",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "install.sh copies built runtime to .claude/task-store/ (ESM marker + ownership marker)",
-        "session-start.sh resolves project-local runtime -> PATH -> minimal fallback",
-        "uninstall.sh removes it only when the ownership marker matches",
-        "tests/local_runtime_test.sh 32/32; verified non-vacuous (21/32 pre-fix)"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T08:25:20.708Z"
-    },
-    {
-      "id": "T20",
-      "title": "Position task-store relative to automatic context compaction",
-      "status": "done",
-      "notes": null,
-      "evidence": [
-        "README.md: 'What about automatic compaction?' section + comparison table",
-        "DESIGN.md: 'Relationship to Automatic Context Compaction' design note"
-      ],
-      "attempts": [],
-      "started_at": null,
-      "completed_at": "2026-08-31T08:27:57.174Z"
+      "blockers": [],
+      "next_action": "Historical v0.1.0 release checkpoint; start a new task store for the next release when new work begins.",
+      "created_at": "2026-08-31T04:24:05.956Z",
+      "updated_at": "2026-09-06T07:54:17.967Z"
     }
   ],
-  "decisions": [
-    {
-      "summary": "docs/pre-release-remediation.md item numbers are load-bearing — cited by exact number from README, SECURITY.md, src/, and the installers. Never renumber.",
-      "rationale": null,
-      "at": "2026-08-31T04:25:02.114Z"
-    },
-    {
-      "summary": "Deleting hooks/hooks.json was correct: nothing referenced it, and install.sh writes hook config into settings.json inline, so it was a dead second source of truth.",
-      "rationale": null,
-      "at": "2026-08-31T04:25:02.171Z"
-    },
-    {
-      "summary": "The store lock covers every mutating CLI command, not just --expect-rev, because SECURITY.md/README promise general serialization. Read-only commands stay unlocked so `status` does not create .claude-task/.",
-      "rationale": null,
-      "at": "2026-08-31T04:25:02.230Z"
-    }
-  ],
-  "blockers": [],
-  "next_action": "Tag v0.1.0 after final CI passes.",
-  "created_at": "2026-08-31T04:24:05.956Z",
-  "updated_at": "2026-08-31T08:27:57.232Z",
-  "updated_by": "claude-opus-5"
+  "updated_at": "2026-09-06T07:54:17.967Z",
+  "updated_by": "codex"
 }
