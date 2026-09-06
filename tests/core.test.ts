@@ -3,10 +3,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 
 import {
   initState,
@@ -33,6 +33,10 @@ import {
   getActiveTopic,
   addTopic,
   useTopic,
+  commitBatch,
+  parseBatchInput,
+  applyBatch,
+  ConflictError,
 } from '../src/core.js';
 
 function makeTmpDir(): string {
@@ -1000,5 +1004,436 @@ describe('repairState', () => {
     const recovered = repairState(root);
     expect(recovered).not.toBeNull();
     expect(recovered && getActiveTopic(recovered).goal).toBe('Goal');
+  });
+});
+
+// ─── GitHub issue #15: atomic batch commit ────────────────────────────────────
+
+function sha256(path: string): string {
+  const content = readFileSync(path);
+  return createHash('sha256').update(content).digest('hex');
+}
+
+describe('parseBatchInput', () => {
+  it('parses a valid batch with all operation types', () => {
+    const input = {
+      topic: 'default',
+      expect_rev: 5,
+      operations: [
+        { type: 'add', title: 'New task', notes: 'optional note' },
+        { type: 'start', taskId: 'T1' },
+        { type: 'done', taskId: 'T1', evidence: ['e1', 'e2'], notes: 'done!' },
+        { type: 'attempt', taskId: 'T2', description: 'tried X', outcome: 'failed' },
+        { type: 'block', taskId: 'T2', reason: 'API down' },
+        { type: 'resume', taskId: 'T2' },
+        { type: 'decide', summary: 'use Y', rationale: 'simpler' },
+        { type: 'next', action: 'finish the feature' },
+      ],
+    };
+    const parsed = parseBatchInput(input);
+    expect(parsed.topic).toBe('default');
+    expect(parsed.expectRev).toBe(5);
+    expect(parsed.operations).toHaveLength(8);
+  });
+
+  it('rejects a missing or empty topic', () => {
+    expect(() => parseBatchInput({ operations: [{ type: 'add', title: 'hello' }] }))
+      .toThrow('topic must be a non-empty string');
+    expect(() => parseBatchInput({ operations: [{ type: 'add', title: 'hello' }], topic: '' }))
+      .toThrow('topic must be a non-empty string');
+    expect(() => parseBatchInput({ operations: [{ type: 'add', title: 'hello' }], topic: '   ' }))
+      .toThrow('topic must be a non-empty string');
+  });
+
+  it('normalizes topic with trim()', () => {
+    const parsed = parseBatchInput({ operations: [{ type: 'add', title: 'x' }], topic: '  default  ' });
+    expect(parsed.topic).toBe('default');
+  });
+
+  it('rejects non-object input', () => {
+    expect(() => parseBatchInput(null)).toThrow('Batch input must be a JSON object');
+    expect(() => parseBatchInput('string')).toThrow('Batch input must be a JSON object');
+    expect(() => parseBatchInput(42)).toThrow('Batch input must be a JSON object');
+  });
+
+  it('rejects non-array operations', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: 'not array' })).toThrow('operations must be an array');
+  });
+
+  it('rejects empty operations array', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [] })).toThrow('operations array must not be empty');
+  });
+
+  it('rejects missing operation type', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ title: 'x' }] })).toThrow('operations[0].type must be a string');
+  });
+
+  it('rejects unknown operation type', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'delete' }] })).toThrow(
+      'operations[0].type must be one of: add, start, done, attempt, block, resume, decide, next',
+    );
+  });
+
+  it('rejects add without title', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'add' }] })).toThrow('operations[0].title must be a non-empty string');
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'add', title: '' }] })).toThrow('operations[0].title must be a non-empty string');
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'add', title: '  ' }] })).toThrow('operations[0].title must be a non-empty string');
+  });
+
+  it('rejects done without evidence', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'done', taskId: 'T1' }] })).toThrow('operations[0].evidence must be a non-empty array');
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'done', taskId: 'T1', evidence: [] }] })).toThrow('operations[0].evidence must be a non-empty array');
+  });
+
+  it('rejects done with non-string evidence items', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'done', taskId: 'T1', evidence: [42] }] })).toThrow('operations[0].evidence must contain only strings');
+  });
+
+  it('rejects attempt without description or outcome', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'attempt', taskId: 'T1', description: '' }] })).toThrow('operations[0].description must be a non-empty string');
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'attempt', taskId: 'T1', description: 'x', outcome: '' }] })).toThrow('operations[0].outcome must be a non-empty string');
+  });
+
+  it('rejects block without reason', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'block', taskId: 'T1' }] })).toThrow('operations[0].reason must be a non-empty string');
+  });
+
+  it('rejects decide without summary', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'decide' }] })).toThrow('operations[0].summary must be a non-empty string');
+  });
+
+  it('rejects next without action', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'next' }] })).toThrow('operations[0].action must be a non-empty string');
+  });
+
+  it('rejects invalid taskId format', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'start', taskId: 'X1' }] })).toThrow('operations[0].taskId must match T<number>');
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'start', taskId: '1' }] })).toThrow('operations[0].taskId must match T<number>');
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'start', taskId: 'T' }] })).toThrow('operations[0].taskId must match T<number>');
+  });
+
+  it('normalizes taskId to uppercase', () => {
+    const parsed = parseBatchInput({ topic: 'default', operations: [{ type: 'start', taskId: 't1' }] });
+    expect(parsed.operations[0].taskId).toBe('T1');
+  });
+
+  it('rejects non-integer expect_rev', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'add', title: 'x' }], expect_rev: 'five' })).toThrow('expect_rev must be a non-negative integer');
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'add', title: 'x' }], expect_rev: 1.5 })).toThrow('expect_rev must be a non-negative integer');
+  });
+
+  it('rejects negative expect_rev', () => {
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'add', title: 'x' }], expect_rev: -1 })).toThrow('expect_rev must be a non-negative integer');
+    expect(() => parseBatchInput({ topic: 'default', operations: [{ type: 'add', title: 'x' }], expect_rev: -100 })).toThrow('expect_rev must be a non-negative integer');
+  });
+});
+
+describe('applyBatch', () => {
+  let root: string;
+  beforeEach(() => { root = makeTmpDir(); });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  it('adds a task via batch', () => {
+    initState('Goal', ['T1'], root);
+    const state = readState(root)!;
+    const parsed = parseBatchInput({ topic: 'default', operations: [{ type: 'add', title: 'New task' }] });
+    applyBatch(state, parsed);
+    expect(getActiveTopic(state).tasks).toHaveLength(2);
+    expect(getActiveTopic(state).tasks[1].id).toBe('T2');
+    expect(getActiveTopic(state).tasks[1].title).toBe('New task');
+  });
+
+  it('starts and completes tasks via batch', () => {
+    initState('Goal', ['Step A', 'Step B'], root);
+    const state = readState(root)!;
+    const parsed = parseBatchInput({
+      topic: 'default',
+      operations: [
+        { type: 'start', taskId: 'T1' },
+        { type: 'done', taskId: 'T1', evidence: ['src/a.ts'] },
+        { type: 'start', taskId: 'T2' },
+      ],
+    });
+    applyBatch(state, parsed);
+    const topic = getActiveTopic(state);
+    expect(topic.tasks[0].status).toBe('done');
+    expect(topic.tasks[0].evidence).toEqual(['src/a.ts']);
+    expect(topic.tasks[1].status).toBe('in_progress');
+    expect(topic.current_task).toBe('T2');
+  });
+
+  it('records attempts via batch', () => {
+    initState('Goal', ['Step A'], root);
+    startTask('T1', root);
+    const state = readState(root)!;
+    const parsed = parseBatchInput({
+      topic: 'default',
+      operations: [
+        { type: 'attempt', taskId: 'T1', description: 'used lib X', outcome: 'not thread-safe' },
+        { type: 'attempt', taskId: 'T1', description: 'used lib Y', outcome: 'works but slow' },
+      ],
+    });
+    applyBatch(state, parsed);
+    expect(getActiveTopic(state).tasks[0].attempts).toHaveLength(2);
+  });
+
+  it('blocks and resumes tasks via batch', () => {
+    initState('Goal', ['Step A'], root);
+    const state = readState(root)!;
+    const parsed = parseBatchInput({
+      topic: 'default',
+      operations: [
+        { type: 'start', taskId: 'T1' },
+        { type: 'block', taskId: 'T1', reason: 'API not ready' },
+        { type: 'resume', taskId: 'T1' },
+      ],
+    });
+    applyBatch(state, parsed);
+    const topic = getActiveTopic(state);
+    expect(topic.tasks[0].status).toBe('in_progress');
+    expect(topic.blockers).toHaveLength(0);
+  });
+
+  it('records decisions via batch', () => {
+    initState('Goal', [], root);
+    const state = readState(root)!;
+    const parsed = parseBatchInput({
+      topic: 'default',
+      operations: [
+        { type: 'decide', summary: 'Use SQLite', rationale: 'zero-config, portable' },
+        { type: 'decide', summary: 'Use SQL.js in browser', rationale: undefined },
+      ],
+    });
+    applyBatch(state, parsed);
+    const decisions = getActiveTopic(state).decisions!;
+    expect(decisions).toHaveLength(2);
+    expect(decisions[0].summary).toBe('Use SQLite');
+    expect(decisions[0].rationale).toBe('zero-config, portable');
+    expect(decisions[1].rationale).toBeNull();
+  });
+
+  it('sets next action via batch', () => {
+    initState('Goal', [], root);
+    const state = readState(root)!;
+    const parsed = parseBatchInput({ topic: 'default', operations: [{ type: 'next', action: 'Write the parser' }] });
+    applyBatch(state, parsed);
+    expect(getActiveTopic(state).next_action).toBe('Write the parser');
+  });
+
+  it('throws StateError when topic does not exist', () => {
+    initState('Goal', [], root);
+    const state = readState(root)!;
+    const parsed = parseBatchInput({ topic: 'nonexistent', operations: [{ type: 'add', title: 'x' }] });
+    expect(() => applyBatch(state, parsed)).toThrow('Topic not found: nonexistent');
+  });
+
+  it('throws StateError when taskId does not exist', () => {
+    initState('Goal', ['T1'], root);
+    const state = readState(root)!;
+    const parsed = parseBatchInput({ topic: 'default', operations: [{ type: 'start', taskId: 'T99' }] });
+    expect(() => applyBatch(state, parsed)).toThrow('Task T99 not found');
+  });
+
+  it('rejects invalid state produced by a malformed operation list', () => {
+    initState('Goal', ['T1'], root);
+    const state = readState(root)!;
+    // Directly mutate state to create duplicate task IDs, then verify applyBatch
+    // (via validateState) rejects the corrupted state.
+    state.topics[0].tasks.push({ id: 'T1', title: 'dup', status: 'pending' });
+    const parsed = parseBatchInput({ topic: 'default', operations: [{ type: 'add', title: 'new' }] });
+    expect(() => applyBatch(state, parsed)).toThrow('Duplicate task IDs');
+  });
+});
+
+describe('commitBatch', () => {
+  let root: string;
+  beforeEach(() => { root = makeTmpDir(); });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  // ── happy path ─────────────────────────────────────────────────────────────
+
+  it('applies a multi-operation batch in one write and increments revision by 1', () => {
+    initState('Goal', ['Step A', 'Step B'], root);
+    const before = readState(root)!;
+    const revBefore = before.revision;
+    const hashBefore = sha256(stateFilePath(root));
+
+    const result = commitBatch({
+      topic: 'default',
+      operations: [
+        { type: 'start', taskId: 'T1' },
+        { type: 'done', taskId: 'T1', evidence: ['src/a.ts'] },
+        { type: 'start', taskId: 'T2' },
+        { type: 'decide', summary: 'ship it', rationale: 'meets criteria' },
+        { type: 'next', action: 'write tests' },
+      ],
+    }, root);
+
+    expect(result.operationsApplied).toBe(5);
+    expect(result.topic).toBe('default');
+    const after = readState(root)!;
+    expect(after.revision).toBe(revBefore + 1);
+    expect(getActiveTopic(after).tasks[0].status).toBe('done');
+    expect(getActiveTopic(after).tasks[1].status).toBe('in_progress');
+    expect(getActiveTopic(after).decisions).toHaveLength(1);
+    expect(getActiveTopic(after).next_action).toBe('write tests');
+    // state.json bytes changed (non-trivial write)
+    expect(sha256(stateFilePath(root))).not.toBe(hashBefore);
+  });
+
+  it('records updated_by from the by parameter', () => {
+    initState('Goal', ['T1'], root);
+    commitBatch({ topic: 'default', operations: [{ type: 'start', taskId: 'T1' }] }, root, 'batch-agent');
+    const state = readState(root)!;
+    expect(state.updated_by).toBe('batch-agent');
+  });
+
+  it('respects --expect-rev via JSON input (happy path)', () => {
+    initState('Goal', ['T1'], root);
+    const state = readState(root)!;
+    const result = commitBatch(
+      { topic: 'default', operations: [{ type: 'start', taskId: 'T1' }], expect_rev: state.revision },
+      root,
+    );
+    expect(result.revision).toBe(state.revision + 1);
+  });
+
+  // ── topic scoping ────────────────────────────────────────────────────────────
+
+  it('updates an inactive topic without switching active_topic or changing its timestamp', () => {
+    initState('Goal', ['T1'], root);
+    addTopic('docs', 'Write guide', ['Draft'], root);
+    useTopic('default', root); // default is still active
+
+    const stateBefore = readState(root)!;
+    const defaultTopicBefore = stateBefore.topics.find(t => t.name === 'default')!;
+    const defaultUpdatedAtBefore = defaultTopicBefore.updated_at;
+    const defaultCurrentTaskBefore = defaultTopicBefore.current_task;
+
+    commitBatch({
+      topic: 'docs',
+      operations: [
+        { type: 'start', taskId: 'T1' },
+        { type: 'done', taskId: 'T1', evidence: ['docs/draft.md'] },
+      ],
+    }, root);
+
+    const state = readState(root)!;
+    expect(state.active_topic).toBe('default'); // active_topic unchanged
+
+    const docs = state.topics.find(t => t.name === 'docs')!;
+    expect(docs.tasks[0].status).toBe('done');
+    expect(docs.tasks[0].evidence).toEqual(['docs/draft.md']);
+
+    // default topic is untouched: status, timestamp, fields unchanged
+    const defaultTopic = state.topics.find(t => t.name === 'default')!;
+    expect(defaultTopic.updated_at).toBe(defaultUpdatedAtBefore);
+    expect(defaultTopic.current_task).toBe(defaultCurrentTaskBefore);
+    expect(defaultTopic.tasks[0].status).toBe('pending');
+  });
+
+  it('throws StateError when topic does not exist (no partial write)', () => {
+    initState('Goal', ['T1'], root);
+    const sp = stateFilePath(root);
+    const { ino: inoBefore, mtimeMs: mtimeBefore } = statSync(sp);
+    expect(() => commitBatch({
+      topic: 'missing',
+      operations: [{ type: 'add', title: 'new task' }],
+    }, root)).toThrow('Topic not found: missing');
+    const { ino: inoAfter, mtimeMs: mtimeAfter } = statSync(sp);
+    expect(inoAfter).toBe(inoBefore);
+    expect(mtimeAfter).toBe(mtimeBefore);
+  });
+
+  // ── revision conflict ───────────────────────────────────────────────────────
+
+  it('throws ConflictError when expect_rev mismatches; state.json unchanged', () => {
+    initState('Goal', ['T1'], root);
+    const state0 = readState(root)!;
+    const staleRev = state0.revision;
+    const sp = stateFilePath(root);
+    const { ino: inoInit, mtimeMs: mtimeInit } = statSync(sp);
+
+    // A concurrent writer bumps the revision
+    commitBatch({ topic: 'default', operations: [{ type: 'start', taskId: 'T1' }] }, root, 'other-agent');
+    const { ino: inoAfterConcurrent, mtimeMs: mtimeAfterConcurrent } = statSync(sp);
+    expect(inoAfterConcurrent).not.toBe(inoInit); // state changed
+
+    // Our stale revision (rev=0) should conflict against current rev=1
+    expect(() => commitBatch(
+      { topic: 'default', operations: [{ type: 'next', action: 'test' }], expect_rev: staleRev },
+      root,
+    )).toThrow(ConflictError);
+
+    // state.json is byte-for-byte unchanged — no write occurred on conflict
+    const { ino: inoAfterConflict, mtimeMs: mtimeAfterConflict } = statSync(sp);
+    expect(inoAfterConflict).toBe(inoAfterConcurrent);
+    expect(mtimeAfterConflict).toBe(mtimeAfterConcurrent);
+  });
+
+  // ── invalid operation — no write ───────────────────────────────────────────
+
+  it('validation error: no write occurs, inode/mtime unchanged', () => {
+    initState('Goal', ['T1'], root);
+    const sp = stateFilePath(root);
+    const { ino: inoBefore, mtimeMs: mtimeBefore } = statSync(sp);
+
+    expect(() => commitBatch({
+      topic: 'default',
+      operations: [
+        { type: 'start', taskId: 'T1' },
+        { type: 'done', taskId: 'T99', evidence: ['e'] }, // fails here
+      ],
+    }, root)).toThrow('Task T99 not found');
+
+    const { ino: inoAfter, mtimeMs: mtimeAfter } = statSync(sp);
+    expect(inoAfter).toBe(inoBefore);
+    expect(mtimeAfter).toBe(mtimeBefore);
+    const state = readState(root)!;
+    expect(getActiveTopic(state).tasks[0].status).toBe('pending'); // T1 not started
+  });
+
+  it('parse error: no write occurs, inode/mtime unchanged', () => {
+    initState('Goal', ['T1'], root);
+    const sp = stateFilePath(root);
+    const { ino: inoBefore, mtimeMs: mtimeBefore } = statSync(sp);
+
+    expect(() => commitBatch(null, root)).toThrow('Batch input must be a JSON object');
+
+    const { ino: inoAfter, mtimeMs: mtimeAfter } = statSync(sp);
+    expect(inoAfter).toBe(inoBefore);
+    expect(mtimeAfter).toBe(mtimeBefore);
+  });
+
+  // ── concurrency ─────────────────────────────────────────────────────────────
+
+  it('serializes concurrent writers (second waits for first to release lock)', () => {
+    initState('Goal', ['T1', 'T2', 'T3', 'T4'], root);
+
+    const resultA = commitBatch({
+      topic: 'default', operations: [{ type: 'start', taskId: 'T1' }],
+    }, root, 'writer-a');
+
+    const resultB = commitBatch({
+      topic: 'default', operations: [{ type: 'start', taskId: 'T2' }],
+    }, root, 'writer-b');
+
+    const state = readState(root)!;
+    expect(getActiveTopic(state).tasks[0].status).toBe('in_progress');
+    expect(getActiveTopic(state).tasks[1].status).toBe('in_progress');
+    expect(resultA.revision).toBeLessThan(resultB.revision);
+  });
+
+  // ── history ─────────────────────────────────────────────────────────────────
+
+  it('appends a batch_committed history entry after success', () => {
+    initState('Goal', ['T1'], root);
+    commitBatch({ topic: 'default', operations: [{ type: 'start', taskId: 'T1' }] }, root);
+    const histPath = historyFilePath(root);
+    const hist = readFileSync(histPath, 'utf8');
+    const entries = hist.split('\n').filter(Boolean).map(l => JSON.parse(l) as { event: string });
+    const batchEntry = entries.find(e => e.event === 'batch_committed');
+    expect(batchEntry).toBeDefined();
+    expect((batchEntry as { operations: string[] }).operations).toEqual(['start']);
   });
 });

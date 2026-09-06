@@ -10,7 +10,7 @@ import {
   archiveState, buildResumeContext, repairState, detectStaleTasks, RESUME_BUDGET_CHARS,
   compareAndWriteState, ConflictError, withStoreLock, LockError,
   stateFilePath, historyFilePath, StateError, findProjectRoot,
-  getActiveTopic, addTopic, useTopic,
+  getActiveTopic, addTopic, useTopic, commitBatch,
 } from './core.js';
 import {
   readConfig, writeMode, markDirty, shouldReconcile, markReconcileRequested,
@@ -39,6 +39,8 @@ COMMANDS:
   attempt <taskId> <desc> <outcome> Record a failed attempt
   decide <summary> [rationale]      Record a key decision
   next <action>                     Set the next action
+  commit --topic <name> [--expect-rev N] < batch.json
+                                     Apply a batch of operations atomically (see docs/batch-commit.md)
   history [--tail N]                Show history log
   archive                           Archive the current state
   repair                            Attempt to recover from corrupted state.json
@@ -70,6 +72,7 @@ FLAGS:
                          docs/pre-release-remediation.md item 3 for the exact
                          guarantee (protects concurrent task-store CLI callers;
                          does not protect direct library callers).
+  --topic <name>        Topic scope for the commit command (required with commit).
   --help, -h            Show this help
 `;
 
@@ -114,6 +117,14 @@ function parseArgs(argv: string[]): { command: string; args: string[]; flags: Re
     }
     else if (a === '--by') { flags.by = argv[++i] ?? ''; }
     else if (a === '--expect-rev') { flags['expect-rev'] = argv[++i] ?? ''; }
+    else if (a === '--topic') {
+      const value = argv[++i];
+      if (value === undefined) {
+        console.error('Error: --topic requires a value');
+        process.exit(1);
+      }
+      flags.topic = value;
+    }
     else if (!command) { command = a; }
     else { args.push(a); }
   }
@@ -213,7 +224,14 @@ async function main(): Promise<void> {
 
   try {
     const by = flags.by ? String(flags.by) : undefined;
-    const expectRev = flags['expect-rev'] !== undefined ? parseInt(String(flags['expect-rev']), 10) : undefined;
+    // Parse --expect-rev as a strict non-negative integer.
+    // NaN coercion handles strings like "1abc" → NaN, rejected here.
+    // The 'commit' command is excluded; commitBatch() is the only revision
+    // check for it (under its own lock), and it handles its own strict validation.
+    const expectRevStr = flags['expect-rev'];
+    const expectRev = expectRevStr !== undefined
+      ? (() => { const n = Number(expectRevStr); if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n) || String(n) !== String(expectRevStr)) { console.error('Error: --expect-rev must be a non-negative integer'); process.exit(1); } return n; })()
+      : undefined;
     const initialAutoCheckpoint = flags['auto-checkpoint'] !== undefined
       ? String(flags['auto-checkpoint'])
       : NEW_STORE_MODE;
@@ -251,6 +269,9 @@ async function main(): Promise<void> {
     const MUTATING_COMMANDS = new Set([
       'init', 'add', 'start', 'done', 'block', 'resume-task',
       'attempt', 'decide', 'next', 'archive', 'repair',
+      // 'commit' is deliberately absent here: commitBatch() acquires the lock
+      // internally, and wrapping runCommand() in yet another withStoreLock()
+      // would cause a double-lock deadlock.
     ]);
     const topicIsMutating = command === 'topic' && (topicSubcommand === 'add' || topicSubcommand === 'use');
 
@@ -259,7 +280,9 @@ async function main(): Promise<void> {
     // check-then-write cycle is atomic against other task-store CLI
     // invocations (see docs/pre-release-remediation.md item 3).
     const runCommand = (): void => {
-      if (expectRev !== undefined) {
+      // Skip the generic revision check for 'commit': commitBatch() is the sole
+      // authoritative check, and it runs under its own lock.
+      if (expectRev !== undefined && command !== 'commit') {
         const current = readState(projectRoot);
         const currentRev = current?.revision ?? 0;
         if (currentRev !== expectRev) {
@@ -413,6 +436,47 @@ async function main(): Promise<void> {
         if (!action) { console.error('Error: action text required'); process.exit(1); }
         setNextAction(action, projectRoot, by);
         console.log(`✓ Next action: ${action}`);
+        break;
+      }
+      case 'commit': {
+        // Read batch from stdin (fd 0 — works with pipes, redirects, and TTYs).
+        let rawInput: unknown;
+        try {
+          rawInput = JSON.parse(readFileSync(0, 'utf8'));
+        } catch (err) {
+          console.error('Error: could not read JSON batch from stdin:', (err as Error).message);
+          process.exit(1);
+        }
+        if (typeof rawInput !== 'object' || rawInput === null) {
+          console.error('Error: batch input must be a JSON object');
+          process.exit(1);
+        }
+        const input = rawInput as Record<string, unknown>;
+
+        // --topic is required; --expect-rev is optional
+        if (flags.topic === undefined) {
+          console.error('Error: --topic <name> is required');
+          process.exit(1);
+        }
+        // CLI contract: stdin contains only operations. Topic and expect_rev come
+        // exclusively from CLI flags. Delete any body values to enforce this.
+        delete input.topic;
+        delete input.expect_rev;
+        input.topic = String(flags.topic);
+
+        if (flags['expect-rev'] !== undefined) {
+          const s = String(flags['expect-rev']);
+          const n = Number(s);
+          if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n) || String(n) !== s) {
+            console.error('Error: --expect-rev must be a non-negative integer');
+            process.exit(1);
+          }
+          input.expect_rev = n;
+        }
+
+        const result = commitBatch(rawInput, projectRoot, by);
+        console.log(`✓ Committed ${result.operationsApplied} operation(s) on topic ${result.topic}`);
+        console.log(`  State revision: ${result.revision}`);
         break;
       }
       case 'history': {
