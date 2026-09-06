@@ -178,6 +178,20 @@ describe('addTask', () => {
     const ids = getActiveTopic(state).tasks.map(t => t.id);
     expect(new Set(ids).size).toBe(ids.length);
   });
+
+  it('assigns the next ID for large numeric suffixes', () => {
+    const state = readState(root)!;
+    const topic = getActiveTopic(state);
+    topic.tasks = [
+      { ...topic.tasks[0], id: 'T9007199254740992' },
+      { ...topic.tasks[1], id: 'T9007199254740993' },
+    ];
+    writeState(state, root);
+
+    const updated = addTask('Big task', undefined, root);
+    const newTask = getActiveTopic(updated).tasks.at(-1);
+    expect(newTask?.id).toBe('T9007199254740994');
+  });
 });
 
 describe('recordAttempt', () => {
@@ -1146,6 +1160,21 @@ describe('applyBatch', () => {
     expect(getActiveTopic(state).tasks).toHaveLength(2);
     expect(getActiveTopic(state).tasks[1].id).toBe('T2');
     expect(getActiveTopic(state).tasks[1].title).toBe('New task');
+  });
+
+  it('adds a task via batch after large numeric suffixes', () => {
+    initState('Goal', ['T1', 'T2'], root);
+    const state = readState(root)!;
+    const topic = getActiveTopic(state);
+    topic.tasks = [
+      { ...topic.tasks[0], id: 'T9007199254740992' },
+      { ...topic.tasks[1], id: 'T9007199254740993' },
+    ];
+
+    const parsed = parseBatchInput({ topic: 'default', operations: [{ type: 'add', title: 'New task' }] });
+    applyBatch(state, parsed);
+
+    expect(topic.tasks[2].id).toBe('T9007199254740994');
   });
 
   it('starts and completes tasks via batch', () => {

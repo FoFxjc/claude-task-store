@@ -391,12 +391,8 @@ function applyOperation(state: TaskState, topicName: string, op: BatchOperationI
 
   switch (op.type) {
     case 'add': {
-      const maxId = topic.tasks.reduce((max, t) => {
-        const n = parseInt(t.id.slice(1), 10);
-        return Number.isFinite(n) && n > max ? n : max;
-      }, 0);
       topic.tasks.push({
-        id: `T${maxId + 1}`,
+        id: nextTaskId(topic.tasks),
         title: op.title,
         status: 'pending',
         notes: op.notes ?? null,
@@ -855,6 +851,17 @@ function getTask(topic: TopicState, taskId: string): Task {
   return task;
 }
 
+function nextTaskId(tasks: Task[]): string {
+  let maxId = 0n;
+  for (const task of tasks) {
+    const match = /^T([0-9]+)$/.exec(task.id);
+    if (!match) continue;
+    const value = BigInt(match[1]);
+    if (value > maxId) maxId = value;
+  }
+  return `T${maxId + 1n}`;
+}
+
 export function startTask(taskId: string, projectRoot?: string, updatedBy?: string): TaskState {
   const state = readState(projectRoot);
   if (!state) throw new StateError('No state found. Run `task-store init` first.');
@@ -966,13 +973,8 @@ export function addTask(title: string, notes?: string, projectRoot?: string, upd
   if (!state) throw new StateError('No state found.');
   const topic = getActiveTopic(state);
 
-  const maxId = topic.tasks.reduce((max, t) => {
-    const n = parseInt(t.id.slice(1), 10);
-    return n > max ? n : max;
-  }, 0);
-
   topic.tasks.push({
-    id: `T${maxId + 1}`,
+    id: nextTaskId(topic.tasks),
     title,
     status: 'pending',
     notes: notes ?? null,
