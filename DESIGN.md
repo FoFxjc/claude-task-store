@@ -71,7 +71,7 @@ The problem is **execution state loss**, not knowledge loss:
 | **Update frequency** | After significant learnings | After meaningful milestones (~5-10x per session) |
 | **Dependencies** | Vector DB, embedding model, API | None (plain JSON file) |
 | **Injection** | Relevant facts on-demand | Compact summary at session start |
-| **Token budget** | Variable, can be large | Target < 400 tokens, hard cap 800 |
+| **Token budget** | Variable, can be large | Hard-enforced < 400 tokens (1600 chars) by the canonical renderer |
 | **Structure** | Unstructured or semi-structured | Strict schema: goal, tasks, blockers, next action |
 | **Audience** | Future sessions retrieving knowledge | The *next model instance resuming this work* |
 

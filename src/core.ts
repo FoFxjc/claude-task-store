@@ -690,95 +690,331 @@ export function archiveState(projectRoot?: string, updatedBy?: string): void {
 
 // ─── Compact resume summary ───────────────────────────────────────────────────
 
+/** Hard character budget for the resume projection. The COMPLETE returned
+ * string — including any global omission marker or truncation marker —
+ * never exceeds this value. */
+export const RESUME_BUDGET_CHARS = 1600;
+
+/** Marker appended when the renderer had to truncate. */
+export const RESUME_TRUNCATION_SUFFIX = "\n[…truncated, run `task-store status` for full details]";
+
+// Global omission marker. Appended at the end of the projection when any
+// section was collapsed, soft-capped, field-bounded, or dropped. The
+// leading newline is part of the suffix so it reads as a separator from
+// the truncated content above. A reserved slice of the budget guarantees
+// this line always fits.
+const GLOBAL_OMISSION_MARKER = '[…details omitted, run `task-store status` for full details]';
+
+// Budget reserved for the global omission marker (the marker text + the
+// leading separator). Assembly uses RESUME_BUDGET_CHARS − GLOBAL_RESERVED
+// so the marker always has room when it is needed.
+const GLOBAL_RESERVED = GLOBAL_OMISSION_MARKER.length + 1;
+
+const STATUS_POINT = "use \`task-store status\` for full details";
+
+// Per-line bounds. Every emitted line is pre-truncated during assembly,
+// so `fitResumeToBudget` only ever drops whole lines, never mid-line slices.
+const MAX_TOPIC_CHARS = 50;
+const MAX_GOAL_CHARS = 200;
+const MAX_NEXT_ACTION_CHARS = 200;
+const MAX_TITLE_CHARS = 80;
+const MAX_NOTE_CHARS = 160;
+const MAX_BLOCKER_CHARS = 160;
+const MAX_DECISION_CHARS = 150;
+const MAX_ATTEMPT_FIELD_CHARS = 100;
+const SOFT_MAX_DONE = 5;
+const SOFT_MAX_DECISIONS = 3;
+const SOFT_MAX_ATTEMPTS = 2;
+
+// Per-call stats object. Passed through every buildResumeContext call so
+// the function is safe for concurrent / re-entrant use (no module-level
+// mutable state that could bleed between concurrent calls).
+interface RenderStats {
+  fieldBounded: boolean;
+}
+
+function bound(s: string, max: number, stats: RenderStats): string {
+  if (s.length <= max) return s;
+  stats.fieldBounded = true;
+  return s.slice(0, max - 1) + '…';
+}
+
+/** Enforce `result.length <= RESUME_BUDGET_CHARS`. Suffix length is
+ * reserved once up front. If no complete line fits in the remaining
+ * space, the suffix is returned alone (still within the budget). Never
+ * emits a partial rendered line. */
+export function fitResumeToBudget(text: string): string {
+  if (text.length <= RESUME_BUDGET_CHARS) return text;
+  const maxPrefix = RESUME_BUDGET_CHARS - RESUME_TRUNCATION_SUFFIX.length;
+  const lastNewline = text.slice(0, maxPrefix).lastIndexOf('\n');
+  if (lastNewline > 0) {
+    return text.slice(0, lastNewline) + RESUME_TRUNCATION_SUFFIX;
+  }
+  return RESUME_TRUNCATION_SUFFIX;
+}
+
 /**
  * Build a compact resume injection for session start.
- * Target: < 400 tokens, hard cap ~800.
+ *
+ * Output order, top to bottom. Priority is top-down so a budget-driven
+ * tail-trim cannot remove a higher-priority field:
+ *
+ *   1. Header        — TOPIC, GOAL, STATUS (always shown, bounded per line)
+ *   2. CURRENT       — in-progress task + last attempts (always shown)
+ *   3. NEXT ACTION   — always shown, bounded
+ *   4. BLOCKED       — with reason + last attempts (always shown)
+ *   5. DONE          — optional, count summary if too long
+ *   6. REMAINING     — optional, count summary if too long
+ *   7. KEY DECISIONS — optional, count summary if too long
+ *   8. Footer        — timestamp + hint (always shown)
+ *
+ * Every section that is not rendered in full is replaced with a one-line
+ * marker naming the section, identifying the omitted content (count, and
+ * task IDs for CURRENT/BLOCKED), and pointing at `task-store status`.
+ * No omission is ever silent.
+ *
+ * Soft-capped sections (DONE/KEY DECISIONS with more items than the
+ * soft cap) emit a `+N older — use \`task-store status\`` indicator
+ * inside the section so the reader knows older items are present.
+ * Attempts past the last 2 emit a `+N earlier attempts` line.
+ *
+ * Rendering uses a two-pass approach:
+ *   • Pass 1 renders at full budget (1 600 chars) with no marker
+ *     reservation. If no omission occurs, the result is returned
+ *     immediately (no space is wasted on a marker that was not needed).
+ *   • If any content is collapsed, soft-capped, field-bounded, or
+ *     dropped, Pass 2 re-renders with an effective budget that reserves
+ *     space for the global omission marker, and appends the marker.
+ *
+ * Token counts are approximate (no model-specific tokenizer). The
+ * postcondition `result.length <= RESUME_BUDGET_CHARS` holds for the
+ * COMPLETE returned string. This function is pure and safe for
+ * concurrent / re-entrant calls (no module-level mutable state).
  */
 export function buildResumeContext(state: TaskState): string {
+  // Pure stats object — no module-level mutable state, so concurrent or
+  // re-entrant calls cannot bleed into each other.
+  const stats: RenderStats = { fieldBounded: false };
+
   const topic = getActiveTopic(state);
-  const done = topic.tasks.filter(t => t.status === 'done');
-  const remaining = topic.tasks.filter(t => t.status === 'pending');
   const inProgress = topic.tasks.filter(t => t.status === 'in_progress');
   const blocked = topic.tasks.filter(t => t.status === 'blocked');
+  const done = topic.tasks.filter(t => t.status === 'done');
+  const remaining = topic.tasks.filter(t => t.status === 'pending');
+  const decisions = topic.decisions ?? [];
 
-  const lines: string[] = [
+  // Each section's lines are pre-bounded. Assembly picks the largest
+  // form that fits; any non-full section gets an explicit marker.
+  const sections: Section[] = [
+    { label: 'header', lines: renderHeader(topic, stats) },
+    { label: 'CURRENT', lines: renderCurrent(inProgress, stats),
+      count: countWithIds('CURRENT', 'in-progress', inProgress) },
+    { label: 'NEXT ACTION', lines: renderNextAction(topic, stats) },
+    { label: 'BLOCKED', lines: renderBlocked(topic, blocked, stats),
+      count: countWithIds('BLOCKED', 'blocked', blocked) },
+    { label: 'DONE', lines: renderDone(done, stats),
+      count: countOnly('DONE', 'completed', done.length) },
+    { label: 'REMAINING', lines: renderRemaining(remaining, stats),
+      count: countOnly('REMAINING', 'pending', remaining.length) },
+    { label: 'KEY DECISIONS', lines: renderDecisions(decisions, stats),
+      count: countOnly('KEY DECISIONS', 'recorded', decisions.length) },
+    { label: 'footer', lines: renderFooter(state) },
+  ];
+
+  // ── Pass 1: full budget, no marker reservation ────────────────────────
+  const out1: string[] = [];
+  let droppedCount = 0;
+  let collapsedCount = 0;
+  let softCappedCount = 0;
+  for (const section of sections) {
+    const r = appendSection(out1, section, RESUME_BUDGET_CHARS);
+    if (r.dropped) droppedCount++;
+    if (r.collapsed) collapsedCount++;
+    if (r.softCapped) softCappedCount++;
+  }
+
+  const anyOmission = stats.fieldBounded || droppedCount > 0 || collapsedCount > 0 || softCappedCount > 0;
+  if (!anyOmission) {
+    // No omission occurred. The complete pre-bounded render is within
+    // 1 600 chars. Return it directly — no marker space was wasted.
+    return out1.join('\n');
+  }
+
+  // ── Pass 2: omission was needed — re-render with marker budget ───────
+  // Sections may be dropped at a tighter effective budget. The `stats`
+  // flags are deterministic (bound() is pure) so the result is consistent.
+  const out2: string[] = [];
+  droppedCount = 0;
+  collapsedCount = 0;
+  softCappedCount = 0;
+  const effectiveBudget = RESUME_BUDGET_CHARS - GLOBAL_RESERVED;
+  for (const section of sections) {
+    const r = appendSection(out2, section, effectiveBudget);
+    if (r.dropped) droppedCount++;
+    if (r.collapsed) collapsedCount++;
+    if (r.softCapped) softCappedCount++;
+  }
+  out2.push('');
+  out2.push(GLOBAL_OMISSION_MARKER);
+  return out2.join('\n');
+}
+
+interface Section {
+  label: string;
+  lines: string[];
+  count?: string;
+  omitted?: string;
+}
+
+interface AppendResult {
+  dropped: boolean;
+  collapsed: boolean;
+  /** True if the section's rendering already includes a soft-cap indicator
+   * (e.g. `+N older` for DONE). Tracked separately from `dropped` and
+   * `collapsed` because it fires the global marker even when the full
+   * form fits in the budget. */
+  softCapped: boolean;
+}
+
+function appendSection(out: string[], section: Section, effectiveBudget: number): AppendResult {
+  const omitted = `${section.label}: omitted — ${STATUS_POINT}`;
+  const softCapped = section.lines.some(l => /^\s*\+\d+ (older|earlier)/.test(l));
+
+  if (section.lines.length === 0) {
+    return { dropped: false, collapsed: false, softCapped: false };
+  }
+  if (sectionFits(out, section.lines, effectiveBudget)) {
+    appendLines(out, section.lines);
+    return { dropped: false, collapsed: false, softCapped };
+  }
+  if (section.count && sectionFits(out, [section.count], effectiveBudget)) {
+    appendLines(out, [section.count]);
+    return { dropped: false, collapsed: true, softCapped: false };
+  }
+  if (sectionFits(out, [omitted], effectiveBudget)) {
+    appendLines(out, [omitted]);
+    return { dropped: false, collapsed: true, softCapped: false };
+  }
+  // Even the omitted line does not fit. The section is dropped.
+  // The global omission marker is added at the end of the build.
+  return { dropped: true, collapsed: false, softCapped: false };
+}
+
+function sectionFits(out: string[], lines: string[], effectiveBudget: number): boolean {
+  return joinLength(out) + joinLength(lines) + (out.length > 0 ? 1 : 0) <= effectiveBudget;
+}
+
+function appendLines(out: string[], lines: string[]): void {
+  if (out.length > 0) out.push('');
+  out.push(...lines);
+}
+
+function joinLength(lines: string[]): number {
+  if (lines.length === 0) return 0;
+  let n = 0;
+  for (const l of lines) n += l.length;
+  return n + (lines.length - 1);
+}
+
+function countOnly(label: string, kind: string, n: number): string {
+  return `${label}: ${n} ${kind} — ${STATUS_POINT}`;
+}
+
+function countWithIds(label: string, kind: string, tasks: Task[]): string {
+  return `${label}: ${tasks.length} ${kind} (${tasks.map(t => t.id).join(', ')}) — ${STATUS_POINT}`;
+}
+
+// ─── Section renderers. Each returns pre-bounded lines. ───────────────────
+
+function renderHeader(topic: TopicState, stats: RenderStats): string[] {
+  return [
     '╔══════════════════════════════════════╗',
     '║  TASK STORE — RESUME CONTEXT         ║',
     '╚══════════════════════════════════════╝',
-    '',
-    `TOPIC: ${topic.name}`,
-    `GOAL: ${topic.goal}`,
+    `TOPIC: ${bound(topic.name, MAX_TOPIC_CHARS, stats)}`,
+    `GOAL: ${bound(topic.goal, MAX_GOAL_CHARS, stats)}`,
     `STATUS: ${topic.status.toUpperCase()}`,
-    '',
   ];
+}
 
-  if (inProgress.length > 0) {
-    lines.push('CURRENT:');
-    for (const t of inProgress) {
-      lines.push(`  ▶ [${t.id}] ${t.title}`);
-      if (t.notes) lines.push(`    NOTE: ${t.notes}`);
-      if (t.attempts && t.attempts.length > 0) {
-        for (const a of t.attempts.slice(-2)) {  // only last 2 attempts
-          lines.push(`    ✗ tried: ${a.description} → ${a.outcome}`);
-        }
+function renderCurrent(inProgress: Task[], stats: RenderStats): string[] {
+  if (inProgress.length === 0) return [];
+  const lines = ['CURRENT:'];
+  for (const t of inProgress) {
+    lines.push(`  ▶ [${t.id}] ${bound(t.title, MAX_TITLE_CHARS, stats)}`);
+    if (t.notes) lines.push(`    NOTE: ${bound(t.notes, MAX_NOTE_CHARS, stats)}`);
+    if (t.attempts && t.attempts.length > 0) {
+      const recent = t.attempts.slice(-SOFT_MAX_ATTEMPTS);
+      const earlier = t.attempts.length - SOFT_MAX_ATTEMPTS;
+      if (earlier > 0) lines.push(`    +${earlier} earlier attempts`);
+      for (const a of recent) {
+        lines.push(`    ✗ tried: ${bound(a.description, MAX_ATTEMPT_FIELD_CHARS, stats)} → ${bound(a.outcome, MAX_ATTEMPT_FIELD_CHARS, stats)}`);
       }
     }
-    lines.push('');
   }
+  return lines;
+}
 
-  if (done.length > 0) {
-    // Cap done tasks to avoid flooding context with historical work.
-    // Show count summary + only last 5 completed (most recent progress).
-    const MAX_DONE_DETAIL = 5;
-    if (done.length <= MAX_DONE_DETAIL) {
-      lines.push('DONE:');
-      for (const t of done) lines.push(`  ✓ [${t.id}] ${t.title}`);
-    } else {
-      const recent = done.slice(-MAX_DONE_DETAIL);
-      const older = done.length - MAX_DONE_DETAIL;
-      lines.push(`DONE (${done.length} total, last ${MAX_DONE_DETAIL} shown):`);
-      lines.push(`  ✓ [+${older} older tasks — use \`task-store status\` to see all]`);
-      for (const t of recent) lines.push(`  ✓ [${t.id}] ${t.title}`);
-    }
-    lines.push('');
-  }
-
-  if (remaining.length > 0) {
-    lines.push('REMAINING:');
-    for (const t of remaining) lines.push(`  ○ [${t.id}] ${t.title}`);
-    lines.push('');
-  }
-
-  if (blocked.length > 0) {
-    lines.push('BLOCKED:');
-    for (const t of blocked) {
-      // The blocker reason lives in topic.blockers (task.notes is preserved,
-      // not overwritten, when a task is blocked) — look up the most recent
-      // blocker entry for this task to render the reason.
-      const blocker = (topic.blockers ?? []).slice().reverse().find(b => b.task_id === t.id);
-      lines.push(`  ✗ [${t.id}] ${blocker?.description ?? t.notes ?? t.title}`);
-      if (t.attempts && t.attempts.length > 0) {
-        for (const a of t.attempts.slice(-2)) {
-          lines.push(`    ✗ tried: ${a.description} → ${a.outcome}`);
-        }
+function renderBlocked(topic: TopicState, blocked: Task[], stats: RenderStats): string[] {
+  if (blocked.length === 0) return [];
+  const lines = ['BLOCKED:'];
+  for (const t of blocked) {
+    // The blocker reason lives in topic.blockers (task.notes is preserved,
+    // not overwritten, when a task is blocked) — look up the most recent
+    // blocker entry for this task to render the reason.
+    const blocker = (topic.blockers ?? []).slice().reverse().find(b => b.task_id === t.id);
+    const reason = blocker?.description ?? t.notes ?? t.title;
+    lines.push(`  ✗ [${t.id}] ${bound(t.title, MAX_TITLE_CHARS, stats)}: ${bound(reason, MAX_BLOCKER_CHARS, stats)}`);
+    if (t.attempts && t.attempts.length > 0) {
+      const recent = t.attempts.slice(-SOFT_MAX_ATTEMPTS);
+      const earlier = t.attempts.length - SOFT_MAX_ATTEMPTS;
+      if (earlier > 0) lines.push(`    +${earlier} earlier attempts`);
+      for (const a of recent) {
+        lines.push(`    ✗ tried: ${bound(a.description, MAX_ATTEMPT_FIELD_CHARS, stats)} → ${bound(a.outcome, MAX_ATTEMPT_FIELD_CHARS, stats)}`);
       }
     }
-    lines.push('');
   }
+  return lines;
+}
 
-  if (topic.decisions && topic.decisions.length > 0) {
-    const recent = topic.decisions.slice(-3);
-    lines.push('KEY DECISIONS:');
-    for (const d of recent) lines.push(`  • ${d.summary}`);
-    lines.push('');
+function renderNextAction(topic: TopicState, stats: RenderStats): string[] {
+  return [`NEXT ACTION: ${bound(topic.next_action ?? '(not set — run /task-status)', MAX_NEXT_ACTION_CHARS, stats)}`];
+}
+
+function renderDone(done: Task[], stats: RenderStats): string[] {
+  if (done.length === 0) return [];
+  const recent = done.slice(-SOFT_MAX_DONE);
+  const older = done.length - SOFT_MAX_DONE;
+  const lines: string[] = ['DONE:'];
+  if (older > 0) lines.push(`  +${older} older — use \`task-store status\` to see all`);
+  for (const t of recent) {
+    lines.push(`  ✓ [${t.id}] ${bound(t.title, MAX_TITLE_CHARS, stats)}`);
   }
+  return lines;
+}
 
-  lines.push(`NEXT ACTION: ${topic.next_action ?? '(not set — run /task-status)'}`);
-  lines.push('');
-  lines.push(`Updated: ${state.updated_at.slice(0, 16).replace('T', ' ')} UTC`);
-  lines.push('─── /task-status for details | /task-history for audit ───');
+function renderRemaining(remaining: Task[], stats: RenderStats): string[] {
+  if (remaining.length === 0) return [];
+  return ['REMAINING:', ...remaining.map(t => `  ○ [${t.id}] ${bound(t.title, MAX_TITLE_CHARS, stats)}`)];
+}
 
-  return lines.join('\n');
+function renderDecisions(decisions: Decision[], stats: RenderStats): string[] {
+  if (decisions.length === 0) return [];
+  const recent = decisions.slice(-SOFT_MAX_DECISIONS);
+  const older = decisions.length - SOFT_MAX_DECISIONS;
+  const lines: string[] = ['KEY DECISIONS:'];
+  if (older > 0) lines.push(`  +${older} earlier — use \`task-store status\` to see all`);
+  for (const d of recent) {
+    lines.push(`  • ${bound(d.summary, MAX_DECISION_CHARS, stats)}`);
+  }
+  return lines;
+}
+
+function renderFooter(state: TaskState): string[] {
+  return [
+    `Updated: ${state.updated_at.slice(0, 16).replace('T', ' ')} UTC`,
+    '─── /task-status for details | /task-history for audit ───',
+  ];
 }
 
 // ─── Optimistic concurrency ───────────────────────────────────────────────────
