@@ -23,6 +23,24 @@ claude-task-store provides persistent execution checkpoints for coding agents.
 
 Every invariant below follows from those four lines.
 
+### Agent-first product invariant
+
+Coding agents are the primary operators of task-store; humans primarily
+consume the results agents report. The interface is therefore an agent-facing
+execution checkpoint, not a human project-management system:
+
+- CLI behavior must be non-interactive, deterministic, and easy to invoke.
+- Resume and command output must minimize context cost while making current
+  state and the explicit next action clear.
+- Errors must tell an agent how to recover or continue.
+- Agents checkpoint at meaningful milestones, not after every action, and
+  leave a useful `next_action` before ending unfinished work.
+- Output remains human-readable so agents can summarize it clearly.
+
+This invariant preserves the existing trust hierarchy and architectural
+boundaries. It does not justify a GUI, dashboard, interactive wizard, human
+workflow system, scheduling, or orchestration.
+
 ---
 
 ## Architectural invariants

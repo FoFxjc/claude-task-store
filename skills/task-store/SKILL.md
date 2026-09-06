@@ -19,6 +19,21 @@ The task store lives in `.claude-task/state.json` in the project root. It answer
 5. What failed or was tried already?
 6. What should the next session do next?
 
+## Agent-first operating model
+
+Task-store is an agent-facing execution checkpoint. Coding agents are its
+primary operators; humans mainly consume the results agents report. Commands
+must therefore be non-interactive, deterministic, and easy to invoke. Resume
+and command output should keep context cost low while clearly exposing state
+and an explicit next action. Errors should explain how an agent can recover or
+continue.
+
+Agents should checkpoint at meaningful milestones rather than after every
+action, and should leave a useful `next_action` before ending unfinished work.
+Output remains human-readable so agents can summarize it clearly. This is not
+a GUI, dashboard, interactive wizard, human workflow system, scheduler, or
+orchestration layer.
+
 ## Reading the Current State
 
 At session start, if state exists it is injected automatically. If not shown, read it:
