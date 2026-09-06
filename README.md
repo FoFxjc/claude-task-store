@@ -403,7 +403,8 @@ On next session start (or in a fresh model session), the agent automatically rec
 | Command | Description |
 |---------|-------------|
 | `task-store init "<goal>" [tasks...] [--auto-checkpoint off\|conservative]` | Initialize a new task store; auto-checkpoint defaults to `conservative` |
-| `task-store status` | Show full current state |
+| `task-store status [--topic <name>]` | Show full state for the active or named topic |
+| `task-store show <taskId> [--topic <name>]` | Show one task's notes, attempts, evidence, timestamps, and blockers |
 | `task-store resume` | Print compact resume context |
 | `task-store topic add <name> "<goal>" [tasks...]` | Add a named topic without switching |
 | `task-store topic list` | List topics and identify the active one |
@@ -432,6 +433,8 @@ task-store start T1 --by claude-code       # record which agent is writing
 task-store done T1 --by codex -e proof     # handoff provenance (informational)
 task-store next "action" --expect-rev 14   # reject write if another agent wrote first
 task-store commit --topic my-topic < batch.json  # apply batch atomically on a named topic
+task-store status --topic docs                  # inspect an inactive topic without switching
+task-store show T2 --topic docs                 # inspect one task in an inactive topic
 ```
 
 `--by` is accepted on every command that writes state (`init`, `topic add`, `topic use`, `add`, `start`, `done`, `block`, `resume-task`, `attempt`, `decide`, `next`, `commit`, `archive`, `repair`) and is rejected as an unsupported flag if you pass it to a purely read-only command.
@@ -816,8 +819,8 @@ The OpenCode smoke tests need a working `opencode` binary on `PATH`. They
 skip cleanly (`exit 77`) if it isn't installed; the other suites are pure
 shell and run anywhere.
 
-645 automated checks pass across 19 test files: 3 Jest and 16 shell
-— unit 210, acceptance 17, multi-topic 10, Phase 2 reliability 52, Phase 3 handoff 22,
+653 automated checks pass across 19 test files: 3 Jest and 16 shell
+— unit 213, acceptance 17, multi-topic 15, Phase 2 reliability 52, Phase 3 handoff 22,
 atomic batch commit 27,
 installer regression 17, path safety 32, project-local runtime 32,
 auto-checkpoint 68, OpenCode install regression 117, OpenCode resume smoke 21,
