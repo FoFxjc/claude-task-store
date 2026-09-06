@@ -698,11 +698,11 @@ export const RESUME_BUDGET_CHARS = 1600;
 /** Marker appended when the renderer had to truncate. */
 export const RESUME_TRUNCATION_SUFFIX = "\n[…truncated, run `task-store status` for full details]";
 
-// Global omission marker. Appended at the end of the projection when any
+// Global omission marker. Appended after a blank separator line when any
 // section was collapsed, soft-capped, field-bounded, or dropped. The
-// leading newline is part of the suffix so it reads as a separator from
-// the truncated content above. A reserved slice of the budget guarantees
-// this line always fits.
+// blank line is produced by `out.push('')` in the assembly, not by the
+// marker itself. A reserved slice of the budget guarantees this line
+// always fits.
 const GLOBAL_OMISSION_MARKER = '[…details omitted, run `task-store status` for full details]';
 
 // appendLines-style separation produces a blank line, so reserve two
@@ -738,18 +738,27 @@ function bound(s: string, max: number, stats: RenderStats): string {
   return s.slice(0, max - 1) + '…';
 }
 
-/** Enforce `result.length <= RESUME_BUDGET_CHARS`. Suffix length is
- * reserved once up front. If no complete line fits in the remaining
- * space, the suffix is returned alone (still within the budget). Never
- * emits a partial rendered line. */
-export function fitResumeToBudget(text: string): string {
-  if (text.length <= RESUME_BUDGET_CHARS) return text;
-  const maxPrefix = RESUME_BUDGET_CHARS - RESUME_TRUNCATION_SUFFIX.length;
+/** Enforce `result.length <= budget`. If the text already fits the budget
+ * it is returned unchanged. Otherwise, the suffix is appended
+ * at a complete-line boundary: find the last newline in the budget-allowable
+ * prefix, truncate there, and append the suffix. If even the suffix alone
+ * exceeds the budget (e.g. the budget was tightened below the suffix length),
+ * the suffix is clamped to the budget and returned as-is.
+ *
+ * Postcondition: `result.length <= budget` always holds.
+ * No partial line is ever emitted.
+ */
+export function fitResumeToBudget(text: string, budget = RESUME_BUDGET_CHARS): string {
+  const safeBudget = Math.max(0, budget);
+  if (text.length <= safeBudget) return text;
+  // Clamp the suffix to the budget so maxPrefix is never negative.
+  const safeSuffix = RESUME_TRUNCATION_SUFFIX.slice(0, safeBudget);
+  const maxPrefix = safeBudget - safeSuffix.length;
   const lastNewline = text.slice(0, maxPrefix).lastIndexOf('\n');
   if (lastNewline > 0) {
-    return text.slice(0, lastNewline) + RESUME_TRUNCATION_SUFFIX;
+    return text.slice(0, lastNewline) + safeSuffix;
   }
-  return RESUME_TRUNCATION_SUFFIX;
+  return safeSuffix;
 }
 
 /**
@@ -836,7 +845,9 @@ export function buildResumeContext(state: TaskState): string {
   if (!anyOmission) {
     // No omission occurred. The complete pre-bounded render is within
     // 1 600 chars. Return it directly — no marker space was wasted.
-    return out1.join('\n');
+    // Wrap in fitResumeToBudget as a last-resort hard bound; it returns
+    // text unchanged when length <= budget so this is a zero-cost safety net.
+    return fitResumeToBudget(out1.join('\n'));
   }
 
   // ── Pass 2: omission was needed — re-render with marker budget ───────
@@ -855,7 +866,9 @@ export function buildResumeContext(state: TaskState): string {
   }
   out2.push('');
   out2.push(GLOBAL_OMISSION_MARKER);
-  return out2.join('\n');
+  // Wrap in fitResumeToBudget as a last-resort hard bound, even though
+  // accounting guarantees the result is within budget.
+  return fitResumeToBudget(out2.join('\n'));
 }
 
 interface Section {

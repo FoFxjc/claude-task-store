@@ -847,6 +847,12 @@ describe('fitResumeToBudget', () => {
     expect(result).toBe(RESUME_TRUNCATION_SUFFIX);
     expect(result.length).toBeLessThanOrEqual(RESUME_BUDGET_CHARS);
   });
+
+  it('clamps the suffix when the supplied budget is smaller than it', () => {
+    const result = fitResumeToBudget('a'.repeat(100), 5);
+    expect(result).toBe(RESUME_TRUNCATION_SUFFIX.slice(0, 5));
+    expect(result.length).toBeLessThanOrEqual(5);
+  });
 });
 describe('validateState', () => {
   it('rejects unknown schema version', () => {
