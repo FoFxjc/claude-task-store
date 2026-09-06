@@ -26,7 +26,8 @@ claude-task-store — persistent execution checkpoint for Claude Code
 
 COMMANDS:
   init <goal> [task1] [task2] ...   Initialize a new task store (auto-checkpoint: ${NEW_STORE_MODE})
-  status                            Show current state summary
+  status [--topic <name>]          Show current state summary
+  show <taskId> [--topic <name>]   Show one task's checkpoint details
   resume                            Print compact resume context (for session injection)
   topic add <name> <goal> [tasks...] Add a named topic (does not switch to it)
   topic list                        List topics and show which one is active
@@ -72,7 +73,7 @@ FLAGS:
                          docs/pre-release-remediation.md item 3 for the exact
                          guarantee (protects concurrent task-store CLI callers;
                          does not protect direct library callers).
-  --topic <name>        Topic scope for the commit command (required with commit).
+  --topic <name>        Topic scope for commit, status, and show.
   --help, -h            Show this help
 `;
 
@@ -132,14 +133,22 @@ function parseArgs(argv: string[]): { command: string; args: string[]; flags: Re
   return { command, args, flags, evidence };
 }
 
-function printState(projectRoot?: string): void {
+function printState(projectRoot?: string, topicName?: string): void {
   const state = readState(projectRoot);
   if (!state) {
     console.log('No task state found. Run `task-store init "<goal>" [tasks...]` to start.');
     return;
   }
 
-  const topic = getActiveTopic(state);
+  const topic = topicName === undefined
+    ? getActiveTopic(state)
+    : (() => {
+        const normalizedName = topicName.trim();
+        if (!normalizedName) throw new StateError('Topic name must be a non-empty string');
+        const selected = state.topics.find(candidate => candidate.name === normalizedName);
+        if (!selected) throw new StateError(`Topic not found: ${normalizedName}`);
+        return selected;
+      })();
   console.log(`\nTOPIC: ${topic.name}`);
   console.log(`GOAL: ${topic.goal}`);
   console.log(`STATUS: ${topic.status.toUpperCase()}`);
@@ -169,7 +178,7 @@ function printState(projectRoot?: string): void {
   console.log(`\nNEXT ACTION: ${topic.next_action ?? '(not set)'}`);
 
   // Show stale task warnings
-  const stale = detectStaleTasks(projectRoot);
+  const stale = topic.name === state.active_topic ? detectStaleTasks(projectRoot) : [];
   if (stale.length > 0) {
     console.log(`\n⚠  STALE TASKS (in_progress > 48h):`);
     for (const s of stale) {
@@ -197,6 +206,51 @@ function printState(projectRoot?: string): void {
 
   console.log(`\nState file: ${stateFilePath(projectRoot)}`);
   console.log(`Updated: ${state.updated_at}${state.updated_by ? ` by ${state.updated_by}` : ''} (rev ${state.revision ?? 0})`);
+}
+
+function printTask(taskId: string, topicName: string | undefined, projectRoot?: string): void {
+  const state = readState(projectRoot);
+  if (!state) {
+    throw new StateError('No state found.');
+  }
+
+  const normalizedTopicName = topicName === undefined ? state.active_topic : topicName.trim();
+  if (!normalizedTopicName) throw new StateError('Topic name must be a non-empty string');
+  const topic = state.topics.find(candidate => candidate.name === normalizedTopicName);
+  if (!topic) throw new StateError(`Topic not found: ${normalizedTopicName}`);
+
+  const normalizedTaskId = taskId.toUpperCase();
+  const task = topic.tasks.find(candidate => candidate.id === normalizedTaskId);
+  if (!task) throw new StateError(`Task not found: ${normalizedTaskId}`);
+
+  console.log(`TASK: ${task.id}`);
+  console.log(`TOPIC: ${topic.name}`);
+  console.log(`TITLE: ${task.title}`);
+  console.log(`STATUS: ${task.status.toUpperCase()}`);
+  console.log(`NOTES: ${task.notes ?? '(none)'}`);
+  console.log(`STARTED: ${task.started_at ?? '(not started)'}`);
+  console.log(`COMPLETED: ${task.completed_at ?? '(not completed)'}`);
+
+  const evidence = task.evidence ?? [];
+  console.log('EVIDENCE:');
+  if (evidence.length === 0) console.log('  (none)');
+  else for (const item of evidence) console.log(`  - ${item}`);
+
+  const attempts = task.attempts ?? [];
+  console.log('ATTEMPTS:');
+  if (attempts.length === 0) console.log('  (none)');
+  else for (const attempt of attempts) {
+    const at = attempt.at ? `[${attempt.at}] ` : '';
+    console.log(`  - ${at}${attempt.description} → ${attempt.outcome}`);
+  }
+
+  const blockers = (topic.blockers ?? []).filter(blocker => blocker.task_id === task.id);
+  console.log('BLOCKERS:');
+  if (blockers.length === 0) console.log('  (none)');
+  else for (const blocker of blockers) {
+    const since = blocker.since ? ` [${blocker.since}]` : '';
+    console.log(`  - ${blocker.description}${since}`);
+  }
 }
 
 function printTopics(projectRoot?: string): void {
@@ -245,7 +299,7 @@ async function main(): Promise<void> {
     // read-only command was previously silently ignored, which is not
     // acceptable — reject it explicitly instead (see
     // docs/pre-release-remediation.md item 6).
-    const READ_ONLY_COMMANDS = new Set(['status', 'resume', 'history', 'stale', 'token-estimate']);
+    const READ_ONLY_COMMANDS = new Set(['status', 'show', 'resume', 'history', 'stale', 'token-estimate']);
     const topicSubcommand = command === 'topic' ? args[0] : undefined;
     const topicIsReadOnly = command === 'topic' && topicSubcommand === 'list';
     // `config` and `auto` write files, but never task state — recording an
@@ -253,6 +307,10 @@ async function main(): Promise<void> {
     const NON_STATE_COMMANDS = new Set(['config', 'auto']);
     if (by !== undefined && (READ_ONLY_COMMANDS.has(command) || topicIsReadOnly || NON_STATE_COMMANDS.has(command))) {
       console.error(`Error: --by is not supported on \`${command}\` (it never writes task state).`);
+      process.exit(1);
+    }
+    if (flags.topic !== undefined && command !== 'commit' && command !== 'status' && command !== 'show') {
+      console.error(`Error: --topic is not supported on \`${command}\`.`);
       process.exit(1);
     }
 
@@ -353,7 +411,15 @@ async function main(): Promise<void> {
         process.exit(1);
       }
       case 'status': {
-        printState(projectRoot);
+        printState(projectRoot, flags.topic === undefined ? undefined : String(flags.topic));
+        break;
+      }
+      case 'show': {
+        if (args.length !== 1) {
+          console.error('Usage: task-store show <taskId> [--topic <name>]');
+          process.exit(1);
+        }
+        printTask(args[0], flags.topic === undefined ? undefined : String(flags.topic), projectRoot);
         break;
       }
       case 'resume': {

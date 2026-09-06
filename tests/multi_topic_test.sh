@@ -79,6 +79,24 @@ PYEOF
 )
 check "topics preserve independent tasks, attempts, decisions, and evidence" "$STATE_CHECK"
 
+BEFORE_TARGETED_READ=$(state_sha256)
+TARGETED_STATUS=$(ts status --topic docs)
+AFTER_TARGETED_READ=$(state_sha256)
+check "status --topic reads an inactive topic" \
+  "$(printf '%s' "$TARGETED_STATUS" | grep -q '^TOPIC: docs$' && printf '%s' "$TARGETED_STATUS" | grep -q 'Write the guide' && echo true || echo false)"
+check "status --topic does not modify state" \
+  "$( [[ \"$BEFORE_TARGETED_READ\" == \"$AFTER_TARGETED_READ\" ]] && echo true || echo false )"
+
+TARGETED_SHOW=$(ts show T1 --topic docs)
+check "show reads an inactive topic task" \
+  "$(printf '%s' "$TARGETED_SHOW" | grep -q '^TASK: T1$' && printf '%s' "$TARGETED_SHOW" | grep -q '^STATUS: DONE$' && printf '%s' "$TARGETED_SHOW" | grep -q 'docs/guide.md' && echo true || echo false)"
+SHOW_MISSING=$(ts show T99 --topic docs 2>&1 || true)
+check "show rejects a missing task ID" \
+  "$(printf '%s' "$SHOW_MISSING" | grep -q 'Task not found: T99' && echo true || echo false)"
+TOPIC_MISSING=$(ts status --topic missing 2>&1 || true)
+check "targeted status rejects a missing topic" \
+  "$(printf '%s' "$TOPIC_MISSING" | grep -q 'Topic not found: missing' && echo true || echo false)"
+
 DUPLICATE=$(ts topic add docs "Duplicate" 2>&1 || true)
 check "duplicate topic names are rejected" \
   "$(printf '%s' "$DUPLICATE" | grep -q 'Topic already exists' && echo true || echo false)"
