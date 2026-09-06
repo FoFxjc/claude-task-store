@@ -416,6 +416,7 @@ On next session start (or in a fresh model session), the agent automatically rec
 | `task-store attempt T1 "<tried>" "<why-failed>"` | Record a failed approach |
 | `task-store decide "<summary>" [rationale]` | Record a key decision |
 | `task-store next "<action>"` | Set the next action |
+| `task-store commit --topic <name> [--expect-rev N] < batch.json` | Apply a batch of operations atomically (see `docs/batch-commit.md`) |
 | `task-store history [--tail N]` | Show history log |
 | `task-store archive` | Archive completed state |
 | `task-store repair` | Recover from corrupted state |
@@ -430,9 +431,10 @@ On next session start (or in a fresh model session), the agent automatically rec
 task-store start T1 --by claude-code       # record which agent is writing
 task-store done T1 --by codex -e proof     # handoff provenance (informational)
 task-store next "action" --expect-rev 14   # reject write if another agent wrote first
+task-store commit --topic my-topic < batch.json  # apply batch atomically on a named topic
 ```
 
-`--by` is accepted on every command that writes state (`init`, `topic add`, `topic use`, `add`, `start`, `done`, `block`, `resume-task`, `attempt`, `decide`, `next`, `archive`, `repair`) and is rejected as an unsupported flag if you pass it to a purely read-only command.
+`--by` is accepted on every command that writes state (`init`, `topic add`, `topic use`, `add`, `start`, `done`, `block`, `resume-task`, `attempt`, `decide`, `next`, `commit`, `archive`, `repair`) and is rejected as an unsupported flag if you pass it to a purely read-only command.
 
 `--expect-rev` is enforced atomically: the revision check and the write both happen inside an O_EXCL lock file (`.claude-task/.lock`) held for the full read-compare-write cycle, so two concurrent `task-store` CLI invocations cannot race each other into a lost update. This protects concurrent **CLI** invocations specifically; code that imports `src/core.ts` directly and calls `writeState()` without going through `withStoreLock()` bypasses it. See [`docs/pre-release-remediation.md`](docs/pre-release-remediation.md) item 3 for the exact guarantee.
 
@@ -802,6 +804,7 @@ npm test                           # Unit tests
 bash tests/acceptance.sh           # Cross-session recovery test
 bash tests/phase2/pressure_test.sh # 22-session pressure test
 bash tests/phase3/handoff_test.sh  # Cross-agent handoff test
+bash tests/phase3/batch_commit_test.sh # Atomic batch checkpoint regression
 bash tests/autocheckpoint_test.sh  # Auto-checkpoint mode regression
 bash tests/multi_topic_test.sh     # Named topics and v1 migration regression
 bash tests/opencode_install_test.sh     # OpenCode install/uninstall regression
@@ -813,8 +816,9 @@ The OpenCode smoke tests need a working `opencode` binary on `PATH`. They
 skip cleanly (`exit 77`) if it isn't installed; the other suites are pure
 shell and run anywhere.
 
-549 automated checks pass across 18 test files: 3 Jest and 15 shell
-— unit 141, acceptance 17, multi-topic 10, Phase 2 reliability 52, Phase 3 handoff 22,
+645 automated checks pass across 19 test files: 3 Jest and 16 shell
+— unit 210, acceptance 17, multi-topic 10, Phase 2 reliability 52, Phase 3 handoff 22,
+atomic batch commit 27,
 installer regression 17, path safety 32, project-local runtime 32,
 auto-checkpoint 68, OpenCode install regression 117, OpenCode resume smoke 21,
 OpenCode auto-checkpoint smoke 20.

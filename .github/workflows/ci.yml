@@ -53,6 +53,9 @@ jobs:
       - name: Phase 3 cross-agent handoff suite
         run: bash tests/phase3/handoff_test.sh
 
+      - name: Phase 3 atomic batch-commit suite
+        run: bash tests/phase3/batch_commit_test.sh
+
       - name: Installer/uninstaller regression suite
         run: bash tests/install_regression_test.sh
 
