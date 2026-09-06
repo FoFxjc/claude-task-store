@@ -7,7 +7,7 @@
 import {
   initState, readState, writeState, startTask, completeTask, blockTask,
   resumeTask, addTask, recordAttempt, recordDecision, setNextAction,
-  archiveState, buildResumeContext, repairState, detectStaleTasks,
+  archiveState, buildResumeContext, repairState, detectStaleTasks, RESUME_BUDGET_CHARS,
   compareAndWriteState, ConflictError, withStoreLock, LockError,
   stateFilePath, historyFilePath, StateError, findProjectRoot,
   getActiveTopic, addTopic, useTopic,
@@ -468,9 +468,12 @@ async function main(): Promise<void> {
         const state = readState(projectRoot);
         if (!state) { console.log('No state found.'); break; }
         const ctx = buildResumeContext(state);
-        // Rough estimate: ~4 chars per token
+        // Rough estimate: ~4 chars per token. The canonical renderer
+        // enforces a hard character budget (RESUME_BUDGET_CHARS) so the
+        // estimate is bounded by `budget / 4` for any input shape.
         const estimate = Math.ceil(ctx.length / 4);
-        console.log(`Resume context: ${ctx.length} chars ≈ ${estimate} tokens`);
+        const budgetTokens = Math.ceil(RESUME_BUDGET_CHARS / 4);
+        console.log(`Resume context: ${ctx.length} chars ≈ ${estimate} tokens (budget: ${RESUME_BUDGET_CHARS} chars / ${budgetTokens} tokens)`);
         console.log(`State file: ${readFileSync(stateFilePath(projectRoot), 'utf8').length} bytes`);
         break;
       }
