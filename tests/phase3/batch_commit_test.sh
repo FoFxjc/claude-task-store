@@ -337,13 +337,17 @@ cat << 'EOF' | run_cli "$P" commit --topic default --by first > /dev/null
 { "operations": [{ "type": "start", "taskId": "T1" }] }
 EOF
 
-# Second commit immediately after should not fail with lock error
-OUTPUT=$(cat << 'EOF2' | run_cli "$P" commit --topic default --by second 2>&1
+# Second commit immediately after should not fail with lock error.
+# The 'if' suppresses set -e so the subshell's nonzero exit is captured safely.
+if OUTPUT=$(cat << 'EOF2' | run_cli "$P" commit --topic default --by second 2>&1
 
 { "operations": [{ "type": "next", "action": "done" }] }
 EOF2
-)
-EXIT=$?
+); then
+  EXIT=0
+else
+  EXIT=$?
+fi
 if [ "$EXIT" -eq 0 ]; then
   pass "second commit succeeded without lock timeout"
 elif echo "$OUTPUT" | grep -qi 'timeout\|timed out\|lock'; then

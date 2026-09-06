@@ -1405,9 +1405,9 @@ describe('commitBatch', () => {
     expect(mtimeAfter).toBe(mtimeBefore);
   });
 
-  // ── concurrency ─────────────────────────────────────────────────────────────
+  // ── serialization ────────────────────────────────────────────────────────────
 
-  it('serializes concurrent writers (second waits for first to release lock)', () => {
+  it('applies consecutive serialized updates in order', () => {
     initState('Goal', ['T1', 'T2', 'T3', 'T4'], root);
 
     const resultA = commitBatch({
