@@ -234,9 +234,10 @@ If a Codex-native integration or a second concrete non-Claude consumer emerges, 
 
 ## 10. Remaining Limitations (Updated)
 
-1. **`--expect-rev` is opt-in:** Default behavior is still last-writer-wins for backward compatibility. Agents that need conflict safety must explicitly use `--expect-rev`.
-
-2. **No distributed lock:** Two agents writing to the same file simultaneously (at the filesystem level) can still produce a race. `--expect-rev` is a read-then-write check, not an atomic CAS. For typical use (sequential sessions), this is fine.
+1. **Lock scope:** Mutating CLI invocations on one machine are serialized by
+   the store lock. `--expect-rev` adds atomic compare-and-write protection for
+   CLI callers. Direct library callers that bypass the lock, network
+   filesystems, and separate Git checkouts remain outside that guarantee.
 
 3. **`updated_by` is unauthenticated:** Any agent can claim any identity. This is intentional — provenance is informational, not a security mechanism.
 

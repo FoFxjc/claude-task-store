@@ -150,13 +150,17 @@ All 15 checks passed:
 | Schema version mismatch | ✓ clear error, no silent migration |
 | Stale in_progress (72h elapsed) | ✓ preserved, warning added to status output |
 | Concurrent writes (10 parallel) | ✓ state.json valid JSON after all writes |
-| Concurrent sessions same repo | ✓ last writer wins; documented limitation |
+| Concurrent sessions same repo | ✓ CLI writers are serialized; direct library callers can still bypass the lock |
 | Re-init with active state | ✓ safe failure, original state preserved |
 | Done without evidence | ✓ rejected with clear error |
 
 **New feature added:** `task-store stale` command + warnings in `task-store status` for tasks in_progress > 48 hours.
 
-**Documented limitation:** Concurrent session conflict — no distributed lock in v1. Last writer wins. Safe but potentially surprising. Mitigation: use git merge for state.json conflicts.
+**Current limitation:** The CLI serializes mutating invocations with an
+`O_EXCL` lock, and `--expect-rev` provides an atomic compare-and-write for CLI
+callers. Direct library callers that invoke `writeState()` without
+`withStoreLock()` can still race. Separate checkouts can also produce ordinary
+Git merge conflicts in `state.json`.
 
 ---
 
@@ -216,7 +220,10 @@ All 15 checks passed:
 
 1. **No auto-verification of evidence:** The store records what Claude claims, not what's true. Mitigation: skill instructions + trust hierarchy. Would require a test runner to go further.
 
-2. **Concurrent session conflict:** No distributed lock. Two parallel sessions writing to the same `state.json` will have the last writer win. Mitigation: git conflicts + documented behavior. Overengineering for v1.
+2. **Concurrent session conflict:** The CLI lock does not coordinate separate
+   checkouts or direct library callers that bypass `withStoreLock()`. Use
+   `--expect-rev` for optimistic conflict detection between CLI writers and
+   resolve cross-checkout conflicts through Git.
 
 3. **history.jsonl is append-only and grows unbounded:** After 30 tasks, the history file was 486KB. The state file is 12KB. Mitigations: gitignore history by default; no automatic pruning (avoids silent data loss). Could add `task-store trim-history` in v2 if needed.
 

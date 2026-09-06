@@ -1,7 +1,7 @@
 {
   "name": "claude-task-store",
   "version": "0.1.0",
-  "description": "Persistent execution checkpoints for Claude Code. Resume long coding tasks across sessions and models without replaying the full conversation.",
+  "description": "Persistent execution checkpoints for Claude Code, OpenCode, and coding agents. Resume long coding tasks across sessions and models without replaying the full conversation.",
   "type": "module",
   "bin": {
     "task-store": "./bin/task-store.js"

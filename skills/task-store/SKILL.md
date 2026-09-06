@@ -56,6 +56,22 @@ task-store topic list
 task-store topic use <name>
 ```
 
+### Topic and task statuses
+
+The checkpoint has two status layers:
+
+- Topic status: `active` means work can continue, `blocked` means progress is
+  blocked, `completed` means every task is `done` or `skipped`, and `archived`
+  means the topic is intentionally closed and no longer injected into a fresh
+  session.
+- Task status: `pending`, `in_progress`, `blocked`, `done`, or `skipped`.
+
+`done` and `completed` are recorded claims supported by agent-supplied
+evidence, not proof of repository truth. Verify important evidence against the
+repository and tests. Auto-checkpoint freshness warnings are separate from
+these statuses: they only say that observed activity may have happened since
+the last checkpoint write.
+
 ## Critical Behavioral Rules
 
 **ALWAYS** follow these rules when using the task store:

@@ -419,7 +419,7 @@ On next session start (or in a fresh model session), the agent automatically rec
 | `task-store next "<action>"` | Set the next action |
 | `task-store commit --topic <name> [--expect-rev N] < batch.json` | Apply a batch of operations atomically (see `docs/batch-commit.md`) |
 | `task-store history [--tail N]` | Show history log |
-| `task-store archive` | Archive completed state |
+| `task-store archive` | Archive the current topic; archived topics are excluded from resume injection |
 | `task-store repair` | Recover from corrupted state |
 | `task-store stale` | Detect tasks stuck in-progress >48h |
 | `task-store token-estimate` | Estimate injected token count |
@@ -718,6 +718,29 @@ Several projects solve adjacent problems. This is a known area with multiple act
 ---
 
 ## State schema
+
+There are two related status layers. `topics[].status` describes the lifecycle
+of the selected workstream; `topics[].tasks[].status` describes individual
+work items. They are not interchangeable:
+
+| Layer | Status | Meaning |
+|-------|--------|---------|
+| Topic | `active` | Work can continue; a current task may or may not be selected |
+| Topic | `blocked` | One or more tasks or external conditions block progress |
+| Topic | `completed` | Every task is `done` or `skipped`; the checkpoint is ready to archive |
+| Topic | `archived` | Intentionally closed; it is not injected into a fresh session |
+| Task | `pending` | Not started |
+| Task | `in_progress` | Currently being worked on |
+| Task | `blocked` | Cannot currently proceed |
+| Task | `done` | Recorded as complete with evidence supplied by the agent |
+| Task | `skipped` | Explicitly not required |
+
+`done` and `completed` are checkpoint claims, not repository truth. Evidence
+must still be checked against the repository and tests. Auto-checkpoint
+freshness (`task-store may be stale`) is a separate warning about whether the
+checkpoint was updated after observed activity; it is not another topic or task
+status. Archiving is a separate lifecycle step after completion, or when a
+topic is intentionally being closed without further work.
 
 ```json
 {
