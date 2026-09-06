@@ -85,7 +85,7 @@ AFTER_TARGETED_READ=$(state_sha256)
 check "status --topic reads an inactive topic" \
   "$(printf '%s' "$TARGETED_STATUS" | grep -q '^TOPIC: docs$' && printf '%s' "$TARGETED_STATUS" | grep -q 'Write the guide' && echo true || echo false)"
 check "status --topic does not modify state" \
-  "$( [[ \"$BEFORE_TARGETED_READ\" == \"$AFTER_TARGETED_READ\" ]] && echo true || echo false )"
+  "$( [[ "$BEFORE_TARGETED_READ" == "$AFTER_TARGETED_READ" ]] && echo true || echo false )"
 
 TARGETED_SHOW=$(ts show T1 --topic docs)
 check "show reads an inactive topic task" \
