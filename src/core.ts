@@ -705,10 +705,9 @@ export const RESUME_TRUNCATION_SUFFIX = "\n[…truncated, run `task-store status
 // this line always fits.
 const GLOBAL_OMISSION_MARKER = '[…details omitted, run `task-store status` for full details]';
 
-// Budget reserved for the global omission marker (the marker text + the
-// leading separator). Assembly uses RESUME_BUDGET_CHARS − GLOBAL_RESERVED
-// so the marker always has room when it is needed.
-const GLOBAL_RESERVED = GLOBAL_OMISSION_MARKER.length + 1;
+// appendLines-style separation produces a blank line, so reserve two
+// newlines as well as the marker itself.
+const GLOBAL_RESERVED = GLOBAL_OMISSION_MARKER.length + 2;
 
 const STATUS_POINT = "use \`task-store status\` for full details";
 
@@ -900,8 +899,10 @@ function appendSection(out: string[], section: Section, effectiveBudget: number)
   return { dropped: true, collapsed: false, softCapped: false };
 }
 
+// appendLines inserts an empty element, which renders as a blank line and
+// therefore costs two newline characters between non-empty sections.
 function sectionFits(out: string[], lines: string[], effectiveBudget: number): boolean {
-  return joinLength(out) + joinLength(lines) + (out.length > 0 ? 1 : 0) <= effectiveBudget;
+  return joinLength(out) + joinLength(lines) + (out.length > 0 ? 2 : 0) <= effectiveBudget;
 }
 
 function appendLines(out: string[], lines: string[]): void {
@@ -961,10 +962,16 @@ function renderBlocked(topic: TopicState, blocked: Task[], stats: RenderStats): 
   for (const t of blocked) {
     // The blocker reason lives in topic.blockers (task.notes is preserved,
     // not overwritten, when a task is blocked) — look up the most recent
-    // blocker entry for this task to render the reason.
+    // blocker entry for this task to render the reason.  Only include a
+    // reason when one was explicitly recorded; do not echo the task title
+    // as a self-referential "title: title" fallback.
     const blocker = (topic.blockers ?? []).slice().reverse().find(b => b.task_id === t.id);
-    const reason = blocker?.description ?? t.notes ?? t.title;
-    lines.push(`  ✗ [${t.id}] ${bound(t.title, MAX_TITLE_CHARS, stats)}: ${bound(reason, MAX_BLOCKER_CHARS, stats)}`);
+    const explicitReason = blocker?.description ?? t.notes;
+    if (explicitReason) {
+      lines.push(`  ✗ [${t.id}] ${bound(t.title, MAX_TITLE_CHARS, stats)}: ${bound(explicitReason, MAX_BLOCKER_CHARS, stats)}`);
+    } else {
+      lines.push(`  ✗ [${t.id}] ${bound(t.title, MAX_TITLE_CHARS, stats)}`);
+    }
     if (t.attempts && t.attempts.length > 0) {
       const recent = t.attempts.slice(-SOFT_MAX_ATTEMPTS);
       const earlier = t.attempts.length - SOFT_MAX_ATTEMPTS;

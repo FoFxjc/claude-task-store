@@ -645,6 +645,67 @@ describe('buildResumeContext — hard character budget (issue #14)', () => {
     expect(ctx2).toContain('GOAL: Small');
   });
 
+  it('does not reserve marker space when no content is omitted', () => {
+    initState('G', ['T1'], root);
+    startTask('T1', root);
+    const s = readState(root)!;
+    getActiveTopic(s).tasks[0].notes = 'n'.repeat(160);
+    writeState(s, root);
+    const ctx = buildResumeContext(readState(root)!);
+    expect(ctx.length).toBeLessThanOrEqual(RESUME_BUDGET_CHARS);
+    expect(ctx).not.toContain('details omitted');
+    expect(ctx).toContain('NOTE:');
+  });
+
+  it('accounts for the blank line before the global omission marker', () => {
+    initState('G', ['T1'], root);
+    startTask('T1', root);
+    const s = readState(root)!;
+    getActiveTopic(s).tasks[0].notes = 'n'.repeat(161);
+    writeState(s, root);
+    const ctx = buildResumeContext(readState(root)!);
+    expect(ctx.length).toBeLessThanOrEqual(RESUME_BUDGET_CHARS);
+    expect(ctx).toContain('details omitted');
+  });
+
+  it('accounts for the full blank-line separator between sections', () => {
+    const titles = Array.from({ length: 13 }, (_, i) => `Task ${i + 1} with a moderate description`);
+    initState('G', titles, root);
+    for (let i = 1; i <= 3; i++) {
+      startTask(`T${i}`, root);
+      const s = readState(root)!;
+      getActiveTopic(s).tasks[i - 1].notes = 'n'.repeat(200);
+      writeState(s, root);
+    }
+    for (let i = 4; i <= 6; i++) {
+      startTask(`T${i}`, root);
+      blockTask(`T${i}`, 'b'.repeat(200), root);
+    }
+    const ctx = buildResumeContext(readState(root)!);
+    expect(ctx.length).toBeLessThanOrEqual(RESUME_BUDGET_CHARS);
+    expect(ctx).toContain('details omitted');
+    expect(ctx).not.toContain('REMAINING:');
+  });
+
+  it('does not repeat a blocked task title when no reason is recorded', () => {
+    initState('G', ['T1', 'T2', 'T3'], root);
+    startTask('T1', root);
+    blockTask('T1', 'Network is down', root);
+    startTask('T2', root);
+    blockTask('T2', undefined as unknown as string, root);
+    startTask('T3', root);
+    let s = readState(root)!;
+    getActiveTopic(s).tasks[2].notes = 'Waiting for T2';
+    writeState(s, root);
+    blockTask('T3', undefined as unknown as string, root);
+
+    const ctx = buildResumeContext(readState(root)!);
+    expect(ctx).toContain('[T1] T1: Network is down');
+    expect(ctx).not.toMatch(/T2[^:]*: T2/);
+    expect(ctx).toContain('[T2] T2');
+    expect(ctx).toContain('[T3] T3: Waiting for T2');
+  });
+
   it('collapsed DONE points at `task-store status` and preserves the count', () => {
     const longTitle = (i: number) => `Step ${i + 1}: implement sub-feature ${i + 1} with comprehensive validation, including schema migration, backwards compatibility, performance regression checks, and exhaustive end-to-end tests across all supported environments and platforms, plus documentation, accessibility, internationalisation, observability, and graceful degradation under failure modes`;
     const titles = Array.from({ length: 50 }, (_, i) => longTitle(i));
