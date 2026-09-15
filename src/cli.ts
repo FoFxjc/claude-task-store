@@ -406,6 +406,18 @@ async function main(): Promise<void> {
     // that has never been initialized — which happens on every OpenCode chat
     // call, where the adapter asks for the attachment before anything else.
     const attachIsReadOnly = command === 'attach' && args[0] === 'status';
+    // `auto mark-dirty` / `auto check` / `auto reconciled` write the shared
+    // runtime, but they gate that write on the attachment record — which
+    // `attach` can change concurrently. Without the lock a takeover landing
+    // between the ownership check and the runtime write would attribute a
+    // detached session's activity to the new owner. Taking the store lock
+    // serializes the pair. `auto status` writes nothing and stays lock-free,
+    // for the same reason `attach status` does.
+    const autoSubcommand = command === 'auto' ? args[0] : undefined;
+    const autoIsMutating = command === 'auto'
+      && (autoSubcommand === 'mark-dirty'
+        || autoSubcommand === 'check'
+        || autoSubcommand === 'reconciled');
 
     // The revision check and the command's mutation both run inside
     // runCommand(), so when the whole thing runs under withStoreLock() the
@@ -862,7 +874,7 @@ async function main(): Promise<void> {
       }
     };
 
-    if ((MUTATING_COMMANDS.has(command) && !attachIsReadOnly) || topicIsMutating) {
+    if ((MUTATING_COMMANDS.has(command) && !attachIsReadOnly) || autoIsMutating || topicIsMutating) {
       withStoreLock(projectRoot, runCommand);
     } else {
       // Read-only and unknown commands: no lock, so `status` on a project

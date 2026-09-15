@@ -68,6 +68,15 @@ function writeState(
   );
 }
 
+function writeConfig(root: string, mode = 'conservative'): void {
+  const stateDir = join(root, '.claude-task');
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, 'config.json'),
+    JSON.stringify({ auto_checkpoint: mode }, null, 2),
+  );
+}
+
 function writeCli(root: string): void {
   const cliDir = join(root, '.claude', 'task-store', 'bin');
   mkdirSync(cliDir, { recursive: true });
@@ -288,6 +297,7 @@ describe('buildResumeInjection (OpenCode plugin)', () => {
     );
     try {
       writeState(tricky, 'active');
+      writeConfig(tricky);
       writeCli(tricky);
       const cli = join(tricky, '.claude', 'task-store', 'bin', 'task-store.js');
       defaultStdout = 'GOAL: spaces work\n';
@@ -683,6 +693,7 @@ describe('applySystemInjection (single system block invariant)', () => {
 
   it('existing system + resume => still exactly one system element', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     const system = ['OPENCODE SYSTEM PROMPT'];
     applySystemInjection(root, system, SID);
@@ -692,6 +703,7 @@ describe('applySystemInjection (single system block invariant)', () => {
 
   it('existing system + resume + pending => still exactly one system element', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['OPENCODE SYSTEM PROMPT'];
@@ -703,6 +715,7 @@ describe('applySystemInjection (single system block invariant)', () => {
 
   it('preserves the existing system content byte-for-byte as a prefix', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     // Deliberately awkward content: trailing whitespace, blank lines and a
@@ -715,6 +728,7 @@ describe('applySystemInjection (single system block invariant)', () => {
 
   it('orders existing system → resume → pending instruction', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['OPENCODE SYSTEM PROMPT'];
@@ -730,6 +744,7 @@ describe('applySystemInjection (single system block invariant)', () => {
 
   it('separates each part with the documented separator', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['EXISTING'];
@@ -741,6 +756,7 @@ describe('applySystemInjection (single system block invariant)', () => {
 
   it('creates exactly one element when OpenCode supplied no system content', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     const system: string[] = [];
     applySystemInjection(root, system, SID);
@@ -764,17 +780,20 @@ describe('applySystemInjection (single system block invariant)', () => {
 
   it('leaves the system array unchanged when the project-local CLI is missing', () => {
     writeState(root, 'active');
+    writeConfig(root);
     const system = ['OPENCODE SYSTEM PROMPT'];
     applySystemInjection(root, system, SID);
     expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
   });
 
   it('injects a pending instruction even when there is no resume projection', () => {
-    // No state at all: the boundary-staged instruction must still reach the
-    // model, and still without adding a system block. The CLI runtime must be
-    // resolvable, though — ownership is proven through it, and an unprovable
-    // owner must never consume the shared instruction.
+    // State exists but the renderer yields nothing (a transient CLI failure):
+    // the boundary-staged instruction must still reach the owner, and still
+    // without adding a system block.
+    writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
+    _setRunResumeCliForTests((): CliRunResult => ({ status: 0, stdout: '', stderr: '' }));
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['OPENCODE SYSTEM PROMPT'];
     applySystemInjection(root, system, SID);
@@ -784,8 +803,47 @@ describe('applySystemInjection (single system block invariant)', () => {
     );
   });
 
+  it('injects nothing when the project has no applicable state', () => {
+    // No state.json at all: the adapter must stay silent, including for a
+    // pending file left over from a store that has since been archived or
+    // removed — delivering a reconciliation request with nothing to reconcile
+    // would be worse than dropping it.
+    writeConfig(root);
+    writeCli(root);
+    writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
+    const system = ['OPENCODE SYSTEM PROMPT'];
+    applySystemInjection(root, system, SID);
+    expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
+    // The instruction is left in place, not consumed.
+    expect(
+      existsSync(join(root, '.claude-task', '.pending-reconcile-instruction.txt')),
+    ).toBe(true);
+  });
+
+  it('injects no attach prompt, and consults no attachment, when opted out', () => {
+    // The prompt is part of the conservative flow, so an explicitly-off
+    // project promises no prompts — and, because the mode is read from disk
+    // before any CLI call, it also pays nothing per chat turn.
+    writeState(root, 'active');
+    writeConfig(root, 'off');
+    writeCli(root);
+    let attachCalls = 0;
+    _setRunCliForTests({
+      attachStatus: () => {
+        attachCalls += 1;
+        return { status: 0, stdout: 'attached: none', stderr: '' };
+      },
+    });
+    const system = ['OPENCODE SYSTEM PROMPT'];
+    applySystemInjection(root, system, SID);
+    expect(system[0]).toContain('MOCK RESUME');
+    expect(system[0]).not.toContain('Continue those tasks in this session?');
+    expect(attachCalls).toBe(0);
+  });
+
   it('consumes the pending instruction exactly once', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
 
@@ -837,6 +895,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     // Defensive: OpenCode owns the shape of `output`. A checkpoint aid must
     // degrade to no-injection rather than break the chat call.
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     expect(() =>
       applySystemInjection(root, undefined as unknown as string[], SID),
@@ -940,6 +999,7 @@ describe('applySystemInjection — attach prompt (issue #23)', () => {
 
   it('emits a first-time attach prompt when no owner exists', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     attachStdout = 'attached: none';
     const system = ['OPENCODE'];
@@ -956,6 +1016,7 @@ describe('applySystemInjection — attach prompt (issue #23)', () => {
     const tricky = mkdtempSync(join(tmpdir(), `pat's odd proj-${randomBytes(4).toString('hex')}-`));
     try {
       writeState(tricky, 'active');
+      writeConfig(tricky);
       writeCli(tricky);
       attachStdout = 'attached: none';
       const system = ['OPENCODE'];
@@ -971,6 +1032,7 @@ describe('applySystemInjection — attach prompt (issue #23)', () => {
 
   it('emits a takeover prompt when a different session owns the store', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     attachStdout = 'attached: session_id=other host=opencode attached_at=2026-09-15T00:00:00Z';
     const system = ['OPENCODE'];
@@ -981,6 +1043,7 @@ describe('applySystemInjection — attach prompt (issue #23)', () => {
 
   it('emits no attach prompt when this session is the owner', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     attachStdout = 'attached: session_id=sess-1 host=opencode attached_at=2026-09-15T00:00:00Z';
     const system = ['OPENCODE'];
@@ -1009,6 +1072,7 @@ describe('applySystemInjection — attach prompt (issue #23)', () => {
   // is handed the staged reconciliation instruction. Neither gets both.
   it('orders existing system → resume → attach prompt (detached session)', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     attachStdout = 'attached: none';
     const system = ['OPENCODE'];
@@ -1022,6 +1086,7 @@ describe('applySystemInjection — attach prompt (issue #23)', () => {
 
   it('orders existing system → resume → pending instruction (attached owner)', () => {
     writeState(root, 'active');
+    writeConfig(root);
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     attachStdout = 'attached: session_id=sess-1 host=opencode attached_at=2026-09-15T00:00:00Z';

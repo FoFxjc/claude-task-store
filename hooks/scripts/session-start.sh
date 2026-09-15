@@ -216,19 +216,19 @@ print(m.group(1) if m else "")
     # hooks themselves use — with every element shell-quoted by shlex, and
     # pass the values in via exported env vars rather than format strings
     # (ATTACH_OWNER_HOST can legitimately contain parentheses).
-    export TASK_STORE_ARGV
-    TASK_STORE_ARGV="$(printf '%s\n' "${TASK_STORE_CMD[@]}")"
+    export TASK_STORE_ARGV_JSON
+    TASK_STORE_ARGV_JSON=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "${TASK_STORE_CMD[@]}")
 
     if [[ "$ATTACH_KIND" == "owner" ]]; then
       export SESSION_ID PROJECT_DIR ATTACH_OWNER_ID ATTACH_OWNER_HOST ATTACH_OWNER_AT
       ATTACH_CONTEXT=$(python3 <<'PYEOF'
-import os, shlex
+import json, os, shlex
 
 session_id     = os.environ['SESSION_ID']
 owner_id       = os.environ['ATTACH_OWNER_ID']
 owner_host     = os.environ['ATTACH_OWNER_HOST']
 owner_attached = os.environ['ATTACH_OWNER_AT']
-argv           = [a for a in os.environ['TASK_STORE_ARGV'].split('\n') if a]
+argv           = json.loads(os.environ['TASK_STORE_ARGV_JSON'])
 base           = ' '.join(shlex.quote(a) for a in argv)
 root           = shlex.quote(os.environ['PROJECT_DIR'])
 cmd            = (f"{base} attach --session-id {shlex.quote(session_id)} "
@@ -249,10 +249,10 @@ PYEOF
     else
       export SESSION_ID PROJECT_DIR
       ATTACH_CONTEXT=$(python3 <<'PYEOF'
-import os, shlex
+import json, os, shlex
 
 session_id = os.environ['SESSION_ID']
-argv       = [a for a in os.environ['TASK_STORE_ARGV'].split('\n') if a]
+argv       = json.loads(os.environ['TASK_STORE_ARGV_JSON'])
 base       = ' '.join(shlex.quote(a) for a in argv)
 root       = shlex.quote(os.environ['PROJECT_DIR'])
 cmd        = (f"{base} attach --session-id {shlex.quote(session_id)} "

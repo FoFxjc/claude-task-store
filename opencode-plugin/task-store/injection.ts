@@ -499,6 +499,24 @@ export function mergeIntoPrimarySystem(system: string[], block: string): void {
 }
 
 /**
+ * The project's effective auto-checkpoint mode. Mirrors the fail-closed rule in
+ * src/autocheckpoint.ts:readConfig — a missing, unreadable, malformed or
+ * unknown config resolves to "off", and only the literal "conservative"
+ * enables the feature. Read directly rather than shelling out, so a project
+ * that has opted out pays nothing per chat call.
+ */
+function effectiveMode(worktree: string): string {
+  const configFile = join(worktree, ".claude-task", "config.json");
+  if (!existsSync(configFile)) return "off";
+  try {
+    const parsed = JSON.parse(readFileSync(configFile, "utf8")) as { auto_checkpoint?: unknown };
+    return parsed?.auto_checkpoint === "conservative" ? "conservative" : "off";
+  } catch {
+    return "off";
+  }
+}
+
+/**
  * True when the project has a task store this adapter should act on: the state
  * file exists, parses, and is not archived. Shared with the resume path so
  * neither can fire in a repository that merely happens to have the plugin
@@ -545,7 +563,8 @@ function shellQuote(value: string): string {
  * and attaches to whichever project happens to contain that directory — the
  * wrong store, silently.
  */
-function attachCommand(worktree: string, cli: string, sessionId: string, takeover: boolean): string {
+function attachCommand(worktree: string, sessionId: string, takeover: boolean): string {
+  const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
   const tail = takeover ? " --takeover --confirm" : " --yes";
   return `node ${shellQuote(cli)} attach --session-id ${shellQuote(sessionId)} `
     + `--host opencode --root ${shellQuote(worktree)}${tail}`;
@@ -563,29 +582,18 @@ function attachCommand(worktree: string, cli: string, sessionId: string, takeove
  * composition and shares its style. The CLI is the source of truth for
  * ownership; this helper is just the adapter-side rendering.
  */
-export function buildAttachPrompt(worktree: string, sessionId: string): string | null {
-  if (!worktree || !sessionId) return null;
-  // Gate on the same active-store condition as the resume projection. Without
-  // it, `attach status` answers "attached: none" for every repository — even
-  // one with no task store at all — and the prompt would invite the user to
-  // continue work that does not exist.
-  if (!hasApplicableState(worktree)) return null;
-  const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
-  if (!existsSync(cli)) return null;
-  let result: CliRunResult;
-  try {
-    result = runAttachStatus(cli, worktree);
-  } catch {
-    return null;
-  }
-  if (result.status !== 0) return null;
-  const status = result.stdout.trim();
+export function buildAttachPrompt(
+  worktree: string,
+  sessionId: string,
+  status: string | null,
+): string | null {
+  if (!worktree || !sessionId || status === null) return null;
   if (status === "attached: none") {
     return [
       "[task-store] Active task-store work exists for this project.",
       "This session is detached from auto-checkpoint by design. Ask the user:",
       '"This project has active task-store work. Continue those tasks in this session?"',
-      `  yes -> ${attachCommand(worktree, cli, sessionId, false)}`,
+      `  yes -> ${attachCommand(worktree, sessionId, false)}`,
       "  no  -> do nothing; this session stays detached",
     ].join("\n");
   }
@@ -598,29 +606,41 @@ export function buildAttachPrompt(worktree: string, sessionId: string): string |
     "This session is detached from auto-checkpoint by design. Ask the user:",
     '"Another session is already attached to this project\'s task-store work.',
     'Continue those tasks in this session?"',
-    `  yes (take over) -> ${attachCommand(worktree, cli, sessionId, true)}`,
+    `  yes (take over) -> ${attachCommand(worktree, sessionId, true)}`,
     "  no              -> do nothing; this session stays detached",
   ].join("\n");
 }
 
 /**
  * True when this exact session is the recorded owner of the project's
- * auto-checkpoint flow. Used to decide whether this call may consume the
- * shared pending-instruction file.
+ * auto-checkpoint flow, as reported by an already-fetched `attach status`.
+ * Pure: the caller fetches the status once per chat call and reuses it, rather
+ * than paying a second synchronous CLI invocation purely to gate the pending
+ * file. An unprovable owner (no id, unreadable or unexpected status) is not an
+ * owner — the shared instruction is left for the session that is.
  */
-export function isAttachedOwner(worktree: string, sessionId: string): boolean {
-  if (!worktree || !sessionId) return false;
-  const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
-  if (!existsSync(cli)) return false;
-  let result: CliRunResult;
-  try {
-    result = runAttachStatus(cli, worktree);
-  } catch {
-    return false;
-  }
-  if (result.status !== 0) return false;
-  const idMatch = result.stdout.trim().match(/session_id=(\S+)/);
+export function isAttachedOwner(status: string | null, sessionId: string): boolean {
+  if (!sessionId || status === null) return false;
+  const idMatch = status.match(/session_id=(\S+)/);
   return idMatch !== null && idMatch[1] === sessionId;
+}
+
+/**
+ * Read the raw `attach status` output for this project, or null when the
+ * question cannot be answered (no CLI runtime, spawn failure, non-zero exit).
+ * Callers must treat null as "unknown", never as "detached".
+ */
+export function readAttachStatus(worktree: string): string | null {
+  if (!worktree) return null;
+  const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
+  if (!existsSync(cli)) return null;
+  try {
+    const result = runAttachStatus(cli, worktree);
+    if (result.status !== 0) return null;
+    return result.stdout.trim();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -654,9 +674,20 @@ export function applySystemInjection(worktree: string, system: string[], session
     // swallow — see the doc comment above
   }
 
+  // The attachment is consulted at most once per chat call, and only when the
+  // project has actually opted in and has active state. This hook fires on
+  // every call, and each CLI invocation is synchronous with a 5s timeout, so
+  // the work above is deliberately file reads first: an opted-out or empty
+  // project spawns nothing here at all.
+  let attachStatus: string | null = null;
   let attachPrompt: string | null = null;
+  let isOwner = false;
   try {
-    attachPrompt = buildAttachPrompt(worktree, sessionId);
+    if (hasApplicableState(worktree) && effectiveMode(worktree) === "conservative") {
+      attachStatus = readAttachStatus(worktree);
+      attachPrompt = buildAttachPrompt(worktree, sessionId, attachStatus);
+      isOwner = isAttachedOwner(attachStatus, sessionId);
+    }
   } catch {
     // swallow — same
   }
@@ -666,13 +697,6 @@ export function applySystemInjection(worktree: string, system: string[], session
   // reaching this hook first must NOT consume it — otherwise the owner never
   // sees the instruction it was staged for, and the side session is handed a
   // reconciliation request it has no authority to act on.
-  let isOwner = false;
-  try {
-    isOwner = isAttachedOwner(worktree, sessionId);
-  } catch {
-    // swallow — same
-  }
-
   let pending: string | null = null;
   if (isOwner) {
     try {
