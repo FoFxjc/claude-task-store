@@ -38,7 +38,7 @@
 // CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1
 // do not edit: ownership marker read by install.sh / uninstall.sh
 
-import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -319,20 +319,48 @@ export function defaultAttachStatus(cli: string, worktree: string): CliRunResult
   };
 }
 
+// Default CLI runner for `task-store auto take-instruction`. Exit code is the
+// decision: 0 means the instruction is on stdout (and has been deleted), 1
+// means this session owns nothing to collect.
+export function defaultTakeInstruction(
+  cli: string,
+  worktree: string,
+  sessionId: string,
+): CliRunResult {
+  const result = spawnSync(
+    "node",
+    [cli, "auto", "take-instruction", "--root", worktree, "--session-id", sessionId],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: CLI_TIMEOUT_MS,
+    },
+  );
+  return {
+    status: result.status,
+    stdout: typeof result.stdout === "string" ? result.stdout : "",
+    stderr: typeof result.stderr === "string" ? result.stderr : "",
+  };
+}
+
 let runMarkDirty: (cli: string, worktree: string, signal: string, sessionId: string) => CliRunResult =
   defaultMarkDirty;
 let runCheckReconcile: (cli: string, worktree: string, sessionId: string) => CliRunResult =
   defaultCheckReconcile;
 let runAttachStatus: (cli: string, worktree: string) => CliRunResult = defaultAttachStatus;
+let runTakeInstruction: (cli: string, worktree: string, sessionId: string) => CliRunResult =
+  defaultTakeInstruction;
 
 export function _setRunCliForTests(opts: {
   markDirty?: typeof runMarkDirty;
   checkReconcile?: typeof runCheckReconcile;
   attachStatus?: typeof runAttachStatus;
+  takeInstruction?: typeof runTakeInstruction;
 }): void {
   if (opts.markDirty) runMarkDirty = opts.markDirty;
   if (opts.checkReconcile) runCheckReconcile = opts.checkReconcile;
   if (opts.attachStatus) runAttachStatus = opts.attachStatus;
+  if (opts.takeInstruction) runTakeInstruction = opts.takeInstruction;
 }
 
 // Result of a reconciliation-boundary check.
@@ -342,15 +370,6 @@ export interface ReconcileDecision {
   instruction: string | null;
 }
 
-/**
- * Fire `task-store auto mark-dirty` for a tool activity. No-op (without
- * invoking the CLI) when:
- *   - the project has no worktree path
- *   - the project-local CLI runtime is not installed
- *   - the tool name is in the read-only allow-list
- *
- * Failures of the CLI itself are swallowed — a checkpoint aid must never
- * break a coding session, mirroring the same failure mode as the resume
 /**
  * Fire `task-store auto mark-dirty` for a tool activity. No-op (without
  * invoking the CLI) when:
@@ -411,7 +430,7 @@ export function checkReconcileBoundary(worktree: string, sessionId: string): Rec
  *
  * The file lives under `.claude-task/` so it shares the project's
  * ownership boundary; it is purely ephemeral and is removed the first
- * time it is read by `consumePendingReconciliation`.
+ * time the owning session collects it via `takePendingInstruction`.
  */
 export function writePendingReconciliation(worktree: string, instruction: string): void {
   if (!worktree || !instruction) return;
@@ -424,31 +443,39 @@ export function writePendingReconciliation(worktree: string, instruction: string
   }
 }
 
+
 /**
- * Read and delete the pending reconciliation instruction in one step.
+ * Collect the staged reconciliation instruction, if any, for `sessionId`.
  *
- * Returns the previously-staged text, or null if there was no pending
- * file (or it could not be read). The atomicity is best-effort: if the
- * read succeeds but the unlink fails, the instruction will simply be
- * re-delivered on the following chat call. The CLI's existing debounce
- * still prevents that from becoming a nag.
+ * The read-and-delete is delegated to `task-store auto take-instruction`, which
+ * performs it under the store lock after verifying that this session is the
+ * recorded owner. Doing it in-process — as this adapter used to — left a
+ * window between an `attach status` snapshot and the unlink in which a
+ * takeover or a release could let a session that no longer owns the store
+ * consume the instruction the new owner was staged for.
+ *
+ * Returns null when nothing is staged, when this session is not the owner, or
+ * on any failure: the caller then injects nothing.
  */
-export function consumePendingReconciliation(worktree: string): string | null {
-  if (!worktree) return null;
-  const path = pendingInstructionPath(worktree);
-  if (!existsSync(path)) return null;
-  let content: string;
+export function takePendingInstruction(worktree: string, sessionId: string): string | null {
+  if (!worktree || !sessionId) return null;
+  // Nothing staged is the common case — a store stages at most one instruction
+  // per debounce window. Skipping the CLI here keeps the per-chat-turn cost at
+  // zero for turns that have nothing to collect. This check is only a
+  // short-circuit for "there is nothing to take"; it is deliberately NOT a
+  // substitute for the CLI's ownership check, which is what makes the take
+  // itself atomic.
+  if (!existsSync(pendingInstructionPath(worktree))) return null;
+  const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
+  if (!existsSync(cli)) return null;
+  let result: CliRunResult;
   try {
-    content = readFileSync(path, "utf8");
+    result = runTakeInstruction(cli, worktree, sessionId);
   } catch {
     return null;
   }
-  try {
-    unlinkSync(path);
-  } catch {
-    // already gone — that's fine
-  }
-  return content;
+  if (result.status !== 0 || !result.stdout) return null;
+  return result.stdout;
 }
 
 // ─── System-prompt composition ──────────────────────────────────────────────
@@ -517,15 +544,20 @@ function effectiveMode(worktree: string): string {
 }
 
 /**
- * True when the project has a task store this adapter should act on: the state
- * file exists, parses, and is not archived. Shared with the resume path so
- * neither can fire in a repository that merely happens to have the plugin
- * installed — an attach prompt for "active task-store work" in a project with
- * no task store would be wrong.
+ * True when the project has task-store work worth prompting about. Requires
+ * the state file to exist, parse, and be neither archived nor completed —
+ * matching the Claude Code SessionStart hook, which suppresses injection for
+ * both. `completed` is a valid schema status, so without that check OpenCode
+ * would invite the user to continue work that is already finished.
+ *
+ * Deliberately narrower than buildResumeInjection(): resume has its own,
+ * pre-existing archived-only rule and changing it would alter what gets
+ * injected, which is out of scope here.
  */
-function hasApplicableState(worktree: string): boolean {
+function hasPromptableWork(worktree: string): boolean {
   const stateFile = join(worktree, ".claude-task", "state.json");
   if (!existsSync(stateFile)) return false;
+  const inactive = new Set(["archived", "completed"]);
   try {
     const parsed = JSON.parse(readFileSync(stateFile, "utf8")) as {
       version?: unknown;
@@ -535,9 +567,9 @@ function hasApplicableState(worktree: string): boolean {
     };
     if (parsed.version === "2" && typeof parsed.active_topic === "string") {
       const topic = parsed.topics?.find(candidate => candidate.name === parsed.active_topic);
-      return topic?.status !== "archived";
+      return typeof topic?.status !== "string" || !inactive.has(topic.status);
     }
-    return parsed.status !== "archived";
+    return typeof parsed.status !== "string" || !inactive.has(parsed.status);
   } catch {
     return false;
   }
@@ -612,20 +644,6 @@ export function buildAttachPrompt(
 }
 
 /**
- * True when this exact session is the recorded owner of the project's
- * auto-checkpoint flow, as reported by an already-fetched `attach status`.
- * Pure: the caller fetches the status once per chat call and reuses it, rather
- * than paying a second synchronous CLI invocation purely to gate the pending
- * file. An unprovable owner (no id, unreadable or unexpected status) is not an
- * owner — the shared instruction is left for the session that is.
- */
-export function isAttachedOwner(status: string | null, sessionId: string): boolean {
-  if (!sessionId || status === null) return false;
-  const idMatch = status.match(/session_id=(\S+)/);
-  return idMatch !== null && idMatch[1] === sessionId;
-}
-
-/**
  * Read the raw `attach status` output for this project, or null when the
  * question cannot be answered (no CLI runtime, spawn failure, non-zero exit).
  * Callers must treat null as "unknown", never as "detached".
@@ -657,8 +675,8 @@ export function readAttachStatus(worktree: string): string | null {
  *         → pending reconciliation instruction
  *
  * The pending instruction is consumed exactly once, and only by the attached
- * owner — `consumePendingReconciliation` deletes the file as it reads it, and
- * the CLI's own debounce is what prevents a re-nag.
+ * owner — the CLI collects it for this session only, and its own debounce is
+ * what prevents a re-nag.
  *
  * Each source is guarded separately so a failure in one cannot suppress the
  * others, and the whole thing degrades to "inject nothing": a checkpoint
@@ -679,14 +697,10 @@ export function applySystemInjection(worktree: string, system: string[], session
   // every call, and each CLI invocation is synchronous with a 5s timeout, so
   // the work above is deliberately file reads first: an opted-out or empty
   // project spawns nothing here at all.
-  let attachStatus: string | null = null;
   let attachPrompt: string | null = null;
-  let isOwner = false;
   try {
-    if (hasApplicableState(worktree) && effectiveMode(worktree) === "conservative") {
-      attachStatus = readAttachStatus(worktree);
-      attachPrompt = buildAttachPrompt(worktree, sessionId, attachStatus);
-      isOwner = isAttachedOwner(attachStatus, sessionId);
+    if (hasPromptableWork(worktree) && effectiveMode(worktree) === "conservative") {
+      attachPrompt = buildAttachPrompt(worktree, sessionId, readAttachStatus(worktree));
     }
   } catch {
     // swallow — same
@@ -698,12 +712,10 @@ export function applySystemInjection(worktree: string, system: string[], session
   // sees the instruction it was staged for, and the side session is handed a
   // reconciliation request it has no authority to act on.
   let pending: string | null = null;
-  if (isOwner) {
-    try {
-      pending = consumePendingReconciliation(worktree);
-    } catch {
-      // swallow — same
-    }
+  try {
+    pending = takePendingInstruction(worktree, sessionId);
+  } catch {
+    // swallow — same
   }
 
   const parts: string[] = [];

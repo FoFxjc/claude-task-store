@@ -167,17 +167,28 @@ if [[ ${#TASK_STORE_CMD[@]} -gt 0 ]] && [[ -n "$SESSION_ID" ]] \
    && [[ "$("${TASK_STORE_CMD[@]}" config auto-checkpoint --root "$PROJECT_DIR" 2>/dev/null || echo "")" == "conservative" ]]; then
   # The CLI does not yet expose a JSON view of attach status, so we parse the
   # `attached: ...` text format we know it emits. `attached: none` is the
-  # "no owner" sentinel. The status is printed to stdout by `attach status`.
-  ATTACH_STATUS=$("${TASK_STORE_CMD[@]}" attach status --root "$PROJECT_DIR" 2>/dev/null || echo "")
+  # "no owner" sentinel.
+  #
+  # The exit status matters and must not be flattened into an empty string: an
+  # older or partial runtime, or a transient failure, produces no output, and
+  # treating that as the "none" sentinel would emit a first-time attach prompt
+  # carrying a command this install may not support. Fail closed instead — the
+  # prompt is optional, a wrong one is not.
+  set +e
+  ATTACH_STATUS=$("${TASK_STORE_CMD[@]}" attach status --root "$PROJECT_DIR" 2>/dev/null)
+  ATTACH_STATUS_RC=$?
+  set -e
 
   ATTACH_OWNER_ID=""
   ATTACH_OWNER_HOST=""
   ATTACH_OWNER_AT=""
-  ATTACH_KIND="none"
+  ATTACH_KIND=""   # empty means "unknown" and suppresses the prompt
 
-  if [[ "$ATTACH_STATUS" == "attached: none" ]]; then
+  if [[ $ATTACH_STATUS_RC -ne 0 ]]; then
+    : # cannot determine ownership; inject nothing about attachment
+  elif [[ "$ATTACH_STATUS" == "attached: none" ]]; then
     ATTACH_KIND="none"
-  elif [[ "$ATTACH_STATUS" == attached:* ]]; then
+  elif [[ "$ATTACH_STATUS" == attached:* ]] && [[ "$ATTACH_STATUS" == *"session_id="* ]]; then
     ATTACH_KIND="owner"
     # Parse "attached: session_id=<X> host=<H> attached_at=<T>".
     # Both the host label and the timestamp can contain characters bash
@@ -200,7 +211,9 @@ print(m.group(1) if m else "")
 ')
   fi
 
-  if [[ "$ATTACH_KIND" == "owner" && "$ATTACH_OWNER_ID" == "$SESSION_ID" ]]; then
+  if [[ -z "$ATTACH_KIND" ]]; then
+    : # unrecognised or unavailable status: no prompt (fail closed)
+  elif [[ "$ATTACH_KIND" == "owner" && "$ATTACH_OWNER_ID" == "$SESSION_ID" ]]; then
     # This session is the recorded owner. Auto-checkpoint works normally;
     # no prompt needed.
     :

@@ -286,6 +286,27 @@ check "conservative+dirty: state.json task statuses unchanged (no auto-completio
 check "conservative+dirty: auto-checkpoint runtime recorded a reconciliation request (debounce opened)" \
   "$(node "$CLI3" auto status --root "$T3" | grep -E '^last_reconcile_request_at:' | grep -qv 'never' && echo true || echo false)"
 
+# The adapter stages the instruction; the CLI collects it. The file name is
+# defined in both places — the adapter ships standalone and cannot import from
+# src/ — so this is the only thing that pins the two together. It also pins the
+# gates the adapter relies on: collection is owner-only and one-shot.
+TAKE_OTHER_RC=0
+node "$CLI3" auto take-instruction --root "$T3" --session-id not-the-owner \
+  >/dev/null 2>&1 || TAKE_OTHER_RC=$?
+check "pending instruction: a session that does not own the store cannot collect it" \
+  "$([[ $TAKE_OTHER_RC -ne 0 && -s "$PENDING" ]] && echo true || echo false)"
+
+TAKE_OWNER=$(node "$CLI3" auto take-instruction --root "$T3" --session-id "$SID3")
+check "pending instruction: the owning session collects the plugin-staged text" \
+  "$(printf '%s' "$TAKE_OWNER" | grep -q 'repository/tests > git state' && echo true || echo false)"
+check "pending instruction: collection consumed the file (delivered once)" \
+  "$([[ ! -f "$PENDING" ]] && echo true || echo false)"
+
+TAKE_AGAIN_RC=0
+node "$CLI3" auto take-instruction --root "$T3" --session-id "$SID3" >/dev/null 2>&1 || TAKE_AGAIN_RC=$?
+check "pending instruction: a second collection finds nothing" \
+  "$([[ $TAKE_AGAIN_RC -ne 0 ]] && echo true || echo false)"
+
 # ── Test 4: debounce suppresses repeated reconciliation requests ───────────
 echo ""
 echo "═══ Test 4: debounce suppresses repeated reconciliation requests ═══"

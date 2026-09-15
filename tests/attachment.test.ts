@@ -8,8 +8,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, chmodSync } from 'fs';
+import { join, dirname } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 
@@ -173,6 +173,23 @@ describe('release', () => {
 
   it('rejects empty sessionId', () => {
     expect(() => release({ sessionId: '' }, root)).toThrow(/sessionId is required/);
+  });
+
+  it('surfaces an unlink failure instead of reporting a release that did not happen', () => {
+    // A release that reports success while the record is still on disk leaves
+    // the next session blocked by a dead owner, so only "the file was already
+    // gone" (ENOENT) may be swallowed. Making the containing directory
+    // unwritable is the portable way to force a non-ENOENT failure here.
+    attach({ sessionId: 's', host: 'claude-code' }, root);
+    const dir = dirname(attachmentFilePath(root));
+    chmodSync(dir, 0o500);
+    try {
+      expect(() => release({ sessionId: 's' }, root)).toThrow();
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    // The record is still there, which is exactly why the failure must surface.
+    expect(readAttachment(root)?.session_id).toBe('s');
   });
 });
 

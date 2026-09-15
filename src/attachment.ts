@@ -247,7 +247,15 @@ export function release(opts: { sessionId: string }, projectRoot?: string): Rele
   const current = readAttachment(root);
   if (!current) return { outcome: 'not-attached' };
   if (current.session_id !== opts.sessionId) return { outcome: 'not-owner' };
-  try { unlinkSync(attachmentFilePath(root)); } catch { /* already absent */ }
+  try {
+    unlinkSync(attachmentFilePath(root));
+  } catch (err) {
+    // Only a missing file means "already released". Anything else (a
+    // permissions problem, a directory in the way) leaves the record on disk,
+    // and reporting 'released' would tell the caller ownership is gone while
+    // the next session is still blocked by it — so let it surface.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
   return { outcome: 'released' };
 }
 

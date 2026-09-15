@@ -307,6 +307,117 @@ check "SessionEnd warning does not consume the debounce window" \
   "$(ts auto status | grep -q '^stale: true' && echo true)"
 check "SessionEnd never mutates task state" "$([[ "$(task_status T1)" == "pending" ]] && echo true)"
 
+# ─── 8b. auto take-instruction: owner-gated, one-shot (issue #23) ────────────
+# The OpenCode adapter collects the staged reconciliation instruction through
+# this verb, so that the ownership check and the delete happen together under
+# the store lock. These pin the gates an adapter relies on.
+#
+# The SessionEnd check directly above released the attachment, so re-establish
+# it: everything below is about what the *owner* can collect.
+node "$CLI" attach --session-id test-session --host claude-code --yes --root "$PROJ" >/dev/null
+STAGED="$PROJ/.claude-task/.pending-reconcile-instruction.txt"
+printf '%s' 'STAGED-INSTRUCTION' > "$STAGED"
+
+TAKE_DETACHED_RC=0
+TAKE_DETACHED=$(node "$CLI" auto take-instruction --root "$PROJ" --session-id someone-else 2>&1) || TAKE_DETACHED_RC=$?
+check "take-instruction refuses a session that does not own the attachment" \
+  "$([[ $TAKE_DETACHED_RC -ne 0 ]] && echo true || echo false)"
+check "a refused collection leaves the instruction staged for the owner" \
+  "$([[ -s "$STAGED" ]] && echo true || echo false)"
+
+TAKE_MISSING_RC=0
+node "$CLI" auto take-instruction --root "$PROJ" >/dev/null 2>&1 || TAKE_MISSING_RC=$?
+check "take-instruction refuses a call with no session id" \
+  "$([[ $TAKE_MISSING_RC -ne 0 ]] && echo true || echo false)"
+
+TAKE_OK=$(node "$CLI" auto take-instruction --root "$PROJ" --session-id test-session 2>&1)
+check "take-instruction hands the instruction to the owning session" \
+  "$(printf '%s' "$TAKE_OK" | grep -q 'STAGED-INSTRUCTION' && echo true || echo false)"
+check "collection consumed the file (one-shot)" \
+  "$([[ ! -f "$STAGED" ]] && echo true || echo false)"
+
+TAKE_AGAIN_RC=0
+node "$CLI" auto take-instruction --root "$PROJ" --session-id test-session >/dev/null 2>&1 || TAKE_AGAIN_RC=$?
+check "a second collection finds nothing" \
+  "$([[ $TAKE_AGAIN_RC -ne 0 ]] && echo true || echo false)"
+
+# An instruction staged before the store went inactive must not be delivered:
+# the agent would be told to reconcile a checkpoint it can no longer see.
+printf '%s' 'STALE-INSTRUCTION' > "$STAGED"
+node "$CLI" archive --root "$PROJ" >/dev/null 2>&1
+TAKE_ARCHIVED_RC=0
+node "$CLI" auto take-instruction --root "$PROJ" --session-id test-session >/dev/null 2>&1 || TAKE_ARCHIVED_RC=$?
+check "take-instruction refuses while the store is archived" \
+  "$([[ $TAKE_ARCHIVED_RC -ne 0 ]] && echo true || echo false)"
+check "the stale instruction is left in place, not silently dropped" \
+  "$([[ -s "$STAGED" ]] && echo true || echo false)"
+rm -f "$STAGED"
+node "$CLI" init "Post-archive goal" "Only task" --root "$PROJ" >/dev/null 2>&1
+node "$CLI" config auto-checkpoint conservative --root "$PROJ" >/dev/null 2>&1
+
+# ─── 8c. SessionStart attach prompt fails closed ─────────────────────────────
+# `attach status` is the only thing that can tell the hook whether to invite
+# the user to continue existing work. If that call fails — older runtime,
+# partial install, transient error — the hook must inject nothing about
+# attachment. Treating a silent failure as the "no owner" sentinel would emit a
+# prompt carrying a command this install may not support.
+#
+# Exercised against a stub runtime so the failure is deterministic: the real
+# CLI has no way to be selectively broken.
+STUB="$BASE/stub project"
+mkdir -p "$STUB/.claude/task-store/bin" "$STUB/.claude-task"
+cp "$STATE" "$STUB/.claude-task/state.json"
+cat > "$STUB/.claude/task-store/bin/task-store.js" <<'STUBEOF'
+#!/usr/bin/env node
+// Minimal stand-in for the real runtime: successful `config` and `resume`,
+// and an `attach status` whose behaviour is set by ATTACH_STUB_MODE.
+const args = process.argv.slice(2);
+const mode = process.env.ATTACH_STUB_MODE || "fail";
+if (args[0] === "config") { process.stdout.write("conservative\n"); process.exit(0); }
+if (args[0] === "resume") { process.stdout.write("TASK STORE — RESUME CONTEXT\nGOAL: stub\n"); process.exit(0); }
+if (args[0] === "attach" && args[1] === "status") {
+  if (mode === "fail") process.exit(1);
+  if (mode === "empty") process.exit(0);
+  if (mode === "none") { process.stdout.write("attached: none\n"); process.exit(0); }
+  process.stdout.write("attached: session_id=other host=claude-code attached_at=2026-01-01T00:00:00Z\n");
+  process.exit(0);
+}
+process.exit(1);
+STUBEOF
+
+# Run the real hook against the stub runtime. The mode must be passed as a
+# real command word's environment — `VAR=x OUT=$(cmd)` does NOT work here,
+# because the command substitution is expanded before the temporary
+# assignment takes effect, which silently runs the stub in its default mode
+# and makes a fail-closed assertion pass for the wrong reason.
+stub_hook() {
+  ATTACH_STUB_MODE="$1" CLAUDE_PROJECT_DIR="$STUB" \
+    bash "$ROOT/hooks/scripts/session-start.sh" <<< '{"session_id":"fresh-session"}' 2>/dev/null
+}
+
+PROMPT_MARKER='Continue those tasks in this session'
+
+OUT_FAIL=$(stub_hook fail)
+check "SessionStart emits no attach prompt when 'attach status' fails" \
+  "$(printf '%s' "$OUT_FAIL" | grep -q "$PROMPT_MARKER" && echo false || echo true)"
+check "SessionStart still injects resume context when 'attach status' fails" \
+  "$(printf '%s' "$OUT_FAIL" | grep -q 'RESUME CONTEXT' && echo true || echo false)"
+
+OUT_EMPTY=$(stub_hook empty)
+check "SessionStart emits no attach prompt on an empty (unrecognised) status" \
+  "$(printf '%s' "$OUT_EMPTY" | grep -q "$PROMPT_MARKER" && echo false || echo true)"
+
+# Guard the guard: with a well-formed "no owner" status the prompt must appear,
+# so the checks above cannot pass by the prompt branch being dead.
+OUT_NONE=$(stub_hook none)
+check "SessionStart still prompts on a well-formed 'attached: none' status" \
+  "$(printf '%s' "$OUT_NONE" | grep -q "$PROMPT_MARKER" && echo true || echo false)"
+
+# A different session already attached: still a prompt, and the takeover path.
+OUT_OTHER=$(stub_hook other)
+check "SessionStart prompts a fresh session when another session owns the store" \
+  "$(printf '%s' "$OUT_OTHER" | grep -q "$PROMPT_MARKER" && echo true || echo false)"
+
 # ─── 9. Disabling stops everything ───────────────────────────────────────────
 ts config auto-checkpoint off >/dev/null
 check "disabling clears the runtime marker" "$([[ ! -f "$RUNTIME" ]] && echo true)"

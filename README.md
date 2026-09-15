@@ -519,13 +519,17 @@ through OpenCode's lifecycle hooks:
 |---|---|---|
 | Tool activity → dirty | `PostToolUse` shell hook | `tool.execute.after` plugin hook |
 | Reconciliation boundary | `Stop` hook (`additionalContext`) | `event({type: "session.idle"})` plugin hook, staging the instruction to `.claude-task/.pending-reconcile-instruction.txt` |
-| Instruction delivery | Same call (the `Stop` output channel) | Next `experimental.chat.system.transform` (which consumes the pending file once and merges it into `output.system[0]`) |
+| Instruction delivery | Same call (the `Stop` output channel) | Next `experimental.chat.system.transform`, which collects the staged file through `task-store auto take-instruction` — owner-gated and one-shot, so a detached session cannot take what the owner was staged for — and merges it into `output.system[0]` |
 | Compaction | `PreCompact` writes history marker | `experimental.session.compacting` registered as a deliberate no-op |
 
 Both harnesses invoke the **same** `task-store auto mark-dirty`,
 `task-store auto check`, and `task-store resume` commands, so the dirty
 window, the 120-second debounce, and the trust hierarchy embedded in
-`RECONCILE_INSTRUCTION` are identical.
+`RECONCILE_INSTRUCTION` are identical. OpenCode additionally calls
+`task-store auto take-instruction` to collect the staged instruction; Claude
+Code needs no equivalent because its `Stop` hook delivers in the same call.
+Both verbs live in the provider-neutral core and gate on the same attachment
+record, so ownership is decided in exactly one place.
 
 **Session attachment on OpenCode.** The [attachment prompt](#session-attachment-issue-23)
 needs a session id, and the plugin only learns its OpenCode session id from
@@ -649,9 +653,14 @@ never sees it.
 The attachment record lives at `.claude-task/attachment.json` (gitignored,
 separate from `state.json` so the published schema is unchanged) and holds
 only the session id, host identifier, and an attached_at timestamp.
-`task-store attach status` prints the current owner; `task-store attach
---release --session-id <id>` clears the record when a session ends normally
-(Claude Code's SessionEnd hook does this automatically).
+`task-store attach status` prints the current owner. Every other `attach` form
+requires both `--session-id` and `--host`; `--release` clears the record when
+a session ends normally (Claude Code's SessionEnd hook does this
+automatically):
+
+```bash
+task-store attach --release --session-id <id> --host claude-code
+```
 
 ### How conservative mode works
 

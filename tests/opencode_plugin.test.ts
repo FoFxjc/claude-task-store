@@ -16,6 +16,7 @@ import {
   utimesSync,
   rmSync,
   readFileSync,
+  unlinkSync,
   existsSync,
 } from 'fs';
 import { tmpdir } from 'os';
@@ -31,7 +32,7 @@ import {
   markDirtyOnTool,
   checkReconcileBoundary,
   writePendingReconciliation,
-  consumePendingReconciliation,
+  takePendingInstruction,
   applySystemInjection,
   mergeIntoPrimarySystem,
   SYSTEM_INJECTION_SEPARATOR,
@@ -66,6 +67,25 @@ function writeState(
       updated_at: '2024-01-02T00:00:00Z',
     }, null, 2),
   );
+}
+
+// Emulates `task-store auto take-instruction`: hand back whatever is staged
+// for this project and delete it, or report nothing to collect. Collection is
+// the CLI's job in production (that is what makes the ownership check atomic
+// with the delete), so the tests stub the collaborator rather than reimplement
+// the plugin's half of it.
+function stubTakeInstructionFromDisk(): void {
+  _setRunCliForTests({
+    takeInstruction: (_cli, worktree) => {
+      const staged = join(worktree, '.claude-task', '.pending-reconcile-instruction.txt');
+      if (!existsSync(staged)) {
+        return { status: 1, stdout: 'no-instruction: none-staged', stderr: '' };
+      }
+      const text = readFileSync(staged, 'utf8');
+      unlinkSync(staged);
+      return { status: 0, stdout: text, stderr: '' };
+    },
+  });
 }
 
 function writeConfig(root: string, mode = 'conservative'): void {
@@ -570,12 +590,25 @@ describe('checkReconcileBoundary', () => {
 
 describe('pending reconciliation bridge', () => {
   let root: string;
+  let calls: { cli: string; worktree: string; sessionId: string }[];
+  let takeStatus: number;
+  let takeStdout: string;
   beforeEach(() => {
     root = makeTmpDir('pending');
+    calls = [];
+    takeStatus = 0;
+    takeStdout = '';
     _resetCacheForTests();
+    _setRunCliForTests({
+      takeInstruction: (cli, worktree, sessionId) => {
+        calls.push({ cli, worktree, sessionId });
+        return { status: takeStatus, stdout: takeStdout, stderr: '' };
+      },
+    });
   });
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
+    _setRunCliForTests({});
   });
 
   it('writePendingReconciliation creates .pending-reconcile-instruction.txt under .claude-task/', () => {
@@ -585,35 +618,73 @@ describe('pending reconciliation bridge', () => {
     expect(readFileSync(path, 'utf8')).toBe('reconcile now');
   });
 
-  it('consumePendingReconciliation returns null when no pending file exists', () => {
-    expect(consumePendingReconciliation(root)).toBeNull();
-  });
-
-  it('consumePendingReconciliation returns the staged text and deletes the file in one step', () => {
+  it('stages the file the CLI collects (the writer and the collector agree on the path)', () => {
+    // The name is defined in both places because the adapter ships standalone
+    // and cannot import from src/. This pins them together: what the plugin
+    // stages must be what `task-store auto take-instruction` picks up. The
+    // smoke suite exercises the same agreement against the real CLI.
     writePendingReconciliation(root, 'reconcile me');
-    expect(consumePendingReconciliation(root)).toBe('reconcile me');
-    const path = join(root, '.claude-task', '.pending-reconcile-instruction.txt');
-    expect(existsSync(path)).toBe(false);
-    // Idempotent: a second consume is null.
-    expect(consumePendingReconciliation(root)).toBeNull();
+    const staged = join(root, '.claude-task', '.pending-reconcile-instruction.txt');
+    expect(readFileSync(staged, 'utf8')).toBe('reconcile me');
   });
 
-  it('rejects empty worktree / empty instruction without touching the filesystem', () => {
-    writePendingReconciliation('', 'something');
-    expect(consumePendingReconciliation('')).toBeNull();
+  it('delegates collection to the CLI so ownership and deletion are atomic', () => {
+    writeCli(root);
+    writePendingReconciliation(root, 'staged');
+    takeStdout = 'reconcile me';
+    expect(takePendingInstruction(root, 'sess-1')).toBe('reconcile me');
+    const cli = join(root, '.claude', 'task-store', 'bin', 'task-store.js');
+    expect(calls).toEqual([{ cli, worktree: root, sessionId: 'sess-1' }]);
   });
 
-  it('overwrites a previously staged instruction on a new boundary write', () => {
-    writePendingReconciliation(root, 'first');
-    writePendingReconciliation(root, 'second');
-    expect(consumePendingReconciliation(root)).toBe('second');
+  it('returns null when the CLI reports nothing to collect (detached or empty)', () => {
+    writeCli(root);
+    writePendingReconciliation(root, 'staged');
+    takeStatus = 1;
+    takeStdout = 'no-instruction: detached';
+    expect(takePendingInstruction(root, 'sess-1')).toBeNull();
+  });
+
+  it('returns null without invoking the CLI when the session id or worktree is missing', () => {
+    writeCli(root);
+    expect(takePendingInstruction('', 'sess-1')).toBeNull();
+    expect(takePendingInstruction(root, '')).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  it('returns null without invoking the CLI when the runtime is not installed', () => {
+    // No writeCli(root): partial install. The collector must fail safe.
+    writePendingReconciliation(root, 'staged');
+    expect(takePendingInstruction(root, 'sess-1')).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  it('does not invoke the CLI at all when nothing is staged', () => {
+    // The common case on OpenCode's per-turn hook. Paying a subprocess for
+    // every chat turn to discover there is nothing to collect would be a real
+    // cost for no benefit, and there is no ownership question to answer when
+    // no instruction exists.
+    writeCli(root);
+    expect(takePendingInstruction(root, 'sess-1')).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  it('returns null when the CLI exits 0 but prints nothing', () => {
+    writeCli(root);
+    writePendingReconciliation(root, 'staged');
+    takeStdout = '';
+    expect(takePendingInstruction(root, 'sess-1')).toBeNull();
   });
 
   it('handles project paths containing spaces and apostrophes', () => {
     const tricky = mkdtempSync(join(tmpdir(), `pat's odd proj-${randomBytes(4).toString('hex')}-`));
     try {
-      writePendingReconciliation(tricky, 'reconcile');
-      expect(consumePendingReconciliation(tricky)).toBe('reconcile');
+      writeCli(tricky);
+      writePendingReconciliation(tricky, 'staged');
+      takeStdout = 'reconcile';
+      const cli = join(tricky, '.claude', 'task-store', 'bin', 'task-store.js');
+      expect(takePendingInstruction(tricky, 'sess-1')).toBe('reconcile');
+      expect(calls).toEqual([{ cli, worktree: tricky, sessionId: 'sess-1' }]);
     } finally {
       rmSync(tricky, { recursive: true, force: true });
     }
@@ -682,6 +753,7 @@ describe('applySystemInjection (single system block invariant)', () => {
         stderr: '',
       }),
     });
+    stubTakeInstructionFromDisk();
   });
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
@@ -803,21 +875,38 @@ describe('applySystemInjection (single system block invariant)', () => {
     );
   });
 
-  it('injects nothing when the project has no applicable state', () => {
-    // No state.json at all: the adapter must stay silent, including for a
-    // pending file left over from a store that has since been archived or
-    // removed — delivering a reconciliation request with nothing to reconcile
-    // would be worse than dropping it.
+  it('emits no attach prompt when the project has no applicable state', () => {
+    // No state.json at all. The adapter stays silent about the store, and
+    // collection is still delegated — whether a stale instruction should be
+    // delivered is the CLI's call, not the adapter's, so that the ownership
+    // check and the delete stay in one place.
     writeConfig(root);
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['OPENCODE SYSTEM PROMPT'];
     applySystemInjection(root, system, SID);
-    expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
-    // The instruction is left in place, not consumed.
-    expect(
-      existsSync(join(root, '.claude-task', '.pending-reconcile-instruction.txt')),
-    ).toBe(true);
+    expect(system).not.toContain('Continue those tasks in this session?');
+  });
+
+  it('emits no attach prompt for a completed state', () => {
+    // `completed` is a valid schema status and means there is nothing left to
+    // continue. Without this check OpenCode would invite the user to resume
+    // finished work — the Claude Code SessionStart hook already suppresses
+    // both archived and completed, and the two hosts must agree.
+    writeState(root, 'completed');
+    writeConfig(root);
+    writeCli(root);
+    let attachCalls = 0;
+    _setRunCliForTests({
+      attachStatus: () => {
+        attachCalls += 1;
+        return { status: 0, stdout: 'attached: none', stderr: '' };
+      },
+    });
+    const system = ['OPENCODE SYSTEM PROMPT'];
+    applySystemInjection(root, system, SID);
+    expect(system.join('\n')).not.toContain('Continue those tasks in this session?');
+    expect(attachCalls).toBe(0);
   });
 
   it('injects no attach prompt, and consults no attachment, when opted out', () => {
@@ -990,6 +1079,7 @@ describe('applySystemInjection — attach prompt (issue #23)', () => {
     _setRunCliForTests({
       attachStatus: () => ({ status: 0, stdout: attachStdout, stderr: '' }),
     });
+    stubTakeInstructionFromDisk();
   });
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });

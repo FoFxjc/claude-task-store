@@ -489,3 +489,49 @@ export const RECONCILE_INSTRUCTION = [
   '',
   'Use the existing CLI: task-store start|done|attempt|block|decide|next',
 ].join('\n');
+
+// ─── Pending reconciliation instruction ──────────────────────────────────────
+//
+// The OpenCode adapter cannot deliver a reconciliation instruction at its
+// boundary the way Claude Code's `Stop` hook can, so it stages the text to a
+// file and the next chat call picks it up. Staging is host-specific; taking it
+// is not, and must be owner-gated — the file is shared by the whole project,
+// so an unguarded read-and-delete would let a session that no longer owns the
+// store steal the instruction the current owner was staged for.
+//
+// The name is duplicated in the OpenCode adapter (which writes it) because
+// that module ships standalone and cannot import from src/. The two are pinned
+// together by the smoke suite, which stages through the plugin and consumes
+// through this CLI path.
+
+const PENDING_INSTRUCTION_FILE = '.pending-reconcile-instruction.txt';
+
+export function pendingInstructionFilePath(projectRoot?: string): string {
+  return join(storePath(projectRoot), PENDING_INSTRUCTION_FILE);
+}
+
+/**
+ * Read and delete the staged instruction in one step.
+ *
+ * Callers MUST hold the store lock and MUST have already established that the
+ * calling session owns the attachment; this function deliberately knows
+ * nothing about sessions so that the check and the delete cannot be separated
+ * by a caller that forgets. Returns null when nothing is staged.
+ */
+export function takePendingInstruction(projectRoot?: string): string | null {
+  const path = pendingInstructionFilePath(projectRoot);
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    // Delivering an instruction we could not delete would re-deliver it on
+    // every subsequent boundary, so fail rather than risk a nag loop.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  return text;
+}

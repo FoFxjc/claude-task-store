@@ -14,7 +14,7 @@ import {
 } from './core.js';
 import {
   readConfig, writeMode, markDirty, shouldReconcile, markReconcileRequested,
-  markReconciled, freshness, readRuntime, RECONCILE_INSTRUCTION,
+  markReconciled, freshness, readRuntime, RECONCILE_INSTRUCTION, takePendingInstruction,
   DEFAULT_DEBOUNCE_SECONDS, debounceSeconds, configFilePath,
   NEW_STORE_MODE,
   type AutoCheckpointMode,
@@ -68,6 +68,8 @@ AUTO-CHECKPOINT (adapter plumbing — used by hooks/plugins, rarely by hand):
   auto check [--instruction]        Exit 0 if reconciliation is warranted, else 1
                                     (requires --session-id matching the attached session)
   auto reconciled                   Record that reconciliation completed
+  auto take-instruction             Hand the staged reconciliation instruction to
+                                    the owning session (one-shot), else exit 1
 
   These commands never read or write task state. Checkpoint mutation stays
   exclusive to the verbs above (start/done/attempt/block/decide/next).
@@ -417,7 +419,8 @@ async function main(): Promise<void> {
     const autoIsMutating = command === 'auto'
       && (autoSubcommand === 'mark-dirty'
         || autoSubcommand === 'check'
-        || autoSubcommand === 'reconciled');
+        || autoSubcommand === 'reconciled'
+        || autoSubcommand === 'take-instruction');
 
     // The revision check and the command's mutation both run inside
     // runCommand(), so when the whole thing runs under withStoreLock() the
@@ -769,6 +772,41 @@ async function main(): Promise<void> {
             }
             break;
           }
+          case 'take-instruction': {
+            // The OpenCode adapter stages a reconciliation instruction to a
+            // project-wide file and collects it on the next chat call. That
+            // read-and-delete has to be atomic with the ownership check, or a
+            // session taken over (or released) in between could consume the
+            // instruction the current owner was staged for, leaving the owner
+            // with nothing. Running it here, under the store lock the other
+            // auto verbs also take, makes the pair indivisible — and keeps the
+            // ownership rule in one place rather than in each adapter.
+            if (!sessionId || !isAttachedSession(sessionId, projectRoot)) {
+              console.log('no-instruction: detached');
+              process.exit(1);
+            }
+            // An instruction staged before the store was archived or completed
+            // is no longer actionable: the agent would be told to reconcile a
+            // checkpoint the resume projection no longer even shows it. Leave
+            // the file in place rather than delivering a dead request.
+            const current = readState(projectRoot);
+            if (!current) {
+              console.log('no-instruction: no-state');
+              process.exit(1);
+            }
+            const activeStatus = getActiveTopic(current).status;
+            if (activeStatus === 'archived' || activeStatus === 'completed') {
+              console.log(`no-instruction: ${activeStatus}-state`);
+              process.exit(1);
+            }
+            const staged = takePendingInstruction(projectRoot);
+            if (staged === null || staged.length === 0) {
+              console.log('no-instruction: none-staged');
+              process.exit(1);
+            }
+            console.log(staged);
+            break;
+          }
           case 'reconciled': {
             // Closes the loop for an adapter that reconciled explicitly.
             // Optional: staleness is derived from state.updated_at, so an
@@ -802,7 +840,7 @@ async function main(): Promise<void> {
             break;
           }
           default: {
-            console.error('Usage: task-store auto <status|mark-dirty|check|reconciled>');
+            console.error('Usage: task-store auto <status|mark-dirty|check|reconciled|take-instruction>');
             process.exit(1);
           }
         }
