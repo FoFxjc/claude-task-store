@@ -8,6 +8,10 @@ dist/
 .claude-task/history.jsonl
 # .lock is a transient O_EXCL write lock; a crashed process can leave one behind
 .claude-task/.lock
+# attachment.json is the ephemeral session-attachment record (issue #23):
+# which session owns the auto-checkpoint flow. Machine-local, so it is never
+# meaningful to a different checkout.
+.claude-task/attachment.json
 # .pending-reconcile-instruction.txt is staged by the OpenCode plugin at a
 # session.idle boundary and consumed by the next chat call — purely transient
 .claude-task/.pending-reconcile-instruction.txt

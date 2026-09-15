@@ -18,7 +18,7 @@
 //   this file imports      ./task-store/injection.ts
 //
 // So the specifier resolves to a path that exists on disk verbatim, with no
-// reliance on a runtime rewriting `.js` to `.ts`. OpenCode 1.18.25 runs
+// reliance on a runtime rewriting `.js` to a sibling `.ts`. OpenCode 1.18.25 runs
 // plugins under Bun, and Bun does happen to remap a missing `.js` to a
 // sibling `.ts` — but that is an implementation detail of one runtime, not a
 // contract, and it makes the installed tree self-inconsistent (an import of
@@ -54,9 +54,11 @@
 //       Fires on every chat call. Merges into the existing system prompt:
 //         (a) the canonical `task-store resume` projection (always, when
 //             state exists and is not archived)
-//         (b) any pending reconciliation instruction staged by the
+//         (b) the session-attachment prompt (when this session is not the
+//             recorded owner of auto-checkpoint; see src/attachment.ts)
+//         (c) any pending reconciliation instruction staged by the
 //             boundary hook, consumed in one shot
-//       Both are appended to `output.system[0]` — never pushed as extra
+//       All three are appended to `output.system[0]` — never pushed as extra
 //       array elements, because OpenCode turns each element into its own
 //       `role: "system"` message for OpenAI-compatible providers and
 //       LiteLLM requires system messages to come first.
@@ -89,11 +91,16 @@
 //   - Reconciliation instruction text comes verbatim from the CLI core
 //     (src/autocheckpoint.ts:RECONCILE_INSTRUCTION); the plugin never
 //     paraphrases it.
+//   - The CLI's dirty/reconcile gates are additionally filtered on
+//     session-attachment ownership (src/attachment.ts); a fresh session in a
+//     project with active task-store state neither dirties the runtime nor
+//     receives a reconciliation instruction until the user explicitly opts
+//     in via `task-store attach --yes` (or `--takeover --confirm`).
 //
 // Ownership marker:
 //   The leading comment line is an exact-match identifier that install.sh
 //   writes and uninstall.sh greps for. Editing it silently disables
-//   uninstall, which is the same safety pattern the runtime package uses.
+// uninstall, which is the same safety pattern the runtime package uses.
 //
 // CLAUDE-TASK-STORE-OPENCODE-PLUGIN-V1
 // do not edit: ownership marker read by install.sh / uninstall.sh
@@ -135,16 +142,32 @@ interface ToolExecuteAfterInput {
 }
 
 const TaskStoreOpenCodePlugin = async ({ worktree }: PluginInput) => {
+  // The OpenCode session id is needed by the CLI's intent-boundary gate
+  // (src/attachment.ts). It is supplied on tool.execute.after and on
+  // session.idle events, but NOT on every chat call — the system-transform
+  // hook fires on every chat call and is the natural place to surface the
+  // attach prompt. We capture the id the first time we see it and reuse it
+  // for the lifetime of this plugin (one OpenCode session). When it is
+  // still empty, every CLI call no-ops silently, which is the correct
+  // failure mode for a session that has not yet produced any tool events.
+  let sessionID = "";
+
   return {
     // ── Dirty signal ──────────────────────────────────────────────────────
     // No-op for read-only tool names; otherwise delegate to the
     // provider-neutral core. Never inspects tool arguments, never calls a
     // task-store mutation verb.
+    //
+    // The OpenCode session id is required by the CLI's intent-boundary
+    // gate (src/attachment.ts). When it is missing the CLI no-ops the
+    // call silently, which is the correct failure mode for a session that
+    // has not yet opted in.
     "tool.execute.after": async (
       input: ToolExecuteAfterInput,
       _output: unknown,
     ): Promise<void> => {
       try {
+        if (!sessionID) sessionID = input.sessionID;
         // We deliberately do NOT self-exclude on tool-name substring the
         // way the Claude Code shell hook does: the Claude Code hook sees
         // a serialized Bash command string on stdin, and the cheap check
@@ -154,7 +177,7 @@ const TaskStoreOpenCodePlugin = async ({ worktree }: PluginInput) => {
         // still a real repository mutation (it ran a process). The CLI
         // self-exclusion inside the auto-checkpoint core handles the
         // semantic case.
-        markDirtyOnTool(worktree, input.tool);
+        markDirtyOnTool(worktree, input.tool, sessionID);
       } catch {
         // Never let an injection failure break a session.
       }
@@ -168,8 +191,10 @@ const TaskStoreOpenCodePlugin = async ({ worktree }: PluginInput) => {
     // `experimental.chat.system.transform` deliver it.
     event: async ({ event }: EventInput): Promise<void> => {
       try {
+        const sid = (event.properties?.sessionID as string | undefined) ?? sessionID;
+        if (sid) sessionID = sid;
         if (event.type !== "session.idle") return;
-        const decision = checkReconcileBoundary(worktree);
+        const decision = checkReconcileBoundary(worktree, sessionID);
         if (decision.reconcile && decision.instruction !== null) {
           writePendingReconciliation(worktree, decision.instruction);
         }
@@ -179,21 +204,22 @@ const TaskStoreOpenCodePlugin = async ({ worktree }: PluginInput) => {
     },
 
     // ── System prompt injection ──────────────────────────────────────────
-    // Delivers two pieces of content, in this order:
+    // Delivers three pieces of content, in this order:
     //   (1) the canonical resume projection, when state exists
-    //   (2) any pending reconciliation instruction staged by the boundary
-    // Both are merged into the FIRST element of `output.system` rather than
-    // pushed as new elements: OpenCode maps each entry of `output.system` to
-    // its own `role: "system"` message for OpenAI-compatible providers, and
-    // LiteLLM rejects a system message that is not the first message. See
-    // applySystemInjection() for the full rationale. The instruction is
-    // consumed exactly once.
+    //   (2) the attach prompt, when this session is not the recorded owner
+    //   (3) any pending reconciliation instruction staged by the boundary
+    // All three are merged into the FIRST element of `output.system`
+    // rather than pushed as new elements: OpenCode maps each entry of
+    // `output.system` to its own `role: "system"` message for OpenAI-
+    // compatible providers, and LiteLLM rejects a system message that is
+    // not the first message. See applySystemInjection() for the full
+    // rationale. The instruction is consumed exactly once.
     "experimental.chat.system.transform": async (
       _input: unknown,
       output: SystemTransformOutput,
     ): Promise<void> => {
       try {
-        applySystemInjection(worktree, output.system);
+        applySystemInjection(worktree, output.system, sessionID);
       } catch {
         // Never let an injection failure break a session.
       }

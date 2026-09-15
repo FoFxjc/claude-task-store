@@ -56,14 +56,21 @@ ts() { node "$CLI" "$@" --root "$PROJ"; }
 # Hook invocations get CLAUDE_PROJECT_DIR exactly as Claude Code provides it.
 export CLAUDE_PROJECT_DIR="$PROJ"
 
-edit_event='{"tool_name":"Edit","tool_input":{"file_path":"src/a.ts"},"tool_response":{"success":true}}'
-bash_event='{"tool_name":"Bash","tool_input":{"command":"npm test"},"tool_response":{"stdout":"12 passing"}}'
-selfref_event='{"tool_name":"Bash","tool_input":{"command":"task-store done T2 -e src/a.ts"}}'
+edit_event='{"session_id":"test-session","tool_name":"Edit","tool_input":{"file_path":"src/a.ts"},"tool_response":{"success":true}}'
+bash_event='{"session_id":"test-session","tool_name":"Bash","tool_input":{"command":"npm test"},"tool_response":{"stdout":"12 passing"}}'
+selfref_event='{"session_id":"test-session","tool_name":"Bash","tool_input":{"command":"task-store done T2 -e src/a.ts"}}'
 
 post_tool() { printf '%s' "$1" | bash "$HOOKS/post-tool-use.sh"; }
-stop_hook() { printf '{}' | bash "$HOOKS/stop.sh"; }
-precompact_hook() { printf '{"trigger":"auto"}' | bash "$HOOKS/pre-compact.sh"; }
-session_end_hook() { printf '{"reason":"exit"}' | bash "$HOOKS/session-end.sh" 2>&1 >/dev/null; }
+stop_hook() { printf '{"session_id":"test-session"}' | bash "$HOOKS/stop.sh"; }
+precompact_hook() { printf '{"session_id":"test-session","trigger":"auto"}' | bash "$HOOKS/pre-compact.sh"; }
+session_end_hook() { printf '{"session_id":"test-session","reason":"exit"}' | bash "$HOOKS/session-end.sh" 2>&1 >/dev/null; }
+
+# Mark `test-session` as the recorded owner of the auto-checkpoint flow.
+# Issue #23 turns the gate on: tool activity and reconciliation requests
+# are only honoured when the calling session has explicitly attached. This
+# mirrors what a real Claude Code session would do after the user accepts
+# the SessionStart prompt.
+node "$CLI" attach --session-id test-session --host claude-code --yes --root "$PROJ" >/dev/null
 
 # Read a scalar out of state.json without depending on jq.
 state_field() {
@@ -262,6 +269,15 @@ check "PreCompact with a clean store still writes its checkpoint marker" \
   "$(precompact_hook >/dev/null 2>&1; tail -1 "$PROJ/.claude-task/history.jsonl" | grep -q pre_compact_checkpoint && echo true)"
 check "SessionEnd with a clean store emits no staleness warning" \
   "$(session_end_hook | grep -q 'unreconciled' && echo false || echo true)"
+# Issue #23: a session that owns the attachment releases it on SessionEnd, so
+# the next session is not forced to confirm a takeover. Assert that here, then
+# re-attach — which is exactly what the next session's SessionStart prompt
+# would do after the user accepts.
+check "SessionEnd releases the owner's attachment (issue #23)" \
+  "$(node "$CLI" attach status --root "$PROJ" | grep -q '^attached: none$' && echo true)"
+node "$CLI" attach --session-id test-session --host claude-code --yes --root "$PROJ" >/dev/null
+check "re-attaching after SessionEnd restores ownership" \
+  "$(node "$CLI" attach status --root "$PROJ" | grep -q 'test-session' && echo true)"
 
 # Force a dirty store with an elapsed debounce window by rewinding the
 # last-request timestamp. This is the only way to exercise the post-debounce

@@ -14,6 +14,18 @@ if [[ ! -f "$STATE_FILE" ]]; then
 fi
 
 INPUT=$(cat)
+# Extract the Claude Code session id so we can release the attachment if
+# this session was the recorded owner. Mirrors the other hooks: a missing
+# id is a no-op, never a failure, because a checkpoint aid must never
+# break a coding session.
+SESSION_ID=$(printf '%s' "$INPUT" | python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    sys.exit(0)
+print(data.get("session_id", "") or "")
+' 2>/dev/null || echo "")
 export PROJECT_DIR
 
 python3 - <<'PYEOF'
@@ -95,6 +107,27 @@ if printf '%s' "$AUTO_STATUS" | grep -q '^stale: true'; then
     "   so .claude-task/state.json may not reflect reality." \
     "   Reconcile with: task-store status, then start|done|attempt|block|decide|next" \
     >&2
+fi
+
+# ─── Release the session-attachment record (issue #23) ────────────────────────
+# A session that explicitly opted into the task-store execution should not
+# leave its claim dangling when it ends normally — the next session would
+# otherwise be forced to confirm a takeover to attach. So we ask the CLI
+# to release the record if (and only if) this session was the owner; the
+# CLI no-ops when the record belongs to a different session or does not
+# exist. Output is silenced: SessionEnd has no model channel, so the user
+# would just see noise on stderr for a routine housekeeping action.
+#
+# The gate is the mode the CLI actually reported, NOT the loose substring
+# grep above: that grep is a cheap bash fast-path which deliberately matches
+# an unrelated key whose value merely contains "conservative" (see the
+# config-note case this suite exercises). Releasing on that match would touch
+# the attachment in a project whose auto-checkpoint is off, breaking the
+# "off costs nothing" invariant.
+if [[ "$AUTO_STATUS" == *"mode: conservative"* ]] \
+   && [[ -n "$SESSION_ID" ]] \
+   && [[ ${#TASK_STORE_CMD[@]} -gt 0 ]]; then
+  "${TASK_STORE_CMD[@]}" attach --release --session-id "$SESSION_ID" --host claude-code --root "$PROJECT_DIR" >/dev/null 2>&1 || true
 fi
 
 exit 0

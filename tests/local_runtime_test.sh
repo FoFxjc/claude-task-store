@@ -132,10 +132,21 @@ echo "  resume projection: $CTX_CHARS chars (~$((CTX_CHARS / 4)) tokens)"
 check "resume projection under the <400-token design budget" \
   "$( [[ $CTX_CHARS -lt 1600 ]] && echo true || echo false )"
 
-# ─── Hook output must match `task-store resume` exactly ─────────────────────
+# ─── Hook output must be the canonical projection verbatim ──────────────────
+# Issue #23 adds ONE documented suffix to the hook's injection: the
+# session-attachment prompt, emitted because this fresh session has not
+# attached to the store yet. Everything the hook emits must still be the
+# canonical `task-store resume` output, byte-for-byte, with only that suffix
+# appended — the adapter must never re-render or reword the projection.
 DIRECT=$("${TS[@]}" resume --root "$PROJ" 2>/dev/null || echo "")
-check "hook output matches canonical \`task-store resume\` output" \
-  "$( [[ "$CTX" == "$DIRECT" ]] && echo true || echo false )"
+check "hook output starts with canonical \`task-store resume\` output, byte-for-byte" \
+  "$( [[ "$CTX" == "$DIRECT"* ]] && echo true || echo false )"
+SUFFIX="${CTX#"$DIRECT"}"
+check "the only appended content is the session-attachment prompt" \
+  "$( [[ "$SUFFIX" == *"This project has active task-store work."* ]] \
+     && [[ "$SUFFIX" == *"--session-id x --host claude-code --yes"* ]] \
+     && [[ "$SUFFIX" != *"TASK STORE — RESUME CONTEXT"* ]] \
+     && echo true || echo false )"
 
 # ─── Independence from the source checkout ──────────────────────────────────
 # Simulate the user deleting or moving the clone: the installed runtime must

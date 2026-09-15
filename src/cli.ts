@@ -19,6 +19,14 @@ import {
   NEW_STORE_MODE,
   type AutoCheckpointMode,
 } from './autocheckpoint.js';
+import {
+  attach as attachSession,
+  release as releaseSession,
+  readAttachment,
+  AttachmentConflictError,
+  isKnownHost,
+  isAttached as isAttachedSession,
+} from './attachment.js';
 import { readFileSync, existsSync } from 'fs';
 
 const HELP = `
@@ -46,8 +54,6 @@ COMMANDS:
   archive                           Archive the current state
   repair                            Attempt to recover from corrupted state.json
   stale                             Detect tasks in_progress for >48h
-  token-estimate                    Estimate the token size of the resume context
-
 CONFIG:
   config                            Show project-local task-store configuration
   config auto-checkpoint            Show the current auto-checkpoint mode
@@ -56,17 +62,33 @@ CONFIG:
 AUTO-CHECKPOINT (adapter plumbing — used by hooks/plugins, rarely by hand):
   auto status                       Show dirty/freshness state and why
   auto mark-dirty [signal]          Record that repository state may have changed
+                                    (requires --session-id matching the attached session)
   auto check [--instruction]        Exit 0 if reconciliation is warranted, else 1
+                                    (requires --session-id matching the attached session)
   auto reconciled                   Record that reconciliation completed
 
   These commands never read or write task state. Checkpoint mutation stays
   exclusive to the verbs above (start/done/attempt/block/decide/next).
+
+SESSION ATTACHMENT (intent boundary, conservative auto-checkpoint only):
+  attach status                     Show the current attachment (or "none")
+  attach --session-id <id> --host <h> --yes
+                                    Attach this session (fails if another owns)
+  attach --session-id <id> --host <h> --takeover --confirm
+                                    Attach by taking over an existing owner
+  attach --session-id <id> --host <h> --release
+                                    Release the attachment if owned by this session
 
 FLAGS:
   --root <path>         Use a specific project root (default: auto-detect from cwd)
   --auto-checkpoint <mode>
                         Set the initial mode: ${NEW_STORE_MODE} (default) | off
   --by <agent>          Record who/what is writing (e.g. --by claude-code, --by codex)
+  --session-id <id>     Session identifier (used by auto/attach to gate on ownership)
+  --host <name>         Host identifier for attach: claude-code | opencode | manual
+  --yes                 Attach without --takeover (default when no current owner)
+  --takeover            Overwrite the existing attachment (requires --confirm)
+  --confirm             Confirm a --takeover (required for explicit takeover)
   --expect-rev <N>      Optimistic concurrency: fail if on-disk revision != N.
                          Enforced atomically via an O_EXCL lock file around the
                          read-compare-write cycle for this CLI invocation — see
@@ -76,7 +98,6 @@ FLAGS:
   --topic <name>        Topic scope for commit, status, and show.
   --help, -h            Show this help
 `;
-
 function parseArgs(argv: string[]): { command: string; args: string[]; flags: Record<string, string | boolean>; evidence: string[] } {
   const args: string[] = [];
   const flags: Record<string, string | boolean> = {};
@@ -126,6 +147,26 @@ function parseArgs(argv: string[]): { command: string; args: string[]; flags: Re
       }
       flags.topic = value;
     }
+    else if (a === '--session-id') {
+      const value = argv[++i];
+      if (value === undefined) {
+        console.error('Error: --session-id requires a value');
+        process.exit(1);
+      }
+      flags['session-id'] = value;
+    }
+    else if (a === '--host') {
+      const value = argv[++i];
+      if (value === undefined) {
+        console.error('Error: --host requires a value');
+        process.exit(1);
+      }
+      flags.host = value;
+    }
+    else if (a === '--yes') { flags.yes = true; }
+    else if (a === '--takeover') { flags.takeover = true; }
+    else if (a === '--confirm') { flags.confirm = true; }
+    else if (a === '--release') { flags.release = true; }
     else if (!command) { command = a; }
     else { args.push(a); }
   }
@@ -294,7 +335,6 @@ async function main(): Promise<void> {
       console.error('Error: --auto-checkpoint is only supported on `init`.');
       process.exit(1);
     }
-
     // --by is only meaningful on commands that write state. Passing it to a
     // read-only command was previously silently ignored, which is not
     // acceptable — reject it explicitly instead (see
@@ -314,6 +354,29 @@ async function main(): Promise<void> {
       process.exit(1);
     }
 
+    // Session-attachment flags are only meaningful on `attach` and `auto`.
+    // Reject them on every other command so an agent typing the wrong
+    // place gets a loud error rather than silently no-op'ing later.
+    const ATTACHMENT_FLAGS = ['session-id', 'host', 'yes', 'takeover', 'confirm', 'release'] as const;
+    if (command !== 'attach' && command !== 'auto') {
+      for (const f of ATTACHMENT_FLAGS) {
+        if (flags[f] !== undefined) {
+          console.error(`Error: --${f} is only supported on \`attach\` and \`auto\`.`);
+          process.exit(1);
+        }
+      }
+    }
+    // On `attach`, --takeover and --release are mutually exclusive: one
+    // writes the record, the other clears it. Forcing the caller to pick
+    // one prevents an accidental "do both, last one wins" silent failure.
+    if (command === 'attach' && flags.takeover && flags.release) {
+      console.error('Error: --takeover and --release are mutually exclusive on `attach`.');
+      process.exit(1);
+    }
+    if (command === 'attach' && flags.confirm && !flags.takeover) {
+      console.error('Error: --confirm is only meaningful with --takeover on `attach`.');
+      process.exit(1);
+    }
     // Every command that writes state performs a read-modify-write cycle, so
     // every one of them must hold the store lock for the whole cycle — not
     // just the `--expect-rev` ones. Locking only the `--expect-rev` path
@@ -322,11 +385,14 @@ async function main(): Promise<void> {
     // concurrent CLI invocations are serialized.
     //
     // This set is enumerated explicitly rather than derived as "not
-    // read-only" so that an unknown/misspelled command does not take the
-    // lock (and does not create .claude-task/) on its way to the usage error.
     const MUTATING_COMMANDS = new Set([
       'init', 'add', 'start', 'done', 'block', 'resume-task',
       'attempt', 'decide', 'next', 'archive', 'repair',
+      // 'attach' mutates the (gitignored) attachment record. It must run
+      // under the same store lock as task-state writers so a concurrent
+      // `auto check` from the same project cannot observe a half-written
+      // attachment record during a takeover.
+      'attach',
       // 'commit' is deliberately absent here: commitBatch() acquires the lock
       // internally, and wrapping runCommand() in yet another withStoreLock()
       // would cause a double-lock deadlock.
@@ -653,17 +719,20 @@ async function main(): Promise<void> {
       }
       case 'auto': {
         const sub = args[0];
+        const sessionId = flags['session-id'] !== undefined ? String(flags['session-id']) : undefined;
 
         switch (sub) {
           case 'mark-dirty': {
             // Hot path: called once per matched tool call by an adapter.
-            // No-ops silently when disabled or when no task store exists.
-            const runtime = markDirty(projectRoot, args[1]);
+            // No-ops silently when disabled, when no task store exists, or
+            // when the calling session is not the recorded owner — see
+            // attachment.ts for the intent boundary.
+            const runtime = markDirty(projectRoot, args[1], sessionId);
             if (runtime) console.log(`dirty since ${runtime.dirty_since} (${runtime.signal_count} signal(s))`);
             break;
           }
           case 'check': {
-            const decision = shouldReconcile(projectRoot);
+            const decision = shouldReconcile(projectRoot, new Date(), sessionId);
             if (!decision.reconcile) {
               console.log(`no-reconcile: ${decision.reason}`);
               process.exit(1);
@@ -680,15 +749,17 @@ async function main(): Promise<void> {
             }
             break;
           }
-          case 'reconciled': {
-            markReconciled(projectRoot);
-            console.log('✓ reconciliation recorded');
-            break;
-          }
           case 'status': {
             const cfg = readConfig(projectRoot);
             const runtime = readRuntime(projectRoot);
-            const decision = shouldReconcile(projectRoot);
+            // `auto status` (with or without --session-id) wants to see
+            // whether the checkpoint is stale, not just whether *their*
+            // session is the owner. The session gate is reported
+            // separately as `attached:`, and `would_reconcile` still
+            // respects it.
+            const fresh = freshness(projectRoot);
+            const decision = shouldReconcile(projectRoot, new Date(), sessionId);
+            const attached = sessionId ? isAttachedSession(sessionId, projectRoot) : false;
             console.log(`mode: ${cfg.auto_checkpoint}`);
             console.log(`debounce: ${debounceSeconds(projectRoot)}s (default ${DEFAULT_DEBOUNCE_SECONDS}s)`);
             console.log(`dirty_since: ${runtime.dirty_since ?? '(clean)'}`);
@@ -696,14 +767,73 @@ async function main(): Promise<void> {
             console.log(`signal_count: ${runtime.signal_count}`);
             console.log(`last_reconcile_request_at: ${runtime.last_reconcile_request_at ?? '(never)'}`);
             console.log(`last_reconcile_at: ${runtime.last_reconcile_at ?? '(never)'}`);
-            console.log(`stale: ${decision.freshness.stale}`);
-            console.log(`would_reconcile: ${decision.reconcile} (${decision.reason})`);
+            console.log(`attached: ${attached}`);
+            console.log(`stale: ${fresh.stale}`);
             break;
           }
-          default: {
+           default: {
             console.error('Usage: task-store auto <status|mark-dirty|check|reconciled>');
             process.exit(1);
           }
+        }
+        break;
+      }
+      case 'attach': {
+        // `task-store attach status` is the only subcommand that takes no
+        // --session-id or --host. Every other form requires both, and
+        // validates them up-front rather than relying on attachSession()
+        // to throw — the error class carries useful context but the CLI
+        // surface still wants clear human-facing messages.
+        const sub = args[0];
+        if (sub === 'status') {
+          const current = readAttachment(projectRoot);
+          if (!current) {
+            console.log('attached: none');
+          } else {
+            const known = isKnownHost(current.host);
+            const hostLabel = known ? current.host : `${current.host} (unrecognised)`;
+            console.log(`attached: session_id=${current.session_id} host=${hostLabel} attached_at=${current.attached_at}`);
+          }
+          break;
+        }
+
+        const sessionId = flags['session-id'] !== undefined ? String(flags['session-id']) : '';
+        const host = flags.host !== undefined ? String(flags.host) : '';
+        if (!sessionId) {
+          console.error('Error: --session-id is required for `attach`.');
+          process.exit(1);
+        }
+        if (!host) {
+          console.error('Error: --host is required for `attach`.');
+          process.exit(1);
+        }
+
+        if (flags.release) {
+          const result = releaseSession({ sessionId }, projectRoot);
+          if (result.outcome === 'released') {
+            console.log('✓ attachment released');
+          } else if (result.outcome === 'not-attached') {
+            console.log('(no attachment to release)');
+          } else {
+            console.error('Error: another session owns the attachment; this session cannot release it.');
+            process.exit(4);
+          }
+          break;
+        }
+
+        const result = attachSession({
+          sessionId,
+          host,
+          takeover: flags.takeover === true,
+          confirm: flags.confirm === true,
+        }, projectRoot);
+
+        if (result.outcome === 'attached') {
+          console.log(`✓ attached (session_id=${result.current.session_id}, host=${result.current.host})`);
+        } else if (result.outcome === 'refreshed') {
+          console.log(`✓ attached (refreshed; session_id=${result.current.session_id})`);
+        } else {
+          console.log(`✓ attached (took over from session_id=${result.previous?.session_id})`);
         }
         break;
       }
@@ -734,6 +864,10 @@ async function main(): Promise<void> {
     if (err instanceof LockError) {
       console.error(`Error: ${err.message}`);
       process.exit(3);
+    }
+    if (err instanceof AttachmentConflictError) {
+      console.error(`Error: ${err.message}`);
+      process.exit(4);
     }
     throw err;
   }

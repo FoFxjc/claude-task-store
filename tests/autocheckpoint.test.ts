@@ -17,6 +17,7 @@ import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 
 import { initState, readState, completeTask, setNextAction, getActiveTopic } from '../src/core.js';
+import { isAttached as _isAttached, attach, release } from '../src/attachment.js';
 import {
   readConfig,
   writeMode,
@@ -42,12 +43,24 @@ function makeTmpDir(): string {
   return dir;
 }
 
-/** A project with a task store and one in-progress task. */
-function seed(root: string): void {
+/** A project with a task store and one in-progress task, no attachment
+ *  yet. The session-attachment gate tests build on top of this and call
+ *  `attachTestSession()` themselves; the rest of the suite relies on
+ *  `seed()` calling it on their behalf so the existing test bodies
+ *  keep working without threading sessionId through every call. */
+function storeSeed(root: string): void {
   initState('Ship the parser', ['Write lexer', 'Write parser'], root);
   setNextAction('Implement expression parsing', root);
 }
 
+const TEST_SESSION_ID = 'test-session';
+function attachTestSession(root: string): void {
+  attach({ sessionId: TEST_SESSION_ID, host: 'claude-code' }, root);
+}
+function seed(root: string): void {
+  storeSeed(root);
+  attachTestSession(root);
+}
 function laterBy(seconds: number): Date {
   return new Date(Date.now() + seconds * 1000);
 }
@@ -117,14 +130,14 @@ describe('markDirty', () => {
   afterEach(() => { rmSync(root, { recursive: true, force: true }); });
 
   it('is a complete no-op while disabled', () => {
-    expect(markDirty(root, 'Edit')).toBeNull();
+    expect(markDirty(root, 'Edit', TEST_SESSION_ID)).toBeNull();
     expect(existsSync(runtimeFilePath(root))).toBe(false);
   });
 
   it('records signals once enabled', () => {
     writeMode('conservative', root);
-    markDirty(root, 'Edit');
-    markDirty(root, 'Bash');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    markDirty(root, 'Bash', TEST_SESSION_ID);
     const runtime = readRuntime(root);
     expect(runtime.signal_count).toBe(2);
     expect(runtime.dirty_since).not.toBeNull();
@@ -133,17 +146,17 @@ describe('markDirty', () => {
 
   it('keeps dirty_since anchored to the first signal of the window', async () => {
     writeMode('conservative', root);
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     const first = readRuntime(root).dirty_since;
     await new Promise(r => setTimeout(r, 5));
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     expect(readRuntime(root).dirty_since).toBe(first);
   });
 
   it('never mutates task state', () => {
     writeMode('conservative', root);
     const before = readState(root)!;
-    for (let i = 0; i < 10; i++) markDirty(root, 'Edit');
+    for (let i = 0; i < 10; i++) markDirty(root, 'Edit', TEST_SESSION_ID);
     const after = readState(root)!;
     expect(after.revision).toBe(before.revision);
     expect(getActiveTopic(after).tasks.map(t => t.status)).toEqual(getActiveTopic(before).tasks.map(t => t.status));
@@ -165,7 +178,7 @@ describe('markDirty', () => {
 
   it('does not persist tool names or arguments', () => {
     writeMode('conservative', root);
-    markDirty(root, 'Bash: curl https://secrets.example/token');
+    markDirty(root, 'Bash: curl https://secrets.example/token', TEST_SESSION_ID);
     const raw = readFileSync(runtimeFilePath(root), 'utf8');
     expect(raw).not.toContain('secrets.example');
     expect(raw).not.toContain('Bash');
@@ -173,12 +186,12 @@ describe('markDirty', () => {
 
   it('switching modes clears any stale dirty window', () => {
     writeMode('conservative', root);
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     expect(existsSync(runtimeFilePath(root))).toBe(true);
     writeMode('off', root);
     expect(existsSync(runtimeFilePath(root))).toBe(false);
     writeMode('conservative', root);
-    expect(shouldReconcile(root).reconcile).toBe(false);
+    expect(shouldReconcile(root, new Date(), TEST_SESSION_ID).reconcile).toBe(false);
   });
 });
 
@@ -193,7 +206,7 @@ describe('freshness', () => {
 
   it('reports stale after activity with no checkpoint write', async () => {
     await new Promise(r => setTimeout(r, 5));
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     const f = freshness(root);
     expect(f.stale).toBe(true);
     expect(f.signals).toBe(1);
@@ -201,7 +214,7 @@ describe('freshness', () => {
 
   it('clears when the agent writes through the normal CLI verbs', async () => {
     await new Promise(r => setTimeout(r, 5));
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     expect(freshness(root).stale).toBe(true);
     await new Promise(r => setTimeout(r, 5));
     // Any ordinary checkpoint write counts — no explicit "I reconciled" call.
@@ -211,7 +224,7 @@ describe('freshness', () => {
 
   it('does not require git', () => {
     expect(existsSync(join(root, '.git'))).toBe(false);
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     expect(() => freshness(root)).not.toThrow();
   });
 });
@@ -222,22 +235,22 @@ describe('shouldReconcile', () => {
   afterEach(() => { rmSync(root, { recursive: true, force: true }); });
 
   it('never fires while disabled, however much activity happens', () => {
-    for (let i = 0; i < 20; i++) markDirty(root, 'Edit');
-    const d = shouldReconcile(root);
+    for (let i = 0; i < 20; i++) markDirty(root, 'Edit', TEST_SESSION_ID);
+    const d = shouldReconcile(root, new Date(), TEST_SESSION_ID);
     expect(d.reconcile).toBe(false);
     expect(d.reason).toBe('disabled');
   });
 
   it('does not fire on a clean store', () => {
     writeMode('conservative', root);
-    expect(shouldReconcile(root).reason).toBe('clean');
+    expect(shouldReconcile(root, new Date(), TEST_SESSION_ID).reason).toBe('clean');
   });
 
   it('fires once when the store is dirty', async () => {
     writeMode('conservative', root);
     await new Promise(r => setTimeout(r, 5));
-    markDirty(root, 'Edit');
-    const d = shouldReconcile(root);
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    const d = shouldReconcile(root, new Date(), TEST_SESSION_ID);
     expect(d.reconcile).toBe(true);
     expect(d.reason).toBe('stale');
   });
@@ -245,10 +258,10 @@ describe('shouldReconcile', () => {
   it('does not fire again with no new work (gate 1)', async () => {
     writeMode('conservative', root);
     await new Promise(r => setTimeout(r, 5));
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     markReconcileRequested(root);
     // Even far past the debounce window, nothing new has happened.
-    const d = shouldReconcile(root, laterBy(86400));
+    const d = shouldReconcile(root, laterBy(86400), TEST_SESSION_ID);
     expect(d.reconcile).toBe(false);
     expect(d.reason).toBe('already-requested');
   });
@@ -256,14 +269,14 @@ describe('shouldReconcile', () => {
   it('does not fire again within the debounce window despite new work (gate 2)', async () => {
     writeMode('conservative', root);
     await new Promise(r => setTimeout(r, 5));
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     markReconcileRequested(root);
     // Strictly after the request: timestamps are millisecond-resolution and a
     // signal landing in the same millisecond as the request is deliberately
     // NOT counted as new work (ties resolve toward asking less often).
     await new Promise(r => setTimeout(r, 5));
-    markDirty(root, 'Edit');
-    const d = shouldReconcile(root, laterBy(DEFAULT_DEBOUNCE_SECONDS - 1));
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    const d = shouldReconcile(root, laterBy(DEFAULT_DEBOUNCE_SECONDS - 1), TEST_SESSION_ID);
     expect(d.reconcile).toBe(false);
     expect(d.reason).toBe('debounced');
   });
@@ -271,11 +284,11 @@ describe('shouldReconcile', () => {
   it('fires again once BOTH new work and the debounce window are satisfied', async () => {
     writeMode('conservative', root);
     await new Promise(r => setTimeout(r, 5));
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     markReconcileRequested(root);
     await new Promise(r => setTimeout(r, 5));
-    markDirty(root, 'Edit');
-    const d = shouldReconcile(root, laterBy(DEFAULT_DEBOUNCE_SECONDS + 1));
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    const d = shouldReconcile(root, laterBy(DEFAULT_DEBOUNCE_SECONDS + 1), TEST_SESSION_ID);
     expect(d.reconcile).toBe(true);
     expect(d.reason).toBe('stale');
   });
@@ -285,9 +298,9 @@ describe('shouldReconcile', () => {
     await new Promise(r => setTimeout(r, 5));
     let fired = 0;
     for (let i = 0; i < 50; i++) {
-      markDirty(root, 'Edit');
+      markDirty(root, 'Edit', TEST_SESSION_ID);
       // Simulate a boundary after every single tool call.
-      if (shouldReconcile(root).reconcile) {
+      if (shouldReconcile(root, new Date(), TEST_SESSION_ID).reconcile) {
         fired++;
         markReconcileRequested(root);
       }
@@ -310,7 +323,7 @@ describe('shouldReconcile', () => {
       last_reconcile_at: null,
     }));
     expect(freshness(root).stale).toBe(true);
-    expect(shouldReconcile(root, laterBy(86400)).reason).toBe('already-requested');
+    expect(shouldReconcile(root, laterBy(86400), TEST_SESSION_ID).reason).toBe('already-requested');
   });
 
   it('does not fire when the project has no task store', () => {
@@ -327,10 +340,10 @@ describe('shouldReconcile', () => {
   it('is pure: asking does not change the answer', async () => {
     writeMode('conservative', root);
     await new Promise(r => setTimeout(r, 5));
-    markDirty(root, 'Edit');
-    const a = shouldReconcile(root);
-    const b = shouldReconcile(root);
-    const c = shouldReconcile(root);
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    const a = shouldReconcile(root, new Date(), TEST_SESSION_ID);
+    const b = shouldReconcile(root, new Date(), TEST_SESSION_ID);
+    const c = shouldReconcile(root, new Date(), TEST_SESSION_ID);
     expect([a.reconcile, b.reconcile, c.reconcile]).toEqual([true, true, true]);
   });
 });
@@ -342,19 +355,19 @@ describe('markReconciled', () => {
 
   it('clears the dirty window and records the time', async () => {
     await new Promise(r => setTimeout(r, 5));
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     markReconciled(root);
     const runtime = readRuntime(root);
     expect(runtime.dirty_since).toBeNull();
     expect(runtime.signal_count).toBe(0);
     expect(runtime.last_reconcile_at).not.toBeNull();
-    expect(shouldReconcile(root).reason).toBe('clean');
+    expect(shouldReconcile(root, new Date(), TEST_SESSION_ID).reason).toBe('clean');
   });
 
   it('does not complete tasks or set next_action', async () => {
     await new Promise(r => setTimeout(r, 5));
     const before = readState(root)!;
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     markReconcileRequested(root);
     markReconciled(root);
     const after = readState(root)!;
@@ -415,13 +428,13 @@ describe('no automatic completion inference', () => {
   afterEach(() => { rmSync(root, { recursive: true, force: true }); });
 
   it('a passing test signal never completes a task', () => {
-    markDirty(root, 'Bash');   // e.g. `npm test` exiting 0
-    markDirty(root, 'Bash');
+    markDirty(root, 'Bash', TEST_SESSION_ID);   // e.g. `npm test` exiting 0
+    markDirty(root, 'Bash', TEST_SESSION_ID);
     expect(getActiveTopic(readState(root)!).tasks.every(t => t.status !== 'done')).toBe(true);
   });
 
   it('completion still requires explicit evidence through the CLI', () => {
-    markDirty(root, 'Edit');
+    markDirty(root, 'Edit', TEST_SESSION_ID);
     expect(() => completeTask('T1', [], undefined, root)).toThrow(/Evidence is required/);
     completeTask('T1', ['src/lexer.ts'], undefined, root);
     expect(getActiveTopic(readState(root)!).tasks.find(t => t.id === 'T1')!.status).toBe('done');
@@ -435,5 +448,122 @@ describe('no automatic completion inference', () => {
         freshness, readConfig, writeMode, isEnabled, readRuntime },
     );
     expect(api.some(n => /task|done|complete|start|block/i.test(n))).toBe(false);
+  });
+});
+
+describe('session-attachment gate (issue #23)', () => {
+  // Auto-checkpoint is intentionally session-intent-scoped: a side session
+  // in a project with active task-store state must NOT dirty the runtime
+  // and must NOT receive reconciliation instructions, regardless of how
+  // much it edits. The gate lives in markDirty / shouldReconcile, here.
+  let root: string;
+  beforeEach(() => { root = makeTmpDir(); storeSeed(root); writeMode('conservative', root); });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  it('markDirty is a complete no-op when no session_id is supplied', () => {
+    expect(markDirty(root, 'Edit', TEST_SESSION_ID)).toBeNull();
+    expect(existsSync(runtimeFilePath(root))).toBe(false);
+  });
+
+  it('markDirty is a no-op when the session_id does not own the store', () => {
+    attach({ sessionId: 'owner', host: 'claude-code' }, root);
+    expect(markDirty(root, 'Edit', 'side')).toBeNull();
+    expect(existsSync(runtimeFilePath(root))).toBe(false);
+  });
+
+  it('markDirty proceeds only when the session_id matches the owner', () => {
+    attach({ sessionId: 'owner', host: 'claude-code' }, root);
+    const runtime = markDirty(root, 'Edit', 'owner');
+    expect(runtime).not.toBeNull();
+    expect(runtime!.signal_count).toBe(1);
+  });
+
+  it('markDirty is no-op for a side session even after work happened elsewhere', () => {
+    attach({ sessionId: 'owner', host: 'claude-code' }, root);
+    markDirty(root, 'Edit', 'owner');
+    expect(readRuntime(root).signal_count).toBe(1);
+    // A side session that runs after the owner dirties the store must NOT
+    // add to the counter — its work belongs to its own detached context.
+    markDirty(root, 'Edit', 'side');
+    expect(readRuntime(root).signal_count).toBe(1);
+  });
+
+  it('shouldReconcile returns detached when no session_id is supplied', () => {
+    attach({ sessionId: 'owner', host: 'claude-code' }, root);
+    markDirty(root, 'Edit', 'owner');
+    const decision = shouldReconcile(root, new Date(), TEST_SESSION_ID);
+    expect(decision.reconcile).toBe(false);
+    expect(decision.reason).toBe('detached');
+  });
+
+  it('shouldReconcile returns detached when the session is not the owner', () => {
+    attach({ sessionId: 'owner', host: 'claude-code' }, root);
+    markDirty(root, 'Edit', 'owner');
+    const decision = shouldReconcile(root, new Date(), 'side');
+    expect(decision.reconcile).toBe(false);
+    expect(decision.reason).toBe('detached');
+  });
+
+  it('shouldReconcile proceeds normally for the owning session (issue #23 acceptance)', async () => {
+    attach({ sessionId: 'owner', host: 'claude-code' }, root);
+    // Allow the state.updated_at (set during storeSeed) and the runtime
+    // last_signal_at (set during markDirty) to differ by at least one tick,
+    // otherwise freshness reports the store as up-to-date. Mirrors the
+    // pattern used elsewhere in this file.
+    await new Promise((r) => setTimeout(r, 5));
+    markDirty(root, 'Edit', 'owner');
+    const decision = shouldReconcile(root, new Date(), 'owner');
+    expect(decision.reconcile).toBe(true);
+    expect(decision.reason).toBe('stale');
+  });
+
+  it('a takeover transfers the gate to the new session (issue #23 acceptance)', async () => {
+    attach({ sessionId: 'owner', host: 'claude-code' }, root);
+    await new Promise((r) => setTimeout(r, 5));
+    markDirty(root, 'Edit', 'owner');
+    // Confirm a takeover from the old owner to a new one.
+    attach({ sessionId: 'new', host: 'claude-code', takeover: true, confirm: true }, root);
+    // New session can now dirty + reconcile; old session cannot.
+    expect(shouldReconcile(root, new Date(), 'new').reason).toBe('stale');
+    expect(shouldReconcile(root, new Date(), 'owner').reason).toBe('detached');
+  });
+
+  it('releasing an attachment gates subsequent calls as detached', async () => {
+    attach({ sessionId: 'owner', host: 'claude-code' }, root);
+    await new Promise((r) => setTimeout(r, 5));
+    markDirty(root, 'Edit', 'owner');
+    expect(shouldReconcile(root, new Date(), 'owner').reconcile).toBe(true);
+    // Owner releases its claim (e.g. session-end.sh fired).
+    const r = release({ sessionId: 'owner' }, root);
+    expect(r.outcome).toBe('released');
+    // The owner can no longer dirty or reconcile — it has detached itself.
+    expect(markDirty(root, 'Edit', 'owner')).toBeNull();
+    expect(shouldReconcile(root, new Date(), 'owner').reason).toBe('detached');
+  });
+
+  it('declining to attach leaves the session detached for its lifetime', () => {
+    // The "decline" path doesn't write anything — the session simply does
+    // not run `task-store attach --yes`. The gate then stays detached for
+    // the lifetime of that session_id. Re-attaching later is fine; we
+    // verify the gate does not silently auto-attach.
+    expect(markDirty(root, 'Edit', 'side')).toBeNull();
+    expect(shouldReconcile(root, new Date(), 'side').reason).toBe('detached');
+    // The session can still opt in later.
+    attach({ sessionId: 'side', host: 'claude-code' }, root);
+    expect(markDirty(root, 'Edit', 'side')).not.toBeNull();
+  });
+
+  it('markDirty with a different session_id than the one in the runtime does not corrupt state', () => {
+    // Regression guard: the runtime is shared across the project, but only
+    // the owner's signals are recorded. A side session running markDirty
+    // must not silently overwrite the owner's signal_count downward.
+    attach({ sessionId: 'owner', host: 'claude-code' }, root);
+    markDirty(root, 'Edit', 'owner');
+    markDirty(root, 'Edit', 'owner');
+    markDirty(root, 'Edit', 'owner');
+    expect(readRuntime(root).signal_count).toBe(3);
+    markDirty(root, 'Edit', 'side');
+    markDirty(root, 'Edit', 'side');
+    expect(readRuntime(root).signal_count).toBe(3);
   });
 });

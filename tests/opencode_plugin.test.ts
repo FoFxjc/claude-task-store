@@ -440,35 +440,35 @@ describe('markDirtyOnTool', () => {
   });
 
   it('returns without invoking the CLI when worktree is empty', () => {
-    markDirtyOnTool('', 'bash');
+    markDirtyOnTool('', 'bash', '');
     expect(calls).toEqual([]);
   });
 
   it('returns without invoking the CLI when the tool is read-only', () => {
     writeCli(root);
-    markDirtyOnTool(root, 'read');
-    markDirtyOnTool(root, 'glob');
-    markDirtyOnTool(root, 'grep');
+    markDirtyOnTool(root, 'read', 'sess-1');
+    markDirtyOnTool(root, 'glob', 'sess-1');
+    markDirtyOnTool(root, 'grep', 'sess-1');
     expect(calls).toEqual([]);
   });
 
   it('returns without invoking the CLI when the project-local CLI is missing', () => {
     // No writeCli(root) — partial install. Plugin must fail safe.
-    expect(() => markDirtyOnTool(root, 'bash')).not.toThrow();
+    expect(() => markDirtyOnTool(root, 'bash', 'sess-1')).not.toThrow();
     expect(calls).toEqual([]);
   });
 
   it('invokes `task-store auto mark-dirty <tool> --root <worktree>` for mutating tools', () => {
     writeCli(root);
     const cli = join(root, '.claude', 'task-store', 'bin', 'task-store.js');
-    markDirtyOnTool(root, 'bash');
+    markDirtyOnTool(root, 'bash', 'sess-1');
     expect(calls).toEqual([{ cli, worktree: root, signal: 'bash' }]);
   });
 
   it('passes the tool name as the signal label (CLI ignores it for storage)', () => {
     writeCli(root);
-    markDirtyOnTool(root, 'edit');
-    markDirtyOnTool(root, 'write');
+    markDirtyOnTool(root, 'edit', 'sess-1');
+    markDirtyOnTool(root, 'write', 'sess-1');
     expect(calls.map((c) => c.signal)).toEqual(['edit', 'write']);
   });
 
@@ -477,7 +477,7 @@ describe('markDirtyOnTool', () => {
     writeState(root, 'active', {
       tasks: [{ id: 'T1', title: 'Task A', status: 'pending', evidence: [], attempts: [] }],
     });
-    markDirtyOnTool(root, 'bash');
+    markDirtyOnTool(root, 'bash', 'sess-1');
     const state = JSON.parse(readFileSync(join(root, '.claude-task', 'state.json'), 'utf8'));
     expect(state.tasks[0].status).toBe('pending');
     expect(state.revision).toBe(1);
@@ -509,13 +509,13 @@ describe('checkReconcileBoundary', () => {
   });
 
   it('returns not-reconcile when worktree is empty', () => {
-    const decision = checkReconcileBoundary('');
+    const decision = checkReconcileBoundary('', 'sess-1');
     expect(decision).toEqual({ reconcile: false, instruction: null });
     expect(calls).toEqual([]);
   });
 
   it('returns not-reconcile when the project-local CLI is missing', () => {
-    const decision = checkReconcileBoundary(root);
+    const decision = checkReconcileBoundary(root, 'sess-1');
     expect(decision).toEqual({ reconcile: false, instruction: null });
     expect(calls).toEqual([]);
   });
@@ -523,7 +523,7 @@ describe('checkReconcileBoundary', () => {
   it('invokes `task-store auto check --instruction --root <worktree>` when CLI exists', () => {
     writeCli(root);
     const cli = join(root, '.claude', 'task-store', 'bin', 'task-store.js');
-    checkReconcileBoundary(root);
+    checkReconcileBoundary(root, 'sess-1');
     expect(calls).toEqual([{ cli, worktree: root }]);
   });
 
@@ -531,7 +531,7 @@ describe('checkReconcileBoundary', () => {
     writeCli(root);
     defaultStatus = 1;
     defaultStdout = 'no-reconcile: clean';
-    const decision = checkReconcileBoundary(root);
+    const decision = checkReconcileBoundary(root, 'sess-1');
     expect(decision.reconcile).toBe(false);
     expect(decision.instruction).toBeNull();
   });
@@ -540,7 +540,7 @@ describe('checkReconcileBoundary', () => {
     writeCli(root);
     defaultStatus = 0;
     defaultStdout = '[task-store] The checkpoint may be stale ...';
-    const decision = checkReconcileBoundary(root);
+    const decision = checkReconcileBoundary(root, 'sess-1');
     expect(decision.reconcile).toBe(true);
     expect(decision.instruction).toBe(defaultStdout);
   });
@@ -674,7 +674,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeState(root, 'active');
     writeCli(root);
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system);
+    applySystemInjection(root, system, "");
     expect(system).toHaveLength(1);
     expect(system[0]).toContain('MOCK RESUME');
   });
@@ -684,7 +684,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system);
+    applySystemInjection(root, system, "");
     expect(system).toHaveLength(1);
     expect(system[0]).toContain('MOCK RESUME');
     expect(system[0]).toContain('RECONCILE INSTRUCTION');
@@ -698,7 +698,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     // multi-byte character must all survive untouched.
     const existing = 'You are OpenCode.\n\n  Rules:\n   - be terse  \n☑ done';
     const system = [existing];
-    applySystemInjection(root, system);
+    applySystemInjection(root, system, "");
     expect(system[0].startsWith(existing)).toBe(true);
   });
 
@@ -707,7 +707,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system);
+    applySystemInjection(root, system, "");
     const merged = system[0];
     const existingAt = merged.indexOf('OPENCODE SYSTEM PROMPT');
     const resumeAt = merged.indexOf('MOCK RESUME');
@@ -722,7 +722,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['EXISTING'];
-    applySystemInjection(root, system);
+    applySystemInjection(root, system, "");
     expect(system[0]).toBe(
       `EXISTING${SYSTEM_INJECTION_SEPARATOR}MOCK RESUME\n${SYSTEM_INJECTION_SEPARATOR}RECONCILE INSTRUCTION`,
     );
@@ -732,14 +732,14 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeState(root, 'active');
     writeCli(root);
     const system: string[] = [];
-    applySystemInjection(root, system);
+    applySystemInjection(root, system, "");
     expect(system).toHaveLength(1);
     expect(system[0]).toBe('MOCK RESUME\n');
   });
 
   it('leaves the system array unchanged when there is no state and no pending', () => {
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system);
+    applySystemInjection(root, system, "");
     expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
   });
 
@@ -747,14 +747,14 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeState(root, 'archived');
     writeCli(root);
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system);
+    applySystemInjection(root, system, "");
     expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
   });
 
   it('leaves the system array unchanged when the project-local CLI is missing', () => {
     writeState(root, 'active');
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system);
+    applySystemInjection(root, system, "");
     expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
   });
 
@@ -763,7 +763,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     // model, and still without adding a system block.
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system);
+    applySystemInjection(root, system, "");
     expect(system).toHaveLength(1);
     expect(system[0]).toBe(
       `OPENCODE SYSTEM PROMPT${SYSTEM_INJECTION_SEPARATOR}RECONCILE INSTRUCTION`,
@@ -776,11 +776,11 @@ describe('applySystemInjection (single system block invariant)', () => {
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
 
     const first = ['SYS'];
-    applySystemInjection(root, first);
+    applySystemInjection(root, first, "");
     expect(first[0]).toContain('RECONCILE INSTRUCTION');
 
     const second = ['SYS'];
-    applySystemInjection(root, second);
+    applySystemInjection(root, second, "");
     expect(second[0]).not.toContain('RECONCILE INSTRUCTION');
     expect(second).toHaveLength(1);
     // The pending file is gone after the first consume.
@@ -811,7 +811,7 @@ describe('applySystemInjection (single system block invariant)', () => {
         if (c.pending) writePendingReconciliation(caseRoot, 'RECONCILE INSTRUCTION');
         const system = ['OPENCODE SYSTEM PROMPT'];
         const before = system.length;
-        applySystemInjection(caseRoot, system);
+        applySystemInjection(caseRoot, system, '');
         expect(system.length).toBe(before);
       } finally {
         rmSync(caseRoot, { recursive: true, force: true });
@@ -825,7 +825,160 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeState(root, 'active');
     writeCli(root);
     expect(() =>
-      applySystemInjection(root, undefined as unknown as string[]),
+      applySystemInjection(root, undefined as unknown as string[], ''),
     ).not.toThrow();
+  });
+});
+
+// ─── Issue #23: session-attachment plumbing ─────────────────────────────────
+//
+// The OpenCode adapter must thread a session id through every CLI call
+// (mark-dirty, check, attach-status) so the provider-neutral gate in
+// src/attachment.ts can decide whether this session owns the auto-checkpoint
+// flow. A missing/empty session id must NOT block the call — it is a
+// silent no-op in the CLI — but the adapter still records it as missing
+// in the test seam below.
+
+describe('markDirtyOnTool — session id plumbing', () => {
+  let root: string;
+  let calls: { cli: string; worktree: string; signal: string; sessionId: string }[];
+  beforeEach(() => {
+    root = makeTmpDir('dirty-sid');
+    calls = [];
+    _resetCacheForTests();
+    _setRunCliForTests({
+      markDirty: (cli, worktree, signal, sessionId) => {
+        calls.push({ cli, worktree, signal, sessionId });
+        return { status: 0, stdout: '', stderr: '' };
+      },
+    });
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('does not invoke the CLI when sessionId is empty (the CLI would gate it anyway)', () => {
+    writeCli(root);
+    markDirtyOnTool(root, 'bash', '');
+    expect(calls).toEqual([]);
+  });
+
+  it('forwards the sessionId to the CLI', () => {
+    writeCli(root);
+    markDirtyOnTool(root, 'bash', 'sess-1');
+    expect(calls).toEqual([
+      expect.objectContaining({ sessionId: 'sess-1', signal: 'bash' }),
+    ]);
+  });
+});
+
+describe('checkReconcileBoundary — session id plumbing', () => {
+  let root: string;
+  let calls: { cli: string; worktree: string; sessionId: string }[];
+  beforeEach(() => {
+    root = makeTmpDir('reconcile-sid');
+    calls = [];
+    _resetCacheForTests();
+    _setRunCliForTests({
+      checkReconcile: (cli, worktree, sessionId) => {
+        calls.push({ cli, worktree, sessionId });
+        return { status: 1, stdout: '', stderr: '' };
+      },
+    });
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('does not invoke the CLI when sessionId is empty', () => {
+    writeCli(root);
+    const decision = checkReconcileBoundary(root, '');
+    expect(decision).toEqual({ reconcile: false, instruction: null });
+    expect(calls).toEqual([]);
+  });
+
+  it('forwards the sessionId to the CLI', () => {
+    writeCli(root);
+    checkReconcileBoundary(root, 'sess-1');
+    expect(calls).toEqual([
+      expect.objectContaining({ sessionId: 'sess-1' }),
+    ]);
+  });
+});
+
+describe('applySystemInjection — attach prompt (issue #23)', () => {
+  let root: string;
+  let attachStdout: string;
+  beforeEach(() => {
+    root = makeTmpDir('attach-prompt');
+    attachStdout = '';
+    _resetCacheForTests();
+    _setRunResumeCliForTests((): CliRunResult => ({ status: 0, stdout: 'MOCK RESUME\n', stderr: '' }));
+    _setRunCliForTests({
+      attachStatus: () => ({ status: 0, stdout: attachStdout, stderr: '' }),
+    });
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    _setRunResumeCliForTests(() => { throw new Error('default runner should not be invoked in tests'); });
+    _setRunCliForTests({});
+  });
+
+  it('emits a first-time attach prompt when no owner exists', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    attachStdout = 'attached: none';
+    const system = ['OPENCODE'];
+    applySystemInjection(root, system, 'sess-1');
+    expect(system[0]).toContain('This project has active task-store work. Continue those tasks in this session?');
+    expect(system[0]).toContain('--session-id sess-1 --host opencode --yes');
+  });
+
+  it('emits a takeover prompt when a different session owns the store', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    attachStdout = 'attached: session_id=other host=opencode attached_at=2026-09-15T00:00:00Z';
+    const system = ['OPENCODE'];
+    applySystemInjection(root, system, 'sess-1');
+    expect(system[0]).toContain('already attached to another session');
+    expect(system[0]).toContain('--takeover --confirm');
+  });
+
+  it('emits no attach prompt when this session is the owner', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    attachStdout = 'attached: session_id=sess-1 host=opencode attached_at=2026-09-15T00:00:00Z';
+    const system = ['OPENCODE'];
+    applySystemInjection(root, system, 'sess-1');
+    // Resume is still injected; no attach prompt is appended.
+    expect(system[0]).toContain('MOCK RESUME');
+    expect(system[0]).not.toContain('Continue those tasks in this session?');
+  });
+
+  it('does not invoke attach-status when sessionId is empty (degrades to no-op)', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    let called = false;
+    _setRunCliForTests({
+      attachStatus: () => { called = true; return { status: 0, stdout: 'attached: none', stderr: '' }; },
+    });
+    const system = ['OPENCODE'];
+    applySystemInjection(root, system, '');
+    expect(called).toBe(false);
+    expect(system[0]).toContain('MOCK RESUME');
+    expect(system[0]).not.toContain('Continue those tasks in this session?');
+  });
+
+  it('orders existing system → resume → attach prompt → pending', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
+    attachStdout = 'attached: none';
+    const system = ['OPENCODE'];
+    applySystemInjection(root, system, 'sess-1');
+    const merged = system[0];
+    expect(merged.indexOf('OPENCODE')).toBeLessThan(merged.indexOf('MOCK RESUME'));
+    expect(merged.indexOf('MOCK RESUME')).toBeLessThan(merged.indexOf('Continue those tasks'));
+    expect(merged.indexOf('Continue those tasks')).toBeLessThan(merged.indexOf('RECONCILE INSTRUCTION'));
   });
 });

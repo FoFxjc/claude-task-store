@@ -34,6 +34,25 @@ INPUT=$(cat || true)
 [[ -f "$CONFIG_FILE" ]] || exit 0
 grep -Eq '"auto_checkpoint"[[:space:]]*:[[:space:]]*"conservative"' "$CONFIG_FILE" 2>/dev/null || exit 0
 
+# ── Session identity ─────────────────────────────────────────────────────────
+# The auto-checkpoint runtime is gated on a session-attachment record
+# (see src/attachment.ts). Without a session_id from the event JSON we cannot
+# prove this session opted into the task-store execution, so we no-op rather
+# than dirtying state from a session that may not even know about task-store.
+#
+# We do not fail the hook when the JSON is malformed: a checkpoint aid must
+# never break a coding session. The CLI itself will no-op mark-dirty when
+# --session-id is missing or does not match the attachment record.
+SESSION_ID=$(printf '%s' "$INPUT" | python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    sys.exit(0)
+print(data.get("session_id", "") or "")
+' 2>/dev/null || echo "")
+[[ -n "$SESSION_ID" ]] || exit 0
+
 # ── Resolve the CLI ─────────────────────────────────────────────────────────
 # Same resolution order as session-start.sh: the project-local runtime that
 # install.sh copies in is preferred, because that is what makes an install
@@ -74,7 +93,5 @@ fi
 # Output is suppressed: a PostToolUse hook that printed on every edit would
 # spam the transcript, and this event must stay invisible. Failures are
 # swallowed for the same reason a resume failure is — a checkpoint aid must
-# never break a coding session.
-"${TASK_STORE_CMD[@]}" auto mark-dirty --root "$PROJECT_DIR" >/dev/null 2>&1 || true
-
+"${TASK_STORE_CMD[@]}" auto mark-dirty --root "$PROJECT_DIR" --session-id "$SESSION_ID" >/dev/null 2>&1 || true
 exit 0

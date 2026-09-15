@@ -42,6 +42,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkS
 import { join } from 'path';
 import { randomBytes } from 'crypto';
 import { readState, storePath, findProjectRoot } from './core.js';
+import { isAttached } from './attachment.js';
 
 const CONFIG_FILE = 'config.json';
 const RUNTIME_FILE = 'auto-checkpoint.json';
@@ -250,9 +251,16 @@ function clearRuntime(projectRoot?: string): void {
  * anything, and above all does not write task state.
  *
  * No-ops entirely when the mode is 'off', so a project that never opts in
- * never gets a single extra file write.
+ * never gets a single extra file write. No-ops also when the calling session
+ * is not the recorded owner of the auto-checkpoint flow: the intent
+ * boundary lives in attachment.ts, and a side session must not push dirty
+ * signals into a checkpoint it has no authority over.
  */
-export function markDirty(projectRoot?: string, signal?: string): AutoCheckpointRuntime | null {
+export function markDirty(
+  projectRoot?: string,
+  signal?: string,
+  sessionId?: string,
+): AutoCheckpointRuntime | null {
   if (!isEnabled(projectRoot)) return null;
 
   const root = projectRoot ?? findProjectRoot();
@@ -260,6 +268,13 @@ export function markDirty(projectRoot?: string, signal?: string): AutoCheckpoint
   // store that does not exist would create .claude-task/ as a side effect of
   // an unrelated tool call.
   if (!existsSync(join(storePath(root), 'state.json'))) return null;
+
+  // Intent boundary. Without a sessionId (or when this session is not the
+  // current owner) we cannot prove the call came from a session that opted
+  // into the task-store execution. A missing or wrong id is treated the
+  // same as "this session is detached" — silently no-op, so a misconfigured
+  // adapter or a fresh side session never escalates.
+  if (!sessionId || !isAttached(sessionId, root)) return null;
 
   const now = new Date().toISOString();
   const runtime = readRuntime(root);
@@ -342,6 +357,7 @@ export interface ReconcileDecision {
     | 'clean'
     | 'debounced'
     | 'already-requested'
+    | 'detached'
     | 'stale';
   freshness: Freshness;
 }
@@ -349,8 +365,12 @@ export interface ReconcileDecision {
 /**
  * Decide whether this boundary should ask the agent to reconcile.
  *
- * Two independent gates must both open:
+ * Three independent gates must all open:
  *
+ *   0. ATTACHMENT — this session is the recorded owner of the auto-checkpoint
+ *                   flow. Without this, a fresh session in a project with
+ *                   active task-store state would push reconciliation
+ *                   instructions it has no authority to act on.
  *   1. NEW WORK   — at least one dirty signal has arrived since the previous
  *                   request. Without this, a single unanswered request would
  *                   re-fire forever on an idle session.
@@ -361,7 +381,11 @@ export interface ReconcileDecision {
  * Pure function of persisted state — it starts no timer and spawns no process.
  * `now` is injectable so tests can exercise the debounce without sleeping.
  */
-export function shouldReconcile(projectRoot?: string, now: Date = new Date()): ReconcileDecision {
+export function shouldReconcile(
+  projectRoot?: string,
+  now: Date = new Date(),
+  sessionId?: string,
+): ReconcileDecision {
   const clean: Freshness = { stale: false, since: null, signals: 0 };
 
   if (!isEnabled(projectRoot)) {
@@ -371,6 +395,13 @@ export function shouldReconcile(projectRoot?: string, now: Date = new Date()): R
   const root = projectRoot ?? findProjectRoot();
   if (!existsSync(join(storePath(root), 'state.json'))) {
     return { reconcile: false, reason: 'no-state', freshness: clean };
+  }
+
+  // Intent boundary, mirrored from markDirty. The 'detached' reason is
+  // treated like 'clean' / 'debounced' by every adapter — a no-op — but
+  // is distinct in status output so an operator can tell the gate fired.
+  if (!sessionId || !isAttached(sessionId, root)) {
+    return { reconcile: false, reason: 'detached', freshness: clean };
   }
 
   const fresh = freshness(root);

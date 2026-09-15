@@ -287,6 +287,11 @@ if [[ -f "$GITIGNORE" ]] && grep -q "$GITIGNORE_MARKER" "$GITIGNORE"; then
   # v0.1.1: auto-checkpoint runtime marker.
   backfill_gitignore '.claude-task/auto-checkpoint.json' \
     '# auto-checkpoint runtime marker (ephemeral dirty/debounce bookkeeping)'
+  # v0.3.1 (issue #23): session-attachment record. Same ephemeral story as
+  # auto-checkpoint.json — machine-local, never meaningful to a different
+  # checkout, never committed by the installer.
+  backfill_gitignore '.claude-task/attachment.json' \
+    '# session-attachment record (issue #23): which session owns auto-checkpoint'
   # v0.2.0: the OpenCode adapter (both files) and the pending reconciliation
   # instruction the OpenCode boundary hook stages between session.idle and the
   # next chat call.
@@ -305,6 +310,10 @@ else
 .claude-task/history.jsonl
 # .lock is a transient O_EXCL write lock; a crashed process can leave one behind
 .claude-task/.lock
+# attachment.json is the ephemeral session-attachment record (issue #23):
+# which session owns the auto-checkpoint flow. Machine-local — a different
+# checkout would have a different session.
+.claude-task/attachment.json
 # auto-checkpoint.json is ephemeral dirty/debounce bookkeeping for the optional
 # auto-checkpoint mode — machine-local, never meaningful to another checkout
 .claude-task/auto-checkpoint.json

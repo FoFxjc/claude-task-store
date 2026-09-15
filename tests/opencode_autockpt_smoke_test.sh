@@ -84,6 +84,28 @@ install_plugin() {
   cp "$ROOT/opencode-plugin/task-store/injection.ts" "$pj/.opencode/plugin/task-store/injection.ts"
 }
 
+# Helper: create an OpenCode session in `pj`, learn its session id from the
+# run log, and attach that session to the project's store.
+#
+# Issue #23 makes auto-checkpoint session-intent-scoped: the CLI accepts
+# mark-dirty / check only for the session recorded in attachment.json. The
+# OpenCode plugin learns its session id from OpenCode's own events, so the
+# only way to provision a matching attachment is to ask OpenCode for an id
+# first and then attach it. Echoes the session id.
+#
+# `logfile` receives the run log; the caller continues that same session
+# afterwards with `--session <id>`, which is exactly the two-step flow a user
+# experiences (first turn prompts, user attaches, later turns reconcile).
+attach_opencode_session() {
+  local pj="$1" cli="$2" logfile="$3"
+  ( cd "$pj" && opencode run --print-logs --log-level INFO "exit" ) > "$logfile" 2>&1 || true
+  local sid
+  sid="$(grep -oE 'ses_[A-Za-z0-9]+' "$logfile" | head -1)"
+  [[ -n "$sid" ]] || return 1
+  node "$cli" attach --session-id "$sid" --host opencode --yes --root "$pj" >/dev/null
+  printf '%s' "$sid"
+}
+
 # ── Test 1: auto_checkpoint = off ──────────────────────────────────────────
 echo ""
 echo "═══ Test 1: auto_checkpoint = off (explicit opt-out) ═══"
@@ -165,7 +187,17 @@ STATE_REV_BEFORE_AC=$(node -e 'console.log(JSON.parse(require("fs").readFileSync
 
 # Manually dirty the runtime by invoking mark-dirty (this simulates what
 # tool.execute.after would do; we don't need a working model API).
-node "$CLI3" auto mark-dirty --root "$T3" >/dev/null
+#
+# Issue #23: the CLI now honours mark-dirty only for the session recorded in
+# attachment.json. The OpenCode plugin learns its session id from OpenCode's
+# own events, so the test asks OpenCode for an id first and attaches it, then
+# continues that same session to exercise the boundary.
+install_plugin "$T3"
+SID3="$(attach_opencode_session "$T3" "$CLI3" /tmp/opencode_ac_warmup.log)"
+check "conservative+dirty: obtained an OpenCode session id and attached it" \
+  "$([[ -n "$SID3" ]] && node "$CLI3" attach status --root "$T3" | grep -q "${SID3:-nomatch}" && echo true || echo false)"
+
+node "$CLI3" auto mark-dirty --root "$T3" --session-id "$SID3" >/dev/null
 
 # Pre-flight: confirm the runtime is dirty.
 PRE_FLIGHT=$(node "$CLI3" auto status --root "$T3" | grep -E '^dirty_since:' || true)
@@ -173,7 +205,6 @@ check "pre-flight: runtime is dirty after mark-dirty" \
   "$([[ -n "$PRE_FLIGHT" && "$PRE_FLIGHT" != *"dirty_since: (clean)"* ]] && echo true || echo false)"
 
 # Install plugin with a diagnostic patch.
-install_plugin "$T3"
 
 python3 - "$T3/.opencode/plugin/task-store.ts" <<'PYEOF'
 import sys
@@ -193,7 +224,7 @@ with open(plugin_path, "w") as f:
 PYEOF
 
 cd "$T3"
-opencode run --print-logs --log-level INFO "exit" > /tmp/opencode_ac_dirty.log 2>&1 || true
+opencode run --session "$SID3" --print-logs --log-level INFO "exit" > /tmp/opencode_ac_dirty.log 2>&1 || true
 
 PENDING="$T3/.claude-task/.pending-reconcile-instruction.txt"
 
@@ -263,9 +294,9 @@ echo "═══ Test 4: debounce suppresses repeated reconciliation requests ═
 # without elapsed debounce time should NOT reopen reconciliation; the
 # next `auto check` returns no-reconcile. This is the gate-2 contract
 # from src/autocheckpoint.ts:shouldReconcile.
-node "$CLI3" auto mark-dirty --root "$T3" >/dev/null
+node "$CLI3" auto mark-dirty --root "$T3" --session-id "$SID3" >/dev/null
 check_RC=0
-node "$CLI3" auto check --root "$T3" >/dev/null 2>&1 || check_RC=$?
+node "$CLI3" auto check --root "$T3" --session-id "$SID3" >/dev/null 2>&1 || check_RC=$?
 check "conservative+dirty+debounced: a second back-to-back check returns no-reconcile" \
   "$([[ "$check_RC" == "1" ]] && echo true || echo false)"
 
@@ -336,9 +367,12 @@ install_cli "$T4"
 CLI4="$T4/.claude/task-store/bin/task-store.js"
 node "$CLI4" init "Spaced goal" "Task A" --root "$T4" >/dev/null
 node "$CLI4" config auto-checkpoint conservative --root "$T4" >/dev/null
-node "$CLI4" auto mark-dirty --root "$T4" >/dev/null
 
 install_plugin "$T4"
+SID4="$(attach_opencode_session "$T4" "$CLI4" /tmp/opencode_ac_spaced_warmup.log)"
+check "spaced path: obtained an OpenCode session id and attached it" \
+  "$([[ -n "$SID4" ]] && node "$CLI4" attach status --root "$T4" | grep -q "${SID4:-nomatch}" && echo true || echo false)"
+node "$CLI4" auto mark-dirty --root "$T4" --session-id "$SID4" >/dev/null
 
 python3 - "$T4/.opencode/plugin/task-store.ts" <<'PYEOF'
 import sys
@@ -358,7 +392,7 @@ with open(plugin_path, "w") as f:
 PYEOF
 
 cd "$T4"
-opencode run --print-logs --log-level INFO "exit" > /tmp/opencode_ac_spaced.log 2>&1 || true
+opencode run --session "$SID4" --print-logs --log-level INFO "exit" > /tmp/opencode_ac_spaced.log 2>&1 || true
 
 check "spaced path: boundary hook fired" \
   "$(if [[ -f "$T4/.claude-task/.boundary.log" ]]; then

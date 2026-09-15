@@ -249,14 +249,20 @@ function pendingInstructionPath(worktree: string): string {
 // we still treat any non-zero as a soft failure (the auto-checkpoint
 // core itself no-ops when disabled, so the CLI's exit semantics are
 // "did we run the gate?" not "did we dirty something?").
+// Default CLI runner for `task-store auto mark-dirty`. The session id
+// (mandatory for the CLI gate in src/attachment.ts) is forwarded as a
+// flag; an absent session id causes the CLI to no-op the call silently,
+// which is the correct failure mode for an adapter that forgot to thread
+// it through.
 export function defaultMarkDirty(
   cli: string,
   worktree: string,
   signal: string,
+  sessionId: string,
 ): CliRunResult {
   const result = spawnSync(
     "node",
-    [cli, "auto", "mark-dirty", signal, "--root", worktree],
+    [cli, "auto", "mark-dirty", signal, "--root", worktree, "--session-id", sessionId],
     {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
@@ -270,17 +276,14 @@ export function defaultMarkDirty(
   };
 }
 
-// Default CLI runner for `task-store auto check --instruction`.
-//
-// Exit code is the decision:
-//   0 = reconciliation warranted; instruction is on stdout
-//   1 = no reconciliation (any of: disabled, no-state, clean, debounced,
-//       already-requested); the CLI also prints the reason on stdout,
-//       which we discard — the plugin only needs the instruction text.
-export function defaultCheckReconcile(cli: string, worktree: string): CliRunResult {
+// Default CLI runner for `task-store auto check --instruction`. Same
+// session-id plumbing as markDirty; the CLI's `detached` reason is the
+// expected outcome for a session that never attached or that has been
+// displaced, and it is handled by the caller as a no-op.
+export function defaultCheckReconcile(cli: string, worktree: string, sessionId: string): CliRunResult {
   const result = spawnSync(
     "node",
-    [cli, "auto", "check", "--instruction", "--root", worktree],
+    [cli, "auto", "check", "--instruction", "--root", worktree, "--session-id", sessionId],
     {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
@@ -294,17 +297,42 @@ export function defaultCheckReconcile(cli: string, worktree: string): CliRunResu
   };
 }
 
-let runMarkDirty: (cli: string, worktree: string, signal: string) => CliRunResult =
+// Default runner for `task-store attach status`. Used by the system-transform
+// hook to decide whether this session is the recorded owner (no prompt), a
+// side session that needs a takeover prompt, or a fresh session with no
+// prior owner (first-time attach prompt). The output format is a single
+// human-readable line — the parser below is intentionally tolerant.
+export function defaultAttachStatus(cli: string, worktree: string): CliRunResult {
+  const result = spawnSync(
+    "node",
+    [cli, "attach", "status", "--root", worktree],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: CLI_TIMEOUT_MS,
+    },
+  );
+  return {
+    status: result.status,
+    stdout: typeof result.stdout === "string" ? result.stdout : "",
+    stderr: typeof result.stderr === "string" ? result.stderr : "",
+  };
+}
+
+let runMarkDirty: (cli: string, worktree: string, signal: string, sessionId: string) => CliRunResult =
   defaultMarkDirty;
-let runCheckReconcile: (cli: string, worktree: string) => CliRunResult =
+let runCheckReconcile: (cli: string, worktree: string, sessionId: string) => CliRunResult =
   defaultCheckReconcile;
+let runAttachStatus: (cli: string, worktree: string) => CliRunResult = defaultAttachStatus;
 
 export function _setRunCliForTests(opts: {
   markDirty?: typeof runMarkDirty;
   checkReconcile?: typeof runCheckReconcile;
+  attachStatus?: typeof runAttachStatus;
 }): void {
   if (opts.markDirty) runMarkDirty = opts.markDirty;
   if (opts.checkReconcile) runCheckReconcile = opts.checkReconcile;
+  if (opts.attachStatus) runAttachStatus = opts.attachStatus;
 }
 
 // Result of a reconciliation-boundary check.
@@ -323,17 +351,28 @@ export interface ReconcileDecision {
  *
  * Failures of the CLI itself are swallowed — a checkpoint aid must never
  * break a coding session, mirroring the same failure mode as the resume
+/**
+ * Fire `task-store auto mark-dirty` for a tool activity. No-op (without
+ * invoking the CLI) when:
+ *   - the project has no worktree path
+ *   - the project-local CLI runtime is not installed
+ *   - the tool name is in the read-only allow-list
+ *   - sessionId is missing (the CLI gate requires it; see src/attachment.ts)
+ *
+ * Failures of the CLI itself are swallowed — a checkpoint aid must never
+ * break a coding session, mirroring the same failure mode as the resume
  * path above.
  */
-export function markDirtyOnTool(worktree: string, tool: string): void {
+export function markDirtyOnTool(worktree: string, tool: string, sessionId: string): void {
   if (!worktree) return;
   if (!isDirtyWorthyTool(tool)) return;
+  if (!sessionId) return;
   const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
   if (!existsSync(cli)) return;
   try {
     // `tool` is intentionally used as the signal label for diagnostics,
     // but the CLI does not persist it (see markDirty in src/autocheckpoint.ts).
-    runMarkDirty(cli, worktree, tool);
+    runMarkDirty(cli, worktree, tool, sessionId);
   } catch {
     // swallow — see comment above
   }
@@ -345,19 +384,20 @@ export function markDirtyOnTool(worktree: string, tool: string): void {
  * Returns:
  *   - {reconcile: true, instruction: <text>} when the CLI exits 0
  *   - {reconcile: false, instruction: null} otherwise (disabled, clean,
- *     debounced, missing CLI, or any error)
+ *     debounced, missing CLI, missing sessionId, or any error)
  *
  * The CLI itself records the request time when it returns reconcile=true,
  * opening the existing debounce window; this function does not duplicate
  * that bookkeeping.
  */
-export function checkReconcileBoundary(worktree: string): ReconcileDecision {
+export function checkReconcileBoundary(worktree: string, sessionId: string): ReconcileDecision {
   if (!worktree) return { reconcile: false, instruction: null };
+  if (!sessionId) return { reconcile: false, instruction: null };
   const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
   if (!existsSync(cli)) return { reconcile: false, instruction: null };
   let result: CliRunResult;
   try {
-    result = runCheckReconcile(cli, worktree);
+    result = runCheckReconcile(cli, worktree, sessionId);
   } catch {
     return { reconcile: false, instruction: null };
   }
@@ -366,7 +406,6 @@ export function checkReconcileBoundary(worktree: string): ReconcileDecision {
   }
   return { reconcile: true, instruction: result.stdout };
 }
-
 /**
  * Stage a reconciliation instruction for delivery on the next chat call.
  *
@@ -476,9 +515,75 @@ export function mergeIntoPrimarySystem(system: string[], block: string): void {
  *
  * Each source is guarded separately so a failure in one cannot suppress the
  * other, and the whole thing degrades to "inject nothing": a checkpoint aid
- * must never break a coding session.
+/**
+ * Build the attach prompt that should accompany the system injection when
+ * this session is detached from auto-checkpoint. The prompt is a fixed
+ * string when there is no current owner (first-time attach) and a
+ * different string when a different session owns the record (takeover
+ * required). When this session is the owner, the function returns null
+ * — no prompt, the resume injection carries the context.
+ *
+ * Kept in this module so it lives alongside the system-prompt
+ * composition and shares its style. The CLI is the source of truth for
+ * ownership; this helper is just the adapter-side rendering.
  */
-export function applySystemInjection(worktree: string, system: string[]): void {
+export function buildAttachPrompt(worktree: string, sessionId: string): string | null {
+  if (!worktree || !sessionId) return null;
+  const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
+  if (!existsSync(cli)) return null;
+  let result: CliRunResult;
+  try {
+    result = runAttachStatus(cli, worktree);
+  } catch {
+    return null;
+  }
+  if (result.status !== 0) return null;
+  const status = result.stdout.trim();
+  if (status === "attached: none") {
+    return [
+      "[task-store] Active task-store work exists for this project.",
+      "This session is detached from auto-checkpoint by design. Ask the user:",
+      '"This project has active task-store work. Continue those tasks in this session?"',
+      `  yes -> task-store attach --session-id ${sessionId} --host opencode --yes`,
+      "  no  -> do nothing; this session stays detached",
+    ].join("\n");
+  }
+  // Parse "attached: session_id=<X> host=<H> attached_at=<T>".
+  const idMatch = status.match(/session_id=(\S+)/);
+  if (idMatch && idMatch[1] === sessionId) return null; // already owner
+  if (!idMatch) return null;
+  return [
+    `[task-store] Active task-store work is already attached to another session (${status}).`,
+    "This session is detached from auto-checkpoint by design. Ask the user:",
+    '"Another session is already attached to this project\'s task-store work.',
+    'Continue those tasks in this session?"',
+    `  yes (take over) -> task-store attach --session-id ${sessionId} --host opencode --takeover --confirm`,
+    "  no              -> do nothing; this session stays detached",
+  ].join("\n");
+}
+
+/**
+ * The whole `experimental.chat.system.transform` body, in one testable
+ * function: collect the resume projection, the attach prompt for the
+ * current session (when detached), and any pending reconciliation
+ * instruction, then merge all three into the existing system context.
+ *
+ * Ordering is fixed and load-bearing:
+ *
+ *   existing OpenCode system content
+ *     → task-store resume projection
+ *       → attach prompt (only when this session is not the owner)
+ *         → pending reconciliation instruction
+ *
+ * The pending instruction is consumed exactly once whether or not it ends up
+ * being injected — `consumePendingReconciliation` deletes the file as it
+ * reads it, and the CLI's own debounce is what prevents a re-nag.
+ *
+ * Each source is guarded separately so a failure in one cannot suppress the
+ * others, and the whole thing degrades to "inject nothing": a checkpoint
+ * aid must never break a coding session.
+ */
+export function applySystemInjection(worktree: string, system: string[], sessionId: string): void {
   if (!Array.isArray(system)) return;
 
   let resume: string | null = null;
@@ -486,6 +591,13 @@ export function applySystemInjection(worktree: string, system: string[]): void {
     resume = buildResumeInjection(worktree);
   } catch {
     // swallow — see the doc comment above
+  }
+
+  let attachPrompt: string | null = null;
+  try {
+    attachPrompt = buildAttachPrompt(worktree, sessionId);
+  } catch {
+    // swallow — same
   }
 
   let pending: string | null = null;
@@ -497,6 +609,7 @@ export function applySystemInjection(worktree: string, system: string[]): void {
 
   const parts: string[] = [];
   if (resume !== null && resume.length > 0) parts.push(resume);
+  if (attachPrompt !== null && attachPrompt.length > 0) parts.push(attachPrompt);
   if (pending !== null && pending.length > 0) parts.push(pending);
   if (parts.length === 0) return;
 

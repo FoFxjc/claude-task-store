@@ -421,6 +421,10 @@ On next session start (or in a fresh model session), the agent automatically rec
 | `task-store token-estimate` | Estimate injected token count |
 | `task-store config` | Show project-local configuration |
 | `task-store config auto-checkpoint <off\|conservative>` | Enable/disable auto-checkpoint mode |
+| `task-store attach status` | Show which session owns this project's auto-checkpoint flow |
+| `task-store attach --session-id <id> --host <h> --yes` | Attach this session (fails if another session owns the store) |
+| `task-store attach --session-id <id> --host <h> --takeover --confirm` | Attach by explicitly taking over from the current owner |
+| `task-store attach --session-id <id> --host <h> --release` | Release the attachment if this session owns it |
 
 ### Cross-agent flags
 
@@ -523,6 +527,16 @@ Both harnesses invoke the **same** `task-store auto mark-dirty`,
 window, the 120-second debounce, and the trust hierarchy embedded in
 `RECONCILE_INSTRUCTION` are identical.
 
+**Session attachment on OpenCode.** The [attachment prompt](#session-attachment-issue-23)
+needs a session id, and the plugin only learns its OpenCode session id from
+OpenCode's own events (`tool.execute.after`, `session.idle`). On the very
+first chat call of a session no event has fired yet, so the prompt is
+omitted; it appears from the next chat call onward, once the id is known.
+The practical effect is one turn of delay before the user is asked to
+continue the task-store work — after that, `task-store attach --session-id
+<id> --host opencode --yes` (or the takeover variant) behaves exactly as it
+does for Claude Code.
+
 > **Compatibility note:** verified against OpenCode 1.18.25. Support relies
 > on exactly four plugin hooks — two of which OpenCode currently labels
 > experimental: `experimental.chat.system.transform` and
@@ -595,9 +609,45 @@ Auto-checkpoint: conservative
 
 Only `off` and `conservative` exist. There is no `aggressive` mode; asking for one is an explicit error rather than a silent fallback.
 
-### How conservative mode works
+### Session attachment (issue #23)
 
-```
+Auto-checkpoint is **session-intent-scoped**, not project-scoped. A fresh
+session in a project that already has active task-store work does **not**
+automatically inherit authority to dirty the auto-checkpoint runtime or
+receive reconciliation instructions — the user must explicitly opt in.
+
+When a session starts in a project with active state, the host (Claude Code
+`SessionStart` or OpenCode `experimental.chat.system.transform`) checks
+`.claude-task/attachment.json`. Three outcomes:
+
+1. **No attachment yet** — the session is fresh. The host injects a prompt:
+   > This project has active task-store work. Continue those tasks in this session?
+   The user confirms → `task-store attach --yes` → the session is attached.
+2. **A different session is the owner** — the host injects a takeover prompt:
+   > Another session is already attached to this project's task-store work. Continue those tasks in this session?
+   The user confirms → `task-store attach --takeover --confirm` → the previous
+   owner's claim is replaced. Explicit takeover is required; the CLI refuses
+   to silently steal ownership.
+3. **This session is the owner** — no prompt, no friction; auto-checkpoint
+   works normally.
+
+Until attached, `auto mark-dirty` and `auto check` are silent no-ops for
+that session, so its tool activity does not dirty the checkpoint and it
+does not receive reconciliation instructions. The session can still run any
+task-store CLI verb by hand (e.g. `task-store status`, `task-store done`).
+Decline is recorded implicitly: a session that never runs `attach --yes`
+stays detached for its lifetime; it can opt in later by running the same
+command.
+
+The attachment record lives at `.claude-task/attachment.json` (gitignored,
+separate from `state.json` so the published schema is unchanged) and holds
+only the session id, host identifier, and an attached_at timestamp.
+`task-store attach status` prints the current owner; `task-store attach
+--release` clears the record when a session ends normally (Claude Code's
+SessionEnd hook does this automatically).
+
+### How conservative mode works
+</input>
 tool activity  →  mark possibly stale   (no task-store write)
                         ↓
              wait for a safe boundary + debounce
