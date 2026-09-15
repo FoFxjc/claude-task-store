@@ -461,7 +461,11 @@ describe('session-attachment gate (issue #23)', () => {
   afterEach(() => { rmSync(root, { recursive: true, force: true }); });
 
   it('markDirty is a complete no-op when no session_id is supplied', () => {
-    expect(markDirty(root, 'Edit', TEST_SESSION_ID)).toBeNull();
+    // Attach first so the record exists: this isolates the `!sessionId` gate.
+    // Without an attachment the call would short-circuit for the unowned-id
+    // reason instead, and the missing-id branch would never run.
+    attach({ sessionId: TEST_SESSION_ID, host: 'claude-code' }, root);
+    expect(markDirty(root, 'Edit')).toBeNull();
     expect(existsSync(runtimeFilePath(root))).toBe(false);
   });
 
@@ -489,11 +493,18 @@ describe('session-attachment gate (issue #23)', () => {
   });
 
   it('shouldReconcile returns detached when no session_id is supplied', () => {
+    // Attach + dirty as the real owner, then call without a session id. This
+    // isolates the `!sessionId` gate: a stored dirty window is present, so the
+    // only reason to report detached is the absent id.
     attach({ sessionId: 'owner', host: 'claude-code' }, root);
     markDirty(root, 'Edit', 'owner');
-    const decision = shouldReconcile(root, new Date(), TEST_SESSION_ID);
+    const decision = shouldReconcile(root);
     expect(decision.reconcile).toBe(false);
     expect(decision.reason).toBe('detached');
+    // Sanity: a dirty window really is recorded, so the assertion above is
+    // about the missing id, not about a clean store. Read the marker rather
+    // than comparing timestamps, which can collide within one millisecond.
+    expect(readRuntime(root).dirty_since).not.toBeNull();
   });
 
   it('shouldReconcile returns detached when the session is not the owner', () => {

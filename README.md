@@ -622,12 +622,16 @@ When a session starts in a project with active state, the host (Claude Code
 
 1. **No attachment yet** — the session is fresh. The host injects a prompt:
    > This project has active task-store work. Continue those tasks in this session?
-   The user confirms → `task-store attach --yes` → the session is attached.
+   The user confirms → the printed attach command runs → the session is
+   attached. The adapter prints it in full, e.g.
+   `node .claude/task-store/bin/task-store.js attach --session-id <id> --host claude-code --root <project> --yes`,
+   because a bare `task-store` would assume a global install this project is
+   not required to have.
 2. **A different session is the owner** — the host injects a takeover prompt:
    > Another session is already attached to this project's task-store work. Continue those tasks in this session?
-   The user confirms → `task-store attach --takeover --confirm` → the previous
-   owner's claim is replaced. Explicit takeover is required; the CLI refuses
-   to silently steal ownership.
+   The user confirms → the printed takeover command runs (the same command
+   plus `--takeover --confirm`) → the previous owner's claim is replaced.
+   Explicit takeover is required; the CLI refuses to silently steal ownership.
 3. **This session is the owner** — no prompt, no friction; auto-checkpoint
    works normally.
 
@@ -635,19 +639,23 @@ Until attached, `auto mark-dirty` and `auto check` are silent no-ops for
 that session, so its tool activity does not dirty the checkpoint and it
 does not receive reconciliation instructions. The session can still run any
 task-store CLI verb by hand (e.g. `task-store status`, `task-store done`).
-Decline is recorded implicitly: a session that never runs `attach --yes`
-stays detached for its lifetime; it can opt in later by running the same
-command.
+Decline is recorded implicitly: a session that never attaches stays detached
+for its lifetime; it can opt in later by running an attach command.
+
+The prompt is printed only when the project's mode is actually
+`conservative`. A project with `off` — including a configless legacy store —
+never sees it.
 
 The attachment record lives at `.claude-task/attachment.json` (gitignored,
 separate from `state.json` so the published schema is unchanged) and holds
 only the session id, host identifier, and an attached_at timestamp.
 `task-store attach status` prints the current owner; `task-store attach
---release` clears the record when a session ends normally (Claude Code's
-SessionEnd hook does this automatically).
+--release --session-id <id>` clears the record when a session ends normally
+(Claude Code's SessionEnd hook does this automatically).
 
 ### How conservative mode works
-</input>
+
+```
 tool activity  →  mark possibly stale   (no task-store write)
                         ↓
              wait for a safe boundary + debounce

@@ -142,11 +142,27 @@ DIRECT=$("${TS[@]}" resume --root "$PROJ" 2>/dev/null || echo "")
 check "hook output starts with canonical \`task-store resume\` output, byte-for-byte" \
   "$( [[ "$CTX" == "$DIRECT"* ]] && echo true || echo false )"
 SUFFIX="${CTX#"$DIRECT"}"
+CMD=$(printf '%s\n' "$SUFFIX" | sed -n 's/^  yes -> //p')
+
 check "the only appended content is the session-attachment prompt" \
   "$( [[ "$SUFFIX" == *"This project has active task-store work."* ]] \
-     && [[ "$SUFFIX" == *"--session-id x --host claude-code --yes"* ]] \
+     && [[ -n "$CMD" ]] \
      && [[ "$SUFFIX" != *"TASK STORE — RESUME CONTEXT"* ]] \
      && echo true || echo false )"
+
+# The printed command is the entire point of the prompt: if it is not
+# executable as-is — wrong binary (this PATH has no global task-store),
+# unquoted hostile path, or a missing --root — the user cannot opt in at all.
+# Run it verbatim from an unrelated directory and require that THIS project,
+# and only this project, ends up attached.
+check "project starts detached" \
+  "$( [[ "$("${TS[@]}" attach status --root "$PROJ" 2>/dev/null)" == "attached: none" ]] && echo true || echo false )"
+( cd / && PATH="$CLEAN_PATH" bash -c "$CMD" ) >/dev/null 2>&1 || true
+check "running the printed command verbatim attaches this project" \
+  "$("${TS[@]}" attach status --root "$PROJ" 2>/dev/null | grep -q 'session_id=x' && echo true || echo false)"
+
+# Leave the store as the later sections expect to find it.
+"${TS[@]}" attach --release --session-id x --host claude-code --root "$PROJ" >/dev/null 2>&1 || true
 
 # ─── Independence from the source checkout ──────────────────────────────────
 # Simulate the user deleting or moving the clone: the installed runtime must

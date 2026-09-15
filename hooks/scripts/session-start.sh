@@ -157,7 +157,14 @@ fi
 #        about attachment, and let resume carry the context. This is the
 #        same conservative posture as when no CLI runtime is present.
 ATTACH_CONTEXT=""
-if [[ ${#TASK_STORE_CMD[@]} -gt 0 ]] && [[ -n "$SESSION_ID" ]]; then
+# The mode gate belongs in the condition rather than a nested branch: the
+# prompt is part of the conservative auto-checkpoint flow, so a project with
+# `off` — including a configless legacy store, which resolves to off —
+# promises no prompts at all, and an attachment there would gate nothing.
+# The CLI is asked for the authoritative mode rather than config.json being
+# read here.
+if [[ ${#TASK_STORE_CMD[@]} -gt 0 ]] && [[ -n "$SESSION_ID" ]] \
+   && [[ "$("${TASK_STORE_CMD[@]}" config auto-checkpoint --root "$PROJECT_DIR" 2>/dev/null || echo "")" == "conservative" ]]; then
   # The CLI does not yet expose a JSON view of attach status, so we parse the
   # `attached: ...` text format we know it emits. `attached: none` is the
   # "no owner" sentinel. The status is printed to stdout by `attach status`.
@@ -202,19 +209,30 @@ print(m.group(1) if m else "")
     # or a different session owns the store. Either way, this session is
     # detached from auto-checkpoint by design until it explicitly opts in.
     #
-    # Build the prompt text. Path safety: ATTACH_OWNER_HOST can legitimately
-    # contain parentheses (e.g. "opencode (unrecognised)"), so we pass the
-    # values to Python via exported env vars rather than format strings.
+    # Path safety: the prompt must contain a command the agent can actually
+    # run. A bare `task-store` assumes a global install this project is not
+    # required to have, and an unquoted project path breaks on spaces and
+    # apostrophes. So we render the resolved argv — the same invocation the
+    # hooks themselves use — with every element shell-quoted by shlex, and
+    # pass the values in via exported env vars rather than format strings
+    # (ATTACH_OWNER_HOST can legitimately contain parentheses).
+    export TASK_STORE_ARGV
+    TASK_STORE_ARGV="$(printf '%s\n' "${TASK_STORE_CMD[@]}")"
+
     if [[ "$ATTACH_KIND" == "owner" ]]; then
-      export PROJECT_DIR SESSION_ID ATTACH_OWNER_ID ATTACH_OWNER_HOST ATTACH_OWNER_AT
+      export SESSION_ID PROJECT_DIR ATTACH_OWNER_ID ATTACH_OWNER_HOST ATTACH_OWNER_AT
       ATTACH_CONTEXT=$(python3 <<'PYEOF'
-import os
+import os, shlex
 
 session_id     = os.environ['SESSION_ID']
-project_dir    = os.environ['PROJECT_DIR']
 owner_id       = os.environ['ATTACH_OWNER_ID']
 owner_host     = os.environ['ATTACH_OWNER_HOST']
 owner_attached = os.environ['ATTACH_OWNER_AT']
+argv           = [a for a in os.environ['TASK_STORE_ARGV'].split('\n') if a]
+base           = ' '.join(shlex.quote(a) for a in argv)
+root           = shlex.quote(os.environ['PROJECT_DIR'])
+cmd            = (f"{base} attach --session-id {shlex.quote(session_id)} "
+                  f"--host claude-code --root {root} --takeover --confirm")
 
 print(
     "[task-store] Active task-store work is already attached to another session\n"
@@ -223,24 +241,28 @@ print(
     "This session is detached from auto-checkpoint by design. Ask the user:\n"
     "\"Another session is already attached to this project's task-store work.\"\n"
     "\"Continue those tasks in this session?\"\n"
-    f"  yes (take over) -> cd {project_dir} && task-store attach --session-id {session_id} --host claude-code --takeover --confirm\n"
+    f"  yes (take over) -> {cmd}\n"
     "  no              -> do nothing; this session stays detached\n"
 )
 PYEOF
 )
     else
-      export PROJECT_DIR SESSION_ID
+      export SESSION_ID PROJECT_DIR
       ATTACH_CONTEXT=$(python3 <<'PYEOF'
-import os
+import os, shlex
 
-session_id  = os.environ['SESSION_ID']
-project_dir = os.environ['PROJECT_DIR']
+session_id = os.environ['SESSION_ID']
+argv       = [a for a in os.environ['TASK_STORE_ARGV'].split('\n') if a]
+base       = ' '.join(shlex.quote(a) for a in argv)
+root       = shlex.quote(os.environ['PROJECT_DIR'])
+cmd        = (f"{base} attach --session-id {shlex.quote(session_id)} "
+              f"--host claude-code --root {root} --yes")
 
 print(
     "[task-store] Active task-store work exists for this project.\n"
     "This session is detached from auto-checkpoint by design. Ask the user:\n"
     "\"This project has active task-store work. Continue those tasks in this session?\"\n"
-    f"  yes -> cd {project_dir} && task-store attach --session-id {session_id} --host claude-code --yes\n"
+    f"  yes -> {cmd}\n"
     "  no  -> do nothing; this session stays detached\n"
 )
 PYEOF

@@ -54,6 +54,8 @@ COMMANDS:
   archive                           Archive the current state
   repair                            Attempt to recover from corrupted state.json
   stale                             Detect tasks in_progress for >48h
+  token-estimate                    Estimate the token size of the resume context
+
 CONFIG:
   config                            Show project-local task-store configuration
   config auto-checkpoint            Show the current auto-checkpoint mode
@@ -398,6 +400,12 @@ async function main(): Promise<void> {
       // would cause a double-lock deadlock.
     ]);
     const topicIsMutating = command === 'topic' && (topicSubcommand === 'add' || topicSubcommand === 'use');
+    // `attach status` is a pure read of attachment.json. It must NOT take the
+    // store lock: withStoreLock() creates .claude-task/ before running, so
+    // locking a status query would materialize a store directory in a project
+    // that has never been initialized — which happens on every OpenCode chat
+    // call, where the adapter asks for the attachment before anything else.
+    const attachIsReadOnly = command === 'attach' && args[0] === 'status';
 
     // The revision check and the command's mutation both run inside
     // runCommand(), so when the whole thing runs under withStoreLock() the
@@ -749,9 +757,18 @@ async function main(): Promise<void> {
             }
             break;
           }
+          case 'reconciled': {
+            // Closes the loop for an adapter that reconciled explicitly.
+            // Optional: staleness is derived from state.updated_at, so an
+            // agent that writes through the normal verbs is already fresh.
+            markReconciled(projectRoot);
+            console.log('✓ reconciliation recorded');
+            break;
+          }
           case 'status': {
             const cfg = readConfig(projectRoot);
             const runtime = readRuntime(projectRoot);
+            // Freshness is observed unconditionally: a user running
             // `auto status` (with or without --session-id) wants to see
             // whether the checkpoint is stale, not just whether *their*
             // session is the owner. The session gate is reported
@@ -769,9 +786,10 @@ async function main(): Promise<void> {
             console.log(`last_reconcile_at: ${runtime.last_reconcile_at ?? '(never)'}`);
             console.log(`attached: ${attached}`);
             console.log(`stale: ${fresh.stale}`);
+            console.log(`would_reconcile: ${decision.reconcile} (${decision.reason})`);
             break;
           }
-           default: {
+          default: {
             console.error('Usage: task-store auto <status|mark-dirty|check|reconciled>');
             process.exit(1);
           }
@@ -844,7 +862,7 @@ async function main(): Promise<void> {
       }
     };
 
-    if (MUTATING_COMMANDS.has(command) || topicIsMutating) {
+    if ((MUTATING_COMMANDS.has(command) && !attachIsReadOnly) || topicIsMutating) {
       withStoreLock(projectRoot, runCommand);
     } else {
       // Read-only and unknown commands: no lock, so `status` on a project

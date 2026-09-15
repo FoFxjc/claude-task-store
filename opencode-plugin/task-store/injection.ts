@@ -499,22 +499,58 @@ export function mergeIntoPrimarySystem(system: string[], block: string): void {
 }
 
 /**
- * The whole `experimental.chat.system.transform` body, in one testable
- * function: collect the resume projection and any pending reconciliation
- * instruction, then merge both into the existing system context.
+ * True when the project has a task store this adapter should act on: the state
+ * file exists, parses, and is not archived. Shared with the resume path so
+ * neither can fire in a repository that merely happens to have the plugin
+ * installed — an attach prompt for "active task-store work" in a project with
+ * no task store would be wrong.
+ */
+function hasApplicableState(worktree: string): boolean {
+  const stateFile = join(worktree, ".claude-task", "state.json");
+  if (!existsSync(stateFile)) return false;
+  try {
+    const parsed = JSON.parse(readFileSync(stateFile, "utf8")) as {
+      version?: unknown;
+      status?: unknown;
+      active_topic?: unknown;
+      topics?: Array<{ name?: unknown; status?: unknown }>;
+    };
+    if (parsed.version === "2" && typeof parsed.active_topic === "string") {
+      const topic = parsed.topics?.find(candidate => candidate.name === parsed.active_topic);
+      return topic?.status !== "archived";
+    }
+    return parsed.status !== "archived";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * POSIX single-quote a value so a printed command survives spaces and
+ * apostrophes. The prompt tells the agent to run a command in a shell, and
+ * project paths legitimately contain both.
+ */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The command this session should run to claim auto-checkpoint. Built from the
+ * resolved project-local CLI rather than a bare `task-store`: a global install
+ * is optional, so a bare command would be command-not-found on a standard
+ * install.
  *
- * Ordering is fixed and load-bearing:
- *
- *   existing OpenCode system content
- *     → task-store resume projection
- *       → pending reconciliation instruction
- *
- * The pending instruction is consumed exactly once whether or not it ends up
- * being injected — `consumePendingReconciliation` deletes the file as it
- * reads it, and the CLI's own debounce is what prevents a re-nag.
- *
- * Each source is guarded separately so a failure in one cannot suppress the
- * other, and the whole thing degrades to "inject nothing": a checkpoint aid
+ * `--root` is mandatory here. The agent may run the printed command from any
+ * working directory, and without it the CLI falls back to findProjectRoot()
+ * and attaches to whichever project happens to contain that directory — the
+ * wrong store, silently.
+ */
+function attachCommand(worktree: string, cli: string, sessionId: string, takeover: boolean): string {
+  const tail = takeover ? " --takeover --confirm" : " --yes";
+  return `node ${shellQuote(cli)} attach --session-id ${shellQuote(sessionId)} `
+    + `--host opencode --root ${shellQuote(worktree)}${tail}`;
+}
+
 /**
  * Build the attach prompt that should accompany the system injection when
  * this session is detached from auto-checkpoint. The prompt is a fixed
@@ -529,6 +565,11 @@ export function mergeIntoPrimarySystem(system: string[], block: string): void {
  */
 export function buildAttachPrompt(worktree: string, sessionId: string): string | null {
   if (!worktree || !sessionId) return null;
+  // Gate on the same active-store condition as the resume projection. Without
+  // it, `attach status` answers "attached: none" for every repository — even
+  // one with no task store at all — and the prompt would invite the user to
+  // continue work that does not exist.
+  if (!hasApplicableState(worktree)) return null;
   const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
   if (!existsSync(cli)) return null;
   let result: CliRunResult;
@@ -544,7 +585,7 @@ export function buildAttachPrompt(worktree: string, sessionId: string): string |
       "[task-store] Active task-store work exists for this project.",
       "This session is detached from auto-checkpoint by design. Ask the user:",
       '"This project has active task-store work. Continue those tasks in this session?"',
-      `  yes -> task-store attach --session-id ${sessionId} --host opencode --yes`,
+      `  yes -> ${attachCommand(worktree, cli, sessionId, false)}`,
       "  no  -> do nothing; this session stays detached",
     ].join("\n");
   }
@@ -557,9 +598,29 @@ export function buildAttachPrompt(worktree: string, sessionId: string): string |
     "This session is detached from auto-checkpoint by design. Ask the user:",
     '"Another session is already attached to this project\'s task-store work.',
     'Continue those tasks in this session?"',
-    `  yes (take over) -> task-store attach --session-id ${sessionId} --host opencode --takeover --confirm`,
+    `  yes (take over) -> ${attachCommand(worktree, cli, sessionId, true)}`,
     "  no              -> do nothing; this session stays detached",
   ].join("\n");
+}
+
+/**
+ * True when this exact session is the recorded owner of the project's
+ * auto-checkpoint flow. Used to decide whether this call may consume the
+ * shared pending-instruction file.
+ */
+export function isAttachedOwner(worktree: string, sessionId: string): boolean {
+  if (!worktree || !sessionId) return false;
+  const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
+  if (!existsSync(cli)) return false;
+  let result: CliRunResult;
+  try {
+    result = runAttachStatus(cli, worktree);
+  } catch {
+    return false;
+  }
+  if (result.status !== 0) return false;
+  const idMatch = result.stdout.trim().match(/session_id=(\S+)/);
+  return idMatch !== null && idMatch[1] === sessionId;
 }
 
 /**
@@ -575,9 +636,9 @@ export function buildAttachPrompt(worktree: string, sessionId: string): string |
  *       → attach prompt (only when this session is not the owner)
  *         → pending reconciliation instruction
  *
- * The pending instruction is consumed exactly once whether or not it ends up
- * being injected — `consumePendingReconciliation` deletes the file as it
- * reads it, and the CLI's own debounce is what prevents a re-nag.
+ * The pending instruction is consumed exactly once, and only by the attached
+ * owner — `consumePendingReconciliation` deletes the file as it reads it, and
+ * the CLI's own debounce is what prevents a re-nag.
  *
  * Each source is guarded separately so a failure in one cannot suppress the
  * others, and the whole thing degrades to "inject nothing": a checkpoint
@@ -600,11 +661,25 @@ export function applySystemInjection(worktree: string, system: string[], session
     // swallow — same
   }
 
-  let pending: string | null = null;
+  // The pending file is shared by the whole project, but the instruction in it
+  // belongs to whichever session owns auto-checkpoint. A detached side session
+  // reaching this hook first must NOT consume it — otherwise the owner never
+  // sees the instruction it was staged for, and the side session is handed a
+  // reconciliation request it has no authority to act on.
+  let isOwner = false;
   try {
-    pending = consumePendingReconciliation(worktree);
+    isOwner = isAttachedOwner(worktree, sessionId);
   } catch {
     // swallow — same
+  }
+
+  let pending: string | null = null;
+  if (isOwner) {
+    try {
+      pending = consumePendingReconciliation(worktree);
+    } catch {
+      // swallow — same
+    }
   }
 
   const parts: string[] = [];

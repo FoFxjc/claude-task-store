@@ -653,6 +653,9 @@ describe('mergeIntoPrimarySystem', () => {
 describe('applySystemInjection (single system block invariant)', () => {
   let root: string;
   let defaultStdout: string;
+  // Only the attached owner may consume the shared pending-instruction file,
+  // so these tests run as the recorded owner.
+  const SID = 'sess-owner';
   beforeEach(() => {
     root = makeTmpDir('systemblock');
     defaultStdout = 'MOCK RESUME\n';
@@ -662,19 +665,27 @@ describe('applySystemInjection (single system block invariant)', () => {
       stdout: defaultStdout,
       stderr: '',
     }));
+    _setRunCliForTests({
+      attachStatus: () => ({
+        status: 0,
+        stdout: `attached: session_id=${SID} host=opencode attached_at=2024-01-01T00:00:00Z`,
+        stderr: '',
+      }),
+    });
   });
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
     _setRunResumeCliForTests(() => {
       throw new Error('default runner should not be invoked in tests');
     });
+    _setRunCliForTests({});
   });
 
   it('existing system + resume => still exactly one system element', () => {
     writeState(root, 'active');
     writeCli(root);
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system, "");
+    applySystemInjection(root, system, SID);
     expect(system).toHaveLength(1);
     expect(system[0]).toContain('MOCK RESUME');
   });
@@ -684,7 +695,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system, "");
+    applySystemInjection(root, system, SID);
     expect(system).toHaveLength(1);
     expect(system[0]).toContain('MOCK RESUME');
     expect(system[0]).toContain('RECONCILE INSTRUCTION');
@@ -698,7 +709,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     // multi-byte character must all survive untouched.
     const existing = 'You are OpenCode.\n\n  Rules:\n   - be terse  \n☑ done';
     const system = [existing];
-    applySystemInjection(root, system, "");
+    applySystemInjection(root, system, SID);
     expect(system[0].startsWith(existing)).toBe(true);
   });
 
@@ -707,7 +718,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system, "");
+    applySystemInjection(root, system, SID);
     const merged = system[0];
     const existingAt = merged.indexOf('OPENCODE SYSTEM PROMPT');
     const resumeAt = merged.indexOf('MOCK RESUME');
@@ -722,7 +733,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['EXISTING'];
-    applySystemInjection(root, system, "");
+    applySystemInjection(root, system, SID);
     expect(system[0]).toBe(
       `EXISTING${SYSTEM_INJECTION_SEPARATOR}MOCK RESUME\n${SYSTEM_INJECTION_SEPARATOR}RECONCILE INSTRUCTION`,
     );
@@ -732,14 +743,14 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeState(root, 'active');
     writeCli(root);
     const system: string[] = [];
-    applySystemInjection(root, system, "");
+    applySystemInjection(root, system, SID);
     expect(system).toHaveLength(1);
     expect(system[0]).toBe('MOCK RESUME\n');
   });
 
   it('leaves the system array unchanged when there is no state and no pending', () => {
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system, "");
+    applySystemInjection(root, system, SID);
     expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
   });
 
@@ -747,23 +758,26 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeState(root, 'archived');
     writeCli(root);
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system, "");
+    applySystemInjection(root, system, SID);
     expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
   });
 
   it('leaves the system array unchanged when the project-local CLI is missing', () => {
     writeState(root, 'active');
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system, "");
+    applySystemInjection(root, system, SID);
     expect(system).toEqual(['OPENCODE SYSTEM PROMPT']);
   });
 
   it('injects a pending instruction even when there is no resume projection', () => {
     // No state at all: the boundary-staged instruction must still reach the
-    // model, and still without adding a system block.
+    // model, and still without adding a system block. The CLI runtime must be
+    // resolvable, though — ownership is proven through it, and an unprovable
+    // owner must never consume the shared instruction.
+    writeCli(root);
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     const system = ['OPENCODE SYSTEM PROMPT'];
-    applySystemInjection(root, system, "");
+    applySystemInjection(root, system, SID);
     expect(system).toHaveLength(1);
     expect(system[0]).toBe(
       `OPENCODE SYSTEM PROMPT${SYSTEM_INJECTION_SEPARATOR}RECONCILE INSTRUCTION`,
@@ -776,11 +790,11 @@ describe('applySystemInjection (single system block invariant)', () => {
     writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
 
     const first = ['SYS'];
-    applySystemInjection(root, first, "");
+    applySystemInjection(root, first, SID);
     expect(first[0]).toContain('RECONCILE INSTRUCTION');
 
     const second = ['SYS'];
-    applySystemInjection(root, second, "");
+    applySystemInjection(root, second, SID);
     expect(second[0]).not.toContain('RECONCILE INSTRUCTION');
     expect(second).toHaveLength(1);
     // The pending file is gone after the first consume.
@@ -825,7 +839,7 @@ describe('applySystemInjection (single system block invariant)', () => {
     writeState(root, 'active');
     writeCli(root);
     expect(() =>
-      applySystemInjection(root, undefined as unknown as string[], ''),
+      applySystemInjection(root, undefined as unknown as string[], SID),
     ).not.toThrow();
   });
 });
@@ -931,7 +945,28 @@ describe('applySystemInjection — attach prompt (issue #23)', () => {
     const system = ['OPENCODE'];
     applySystemInjection(root, system, 'sess-1');
     expect(system[0]).toContain('This project has active task-store work. Continue those tasks in this session?');
-    expect(system[0]).toContain('--session-id sess-1 --host opencode --yes');
+    // The printed command must be runnable as-is: the project-local CLI (a
+    // bare `task-store` assumes an optional global install) and an explicit
+    // --root (the agent may run it from any working directory).
+    const cli = join(root, '.claude', 'task-store', 'bin', 'task-store.js');
+    expect(system[0]).toContain(`node '${cli}' attach --session-id 'sess-1' --host opencode --root '${root}' --yes`);
+  });
+
+  it('quotes the printed command so hostile project paths stay executable', () => {
+    const tricky = mkdtempSync(join(tmpdir(), `pat's odd proj-${randomBytes(4).toString('hex')}-`));
+    try {
+      writeState(tricky, 'active');
+      writeCli(tricky);
+      attachStdout = 'attached: none';
+      const system = ['OPENCODE'];
+      applySystemInjection(tricky, system, 'sess-1');
+      // The apostrophe in the path must be escaped, not left to break the
+      // command the user is told to run.
+      expect(system[0]).toContain(`'${tricky.replace(/'/g, `'\\''`)}'`);
+      expect(system[0]).not.toContain(`--root ${tricky} `);
+    } finally {
+      rmSync(tricky, { recursive: true, force: true });
+    }
   });
 
   it('emits a takeover prompt when a different session owns the store', () => {
@@ -969,16 +1004,33 @@ describe('applySystemInjection — attach prompt (issue #23)', () => {
     expect(system[0]).not.toContain('Continue those tasks in this session?');
   });
 
-  it('orders existing system → resume → attach prompt → pending', () => {
+  // Ordering is asserted per-ownership, because the two payloads are mutually
+  // exclusive by design: a detached session is told to opt in, an attached one
+  // is handed the staged reconciliation instruction. Neither gets both.
+  it('orders existing system → resume → attach prompt (detached session)', () => {
     writeState(root, 'active');
     writeCli(root);
-    writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
     attachStdout = 'attached: none';
     const system = ['OPENCODE'];
     applySystemInjection(root, system, 'sess-1');
     const merged = system[0];
     expect(merged.indexOf('OPENCODE')).toBeLessThan(merged.indexOf('MOCK RESUME'));
     expect(merged.indexOf('MOCK RESUME')).toBeLessThan(merged.indexOf('Continue those tasks'));
-    expect(merged.indexOf('Continue those tasks')).toBeLessThan(merged.indexOf('RECONCILE INSTRUCTION'));
+    // A detached session must not be handed the owner's instruction.
+    expect(merged).not.toContain('RECONCILE INSTRUCTION');
+  });
+
+  it('orders existing system → resume → pending instruction (attached owner)', () => {
+    writeState(root, 'active');
+    writeCli(root);
+    writePendingReconciliation(root, 'RECONCILE INSTRUCTION');
+    attachStdout = 'attached: session_id=sess-1 host=opencode attached_at=2026-09-15T00:00:00Z';
+    const system = ['OPENCODE'];
+    applySystemInjection(root, system, 'sess-1');
+    const merged = system[0];
+    expect(merged.indexOf('OPENCODE')).toBeLessThan(merged.indexOf('MOCK RESUME'));
+    expect(merged.indexOf('MOCK RESUME')).toBeLessThan(merged.indexOf('RECONCILE INSTRUCTION'));
+    // The owner is never prompted to attach to what it already owns.
+    expect(merged).not.toContain('Continue those tasks in this session?');
   });
 });
