@@ -303,7 +303,8 @@ echo "═══ Scenario 6: .gitignore covers transient OpenCode artifacts ═�
 
 GI_FRESH_DIR=$(mktemp -d)
 GI_UPGRADE_DIR=$(mktemp -d)
-trap 'rm -rf "$SNAP_DIR" "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR"' EXIT
+GI_SNIPPET_DIR=$(mktemp -d)
+trap 'rm -rf "$SNAP_DIR" "$FRESH_DIR" "$SKIP_DIR" "$FOREIGN_DIR" "$GI_FRESH_DIR" "$GI_UPGRADE_DIR" "$GI_SNIPPET_DIR"' EXIT
 
 git init -q "$GI_FRESH_DIR"
 git init -q "$GI_UPGRADE_DIR"
@@ -348,6 +349,24 @@ for scenario in fresh upgrade; do
   check "$scenario install: .claude-task/state.json is still committable" \
     "$([[ "$(ignored "$DIR" ".claude-task/state.json")" == "false" ]] && echo true || echo false)"
 done
+
+# The same authority applies to the snippet users copy by hand. It is only
+# useful if git actually honours it: a pattern followed by `# comment` reads as
+# a comment to a human and is not one to git, so the pattern silently stops
+# matching. Verified through git rather than by inspecting the text.
+git init -q "$GI_SNIPPET_DIR"
+cp "$ROOT/examples/gitignore-snippet.txt" "$GI_SNIPPET_DIR/.gitignore"
+
+for path in ".claude-task/history.jsonl" ".claude-task/attachment.json" \
+            ".claude-task/auto-checkpoint.json" \
+            ".claude-task/.pending-reconcile-instruction.txt" \
+            ".claude-task/.lock"; do
+  check "shipped gitignore snippet: $path is gitignored" \
+    "$(ignored "$GI_SNIPPET_DIR" "$path")"
+done
+
+check "shipped gitignore snippet: state.json stays committable" \
+  "$([[ "$(ignored "$GI_SNIPPET_DIR" ".claude-task/state.json")" == "false" ]] && echo true || echo false)"
 
 # Re-running the installer must not append the same path twice.
 FORCE=1 bash "$ROOT/install.sh" "$GI_UPGRADE_DIR" > /tmp/opencode_install_gi_reupgrade.log 2>&1 || {
