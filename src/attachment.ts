@@ -103,6 +103,26 @@ function atomicWriteJson(filePath: string, value: unknown): void {
   }
 }
 
+// ─── Normalization ───────────────────────────────────────────────────────────
+
+/**
+ * Normalize a caller-supplied identity string (session id or host).
+ *
+ * readAttachment() trims what it reads back, so trimming what we write and
+ * compare is the only way to make the round trip consistent. Without it,
+ * `--session-id " abc"` is stored verbatim, read back as "abc", and the
+ * session can never prove ownership of its own record — including to release
+ * it, which would leave exactly the dead owner this feature exists to prevent.
+ * Normalizing at the boundary also means a hand-edited record with stray
+ * whitespace still matches.
+ *
+ * Exported because the pending-instruction record binds itself to a session id
+ * (src/autocheckpoint.ts) and must compare identities by the same rule.
+ */
+export function normalizeIdentity(value: string): string {
+  return value.trim();
+}
+
 // ─── Read / write / clear ────────────────────────────────────────────────────
 
 /**
@@ -178,10 +198,12 @@ export interface AttachResult {
  * distinct session_ids, and the model assumes the caller enforces that.
  */
 export function attach(opts: AttachOptions, projectRoot?: string): AttachResult {
-  if (!opts.sessionId || !opts.sessionId.trim()) {
+  const sessionId = normalizeIdentity(opts.sessionId ?? '');
+  const host = normalizeIdentity(opts.host ?? '');
+  if (!sessionId) {
     throw new Error('attach: sessionId is required');
   }
-  if (!opts.host || !opts.host.trim()) {
+  if (!host) {
     throw new Error('attach: host is required');
   }
   if (opts.takeover && !opts.confirm) {
@@ -194,7 +216,7 @@ export function attach(opts: AttachOptions, projectRoot?: string): AttachResult 
   const now = opts.now ?? new Date();
   const current = readAttachment(root);
 
-  if (current && current.session_id !== opts.sessionId) {
+  if (current && current.session_id !== sessionId) {
     if (!opts.takeover) {
       throw new AttachmentConflictError(
         `Another session is already attached (session_id=${current.session_id}, host=${current.host}, attached_at=${current.attached_at}). ` +
@@ -203,8 +225,8 @@ export function attach(opts: AttachOptions, projectRoot?: string): AttachResult 
       );
     }
     const next: AttachmentRecord = {
-      session_id: opts.sessionId,
-      host: opts.host,
+      session_id: sessionId,
+      host,
       attached_at: now.toISOString(),
     };
     writeAttachmentRecord(next, root);
@@ -212,8 +234,8 @@ export function attach(opts: AttachOptions, projectRoot?: string): AttachResult 
   }
 
   const next: AttachmentRecord = {
-    session_id: opts.sessionId,
-    host: opts.host,
+    session_id: sessionId,
+    host,
     attached_at: now.toISOString(),
   };
   writeAttachmentRecord(next, root);
@@ -240,13 +262,14 @@ export interface ReleaseResult {
  *                     a session that never attached.
  */
 export function release(opts: { sessionId: string }, projectRoot?: string): ReleaseResult {
-  if (!opts.sessionId || !opts.sessionId.trim()) {
+  const sessionId = normalizeIdentity(opts.sessionId ?? '');
+  if (!sessionId) {
     throw new Error('release: sessionId is required');
   }
   const root = projectRoot ?? findProjectRoot();
   const current = readAttachment(root);
   if (!current) return { outcome: 'not-attached' };
-  if (current.session_id !== opts.sessionId) return { outcome: 'not-owner' };
+  if (current.session_id !== sessionId) return { outcome: 'not-owner' };
   try {
     unlinkSync(attachmentFilePath(root));
   } catch (err) {
@@ -260,15 +283,43 @@ export function release(opts: { sessionId: string }, projectRoot?: string): Rele
 }
 
 /**
+ * Clear the attachment unconditionally, whoever owns it.
+ *
+ * This is NOT a session operation — `release()` is, and it is owner-gated.
+ * This exists for the one administrative case where no session owns the
+ * record by definition any more: auto-checkpoint being switched off. The
+ * attachment is the intent boundary *for auto-checkpoint*, so with the mode
+ * off there is nothing left for it to gate, and leaving it behind means the
+ * next session to enable the mode is greeted by an owner that no longer
+ * exists and is forced through a takeover confirmation for no reason.
+ *
+ * Returns true when a record was removed. A missing file is not an error;
+ * anything else surfaces, for the same reason `release()` surfaces it — a
+ * silent failure here leaves the dead owner in place, which is the whole bug.
+ */
+export function clearAttachment(projectRoot?: string): boolean {
+  const root = projectRoot ?? findProjectRoot();
+  if (!readAttachment(root)) return false;
+  try {
+    unlinkSync(attachmentFilePath(root));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    return false;
+  }
+  return true;
+}
+
+/**
  * True when an attachment exists and is owned by this session.
  *
  * A missing or unreadable record is "not attached" — there is no implicit
  * attachment. This is the single check markDirty / shouldReconcile rely on.
  */
 export function isAttached(sessionId: string, projectRoot?: string): boolean {
-  if (!sessionId) return false;
+  const normalized = normalizeIdentity(sessionId ?? '');
+  if (!normalized) return false;
   const current = readAttachment(projectRoot);
-  return current !== null && current.session_id === sessionId;
+  return current !== null && current.session_id === normalized;
 }
 
 /**

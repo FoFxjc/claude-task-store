@@ -182,6 +182,15 @@ check "SessionEnd emits no staleness warning when off" \
 
 # ─── 3. Conservative mode can be enabled ─────────────────────────────────────
 ts config auto-checkpoint conservative >/dev/null
+
+# Re-attach: switching the mode OFF clears the attachment (a session that ends
+# while the mode is off would otherwise leave a dead owner behind, and the
+# session-end hook deliberately skips its release when the mode is off). The
+# enabler is therefore asked to opt in again — which for a real session means
+# the attach prompt appearing once more.
+node "$CLI" attach --session-id test-session --host claude-code --yes --root "$PROJ" >/dev/null
+check "re-enabling conservative asks the session to attach again" \
+  "$(node "$CLI" attach status --root "$PROJ" | grep -q 'test-session' && echo true || echo false)"
 check "mode is persisted as conservative" "$([[ "$(ts config auto-checkpoint)" == "conservative" ]] && echo true)"
 check "config lives in .claude-task/config.json" "$([[ -f "$CONFIG" ]] && echo true)"
 check "state.json is not polluted with tool configuration" \
@@ -316,7 +325,15 @@ check "SessionEnd never mutates task state" "$([[ "$(task_status T1)" == "pendin
 # it: everything below is about what the *owner* can collect.
 node "$CLI" attach --session-id test-session --host claude-code --yes --root "$PROJ" >/dev/null
 STAGED="$PROJ/.claude-task/.pending-reconcile-instruction.txt"
-printf '%s' 'STAGED-INSTRUCTION' > "$STAGED"
+# Written in the core's record format: the staged instruction is bound to the
+# session that staged it, so a bare text file is deliberately not collectable
+# by anyone (see the unreadable-record case in the Jest suite).
+python3 - "$STAGED" <<'PYEOF'
+import json, sys
+with open(sys.argv[1], 'w') as f:
+    json.dump({"session_id": "test-session", "instruction": "STAGED-INSTRUCTION",
+               "staged_at": "2026-01-01T00:00:00.000Z"}, f)
+PYEOF
 
 TAKE_DETACHED_RC=0
 TAKE_DETACHED=$(node "$CLI" auto take-instruction --root "$PROJ" --session-id someone-else 2>&1) || TAKE_DETACHED_RC=$?
@@ -343,7 +360,12 @@ check "a second collection finds nothing" \
 
 # An instruction staged before the store went inactive must not be delivered:
 # the agent would be told to reconcile a checkpoint it can no longer see.
-printf '%s' 'STALE-INSTRUCTION' > "$STAGED"
+python3 - "$STAGED" <<'PYEOF'
+import json, sys
+with open(sys.argv[1], 'w') as f:
+    json.dump({"session_id": "test-session", "instruction": "STALE-INSTRUCTION",
+               "staged_at": "2026-01-01T00:00:00.000Z"}, f)
+PYEOF
 node "$CLI" archive --root "$PROJ" >/dev/null 2>&1
 TAKE_ARCHIVED_RC=0
 node "$CLI" auto take-instruction --root "$PROJ" --session-id test-session >/dev/null 2>&1 || TAKE_ARCHIVED_RC=$?
@@ -417,6 +439,117 @@ check "SessionStart still prompts on a well-formed 'attached: none' status" \
 OUT_OTHER=$(stub_hook other)
 check "SessionStart prompts a fresh session when another session owns the store" \
   "$(printf '%s' "$OUT_OTHER" | grep -q "$PROMPT_MARKER" && echo true || echo false)"
+
+# ─── 8d. Zero materialization (issue #23 review) ─────────────────────────────
+# withStoreLock() creates `.claude-task/`, so taking the store lock is itself a
+# write. An `auto` verb in a project that never ran `task-store init` must not
+# create the directory the no-op was supposed to leave alone — the OpenCode
+# plugin calls mark-dirty on every tool call, so this is a hot path in exactly
+# the project that has no store.
+BARE=$(mktemp -d)
+git -C "$BARE" init -q .
+
+for verb in "mark-dirty" "check" "reconciled" "stage-instruction" "take-instruction"; do
+  node "$CLI" auto "$verb" --root "$BARE" --session-id s1 >/dev/null 2>&1 || true
+done
+check "no task store: auto verbs create no .claude-task/ directory" \
+  "$([[ ! -d "$BARE/.claude-task" ]] && echo true || echo false)"
+
+node "$CLI" auto status --root "$BARE" >/dev/null 2>&1 || true
+check "no task store: auto status still creates nothing" \
+  "$([[ ! -d "$BARE/.claude-task" ]] && echo true || echo false)"
+
+# Adapter attrs (mark-dirty / check) with no store must not materialize either.
+node "$CLI" auto mark-dirty edit --root "$BARE" --session-id test-session >/dev/null 2>&1 || true
+node "$CLI" auto check --instruction --root "$BARE" --session-id test-session >/dev/null 2>&1 || true
+check "no task store: adapter calls create no .claude-task/ directory" \
+  "$([[ ! -d "$BARE/.claude-task" ]] && echo true || echo false)"
+
+# Off is the other half of the invariant: a project that opted out must not get
+# auto-checkpoint writes, and must not have a stale owner left behind either.
+node "$CLI" init "Off project" "T1" --root "$BARE" >/dev/null 2>&1
+node "$CLI" config auto-checkpoint off --root "$BARE" >/dev/null 2>&1
+node "$CLI" attach --session-id off-session --host claude-code --yes --root "$BARE" >/dev/null 2>&1
+rm -f "$BARE/.claude-task/auto-checkpoint.json"
+node "$CLI" auto mark-dirty edit --root "$BARE" --session-id off-session >/dev/null 2>&1 || true
+node "$CLI" auto reconciled --root "$BARE" --session-id off-session >/dev/null 2>&1 || true
+check "auto-checkpoint off: no runtime file is written" \
+  "$([[ ! -f "$BARE/.claude-task/auto-checkpoint.json" ]] && echo true || echo false)"
+
+# Switching the mode off clears the attachment: the session-end hook releases
+# only in conservative mode, so nothing else would ever clear a dead owner and
+# the next session to opt in would be forced through a takeover.
+# (off-session still owns this throwaway store, so take over explicitly — the
+# point here is the mode transition, not the attach policy.)
+node "$CLI" attach --session-id dead-owner --host claude-code --takeover --confirm --root "$BARE" >/dev/null 2>&1
+node "$CLI" config auto-checkpoint conservative --root "$BARE" >/dev/null 2>&1
+node "$CLI" config auto-checkpoint off --root "$BARE" >/dev/null 2>&1
+check "switching the mode off clears the attachment (no dead owner survives)" \
+  "$(node "$CLI" attach status --root "$BARE" | grep -q '^attached: none$' && echo true || echo false)"
+
+# ─── 8e. auto reconciled is owner-gated (issue #23 review) ───────────────────
+# Clearing the shared dirty window is the most destructive verb in the set: a
+# detached session doing it tells the real owner its checkpoint is clean while
+# its work signal is still pending.
+rm -rf "$BARE/.claude-task"
+node "$CLI" init "Reconcile owner" "T1" --root "$BARE" >/dev/null 2>&1
+node "$CLI" config auto-checkpoint conservative --root "$BARE" >/dev/null 2>&1
+node "$CLI" attach --session-id owner-session --host claude-code --yes --root "$BARE" >/dev/null 2>&1
+node "$CLI" auto mark-dirty edit --root "$BARE" --session-id owner-session >/dev/null
+
+REC_OTHER_RC=0
+node "$CLI" auto reconciled --root "$BARE" --session-id side-session >/dev/null 2>&1 || REC_OTHER_RC=$?
+check "auto reconciled refuses a detached session" \
+  "$([[ $REC_OTHER_RC -ne 0 ]] && echo true || echo false)"
+check "a refused reconciled leaves the owner's dirty window intact" \
+  "$(node "$CLI" auto status --root "$BARE" | grep -E '^dirty_since:' | grep -qv '(clean)' && echo true || echo false)"
+
+node "$CLI" auto reconciled --root "$BARE" --session-id owner-session >/dev/null 2>&1
+check "the owner can still record reconciliation" \
+  "$(node "$CLI" auto status --root "$BARE" | grep -q '^dirty_since: (clean)$' && echo true || echo false)"
+
+# ─── 8f. auto stage-instruction is owner-gated (issue #23 review) ────────────
+# The staging half of the race: the adapter used to ask the CLI and then write
+# the instruction file itself, with the lock released in between.
+node "$CLI" auto mark-dirty edit --root "$BARE" --session-id owner-session >/dev/null
+STAGE_OTHER_RC=0
+node "$CLI" auto stage-instruction --root "$BARE" --session-id side-session >/dev/null 2>&1 || STAGE_OTHER_RC=$?
+check "auto stage-instruction refuses a detached session" \
+  "$([[ $STAGE_OTHER_RC -ne 0 ]] && echo true || echo false)"
+check "a refused stage writes no pending instruction" \
+  "$([[ ! -f "$BARE/.claude-task/.pending-reconcile-instruction.txt" ]] && echo true || echo false)"
+
+STAGE_OWNER=$(node "$CLI" auto stage-instruction --root "$BARE" --session-id owner-session 2>&1)
+check "the owner stages the canonical instruction" \
+  "$(printf '%s' "$STAGE_OWNER" | grep -q 'repository/tests > git state > task-store > model memory' && echo true || echo false)"
+check "the staged record is bound to the staging session" \
+  "$(grep -q '"session_id": "owner-session"' "$BARE/.claude-task/.pending-reconcile-instruction.txt" && echo true || echo false)"
+
+# A staged instruction is collectable by its owner, and only by its owner.
+TAKE_SIDE_RC=0
+node "$CLI" auto take-instruction --root "$BARE" --session-id side-session >/dev/null 2>&1 || TAKE_SIDE_RC=$?
+check "a non-owner cannot collect the staged instruction" \
+  "$([[ $TAKE_SIDE_RC -ne 0 ]] && echo true || echo false)"
+check "the refused collection left it staged for the owner" \
+  "$([[ -s "$BARE/.claude-task/.pending-reconcile-instruction.txt" ]] && echo true || echo false)"
+node "$CLI" auto take-instruction --root "$BARE" --session-id owner-session >/dev/null 2>&1
+check "the owner collects it" \
+  "$([[ ! -f "$BARE/.claude-task/.pending-reconcile-instruction.txt" ]] && echo true || echo false)"
+
+# ─── 8g. CLI ergonomics: --release and attachment flags ─────────────────────
+node "$CLI" attach --session-id owner-session --host claude-code --yes --root "$BARE" >/dev/null 2>&1
+check "attach --release works without --host" \
+  "$(node "$CLI" attach --release --session-id owner-session --root "$BARE" | grep -q 'released' && echo true || echo false)"
+check "attach --release without --session-id is still an error" \
+  "$(node "$CLI" attach --release --host claude-code --root "$BARE" >/dev/null 2>&1 && echo false || echo true)"
+check "attach (write form) still requires --host" \
+  "$(node "$CLI" attach --session-id x --yes --root "$BARE" >/dev/null 2>&1 && echo false || echo true)"
+
+for flag in "--host claude-code" "--yes" "--takeover" "--confirm" "--release"; do
+  # shellcheck disable=SC2086
+  check "auto mark-dirty rejects meaningless $flag" \
+    "$(node "$CLI" auto mark-dirty edit --session-id x $flag --root "$BARE" >/dev/null 2>&1 && echo false || echo true)"
+done
 
 # ─── 9. Disabling stops everything ───────────────────────────────────────────
 ts config auto-checkpoint off >/dev/null

@@ -71,6 +71,11 @@ fi
 set +e
 INSTRUCTION=$("${TASK_STORE_CMD[@]}" auto check --instruction --root "$PROJECT_DIR" --session-id "$SESSION_ID" 2>/dev/null)
 CHECK_RC=$?
+# Restore errexit immediately: the soft-failure window is this one call, not
+# the rest of the script. Every other hook in this directory does the same,
+# and leaving it off would silently swallow a failure in the delivery step
+# below — which is the part that actually has to work.
+set -e
 if [[ $CHECK_RC -ne 0 ]] || [[ -z "$INSTRUCTION" ]]; then
   exit 0
 fi

@@ -46,9 +46,11 @@
 //       Fires when the agent finishes responding and the session goes idle.
 //       This is the OpenCode analog of Claude Code's `Stop` hook and is the
 //       smallest reliable boundary at which a reconciliation instruction
-//       can be staged for delivery on the next chat call. When the
-//       existing CLI decides reconciliation is warranted, the instruction
-//       text is staged to a pending file.
+//       can be staged for delivery on the next chat call. A single
+//       `task-store auto stage-instruction` call does the whole thing: the
+//       core decides whether reconciliation is warranted and writes the
+//       pending record in the same locked step, so a session that has just
+//       lost ownership cannot stage anything.
 //
 //   - experimental.chat.system.transform
 //       Fires on every chat call. Merges into the existing system prompt:
@@ -108,8 +110,7 @@
 import {
   applySystemInjection,
   markDirtyOnTool,
-  checkReconcileBoundary,
-  writePendingReconciliation,
+  stageReconcileBoundary,
 } from "./task-store/injection.ts";
 
 interface PluginInput {
@@ -123,6 +124,13 @@ interface PluginInput {
 
 interface SystemTransformOutput {
   system: string[];
+}
+
+interface SystemTransformInput {
+  // Present on the session-scoped call path. Absent on OpenCode's internal
+  // `Agent.generate` path, where session-scoped injection must be skipped
+  // rather than attributed to whichever session ran last.
+  sessionID?: string;
 }
 
 interface BusEvent {
@@ -142,15 +150,26 @@ interface ToolExecuteAfterInput {
 }
 
 const TaskStoreOpenCodePlugin = async ({ worktree }: PluginInput) => {
-  // The OpenCode session id is needed by the CLI's intent-boundary gate
-  // (src/attachment.ts). It is supplied on tool.execute.after and on
-  // session.idle events, but NOT on every chat call — the system-transform
-  // hook fires on every chat call and is the natural place to surface the
-  // attach prompt. We capture the id the first time we see it and reuse it
-  // for the lifetime of this plugin (one OpenCode session). When it is
-  // still empty, every CLI call no-ops silently, which is the correct
-  // failure mode for a session that has not yet produced any tool events.
-  let sessionID = "";
+  // There is deliberately NO plugin-level "current session" variable here.
+  //
+  // One plugin instance is created per project/process, and OpenCode runs
+  // several sessions through it, so a shared mutable id is a cross-session
+  // identity leak: whichever session touched the plugin last would decide who
+  // the *next* session's tool calls, boundary checks, and prompt ownership
+  // were attributed to. Each hook instead reads the session id from its own
+  // input, which OpenCode 1.18.25 supplies on every one of them:
+  //
+  //   tool.execute.after                  { tool, sessionID, callID, args }
+  //   event (session.idle)                properties: { sessionID }
+  //   experimental.chat.system.transform  { sessionID, model }
+  //
+  // A hook whose input carries no usable id does nothing session-scoped. That
+  // is the correct failure direction: doing nothing costs one missed prompt or
+  // one dirty signal, while guessing costs another session's ownership.
+  //
+  // (`experimental.chat.system.transform` is also triggered internally with
+  // `{ model }` and no sessionID — see Agent.generate — which is why the id is
+  // optional there rather than required.)
 
   return {
     // ── Dirty signal ──────────────────────────────────────────────────────
@@ -167,7 +186,7 @@ const TaskStoreOpenCodePlugin = async ({ worktree }: PluginInput) => {
       _output: unknown,
     ): Promise<void> => {
       try {
-        if (!sessionID) sessionID = input.sessionID;
+        const sessionID = input.sessionID ?? "";
         // We deliberately do NOT self-exclude on tool-name substring the
         // way the Claude Code shell hook does: the Claude Code hook sees
         // a serialized Bash command string on stdin, and the cheap check
@@ -191,13 +210,12 @@ const TaskStoreOpenCodePlugin = async ({ worktree }: PluginInput) => {
     // `experimental.chat.system.transform` deliver it.
     event: async ({ event }: EventInput): Promise<void> => {
       try {
-        const sid = (event.properties?.sessionID as string | undefined) ?? sessionID;
-        if (sid) sessionID = sid;
         if (event.type !== "session.idle") return;
-        const decision = checkReconcileBoundary(worktree, sessionID);
-        if (decision.reconcile && decision.instruction !== null) {
-          writePendingReconciliation(worktree, decision.instruction);
-        }
+        const sessionID = (event.properties?.sessionID as string | undefined) ?? "";
+        // One call. The core decides *and* stages under its own lock, so this
+        // session cannot stage an instruction after it has lost ownership —
+        // which is what the previous `check`-then-write split allowed.
+        stageReconcileBoundary(worktree, sessionID);
       } catch {
         // Never let a boundary handler break a session.
       }
@@ -215,11 +233,15 @@ const TaskStoreOpenCodePlugin = async ({ worktree }: PluginInput) => {
     // not the first message. See applySystemInjection() for the full
     // rationale. The instruction is consumed exactly once.
     "experimental.chat.system.transform": async (
-      _input: unknown,
+      input: SystemTransformInput,
       output: SystemTransformOutput,
     ): Promise<void> => {
       try {
-        applySystemInjection(worktree, output.system, sessionID);
+        // The session id comes from this call's own input, never from state
+        // left by another session's hooks. An empty id means the resume
+        // projection is still injected (it is project-scoped) while the attach
+        // prompt and the pending instruction are skipped (they are not).
+        applySystemInjection(worktree, output.system, input?.sessionID ?? "");
       } catch {
         // Never let an injection failure break a session.
       }

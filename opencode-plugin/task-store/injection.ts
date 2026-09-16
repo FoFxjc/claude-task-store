@@ -231,24 +231,6 @@ export function isDirtyWorthyTool(tool: string): boolean {
   return !READ_ONLY_TOOLS.has(tool);
 }
 
-// Pending reconciliation instruction file. Consumed exactly once on the
-// next `experimental.chat.system.transform` after the boundary that
-// staged it. Located inside `.claude-task/` so it shares the existing
-// `.claude-task/.lock` and ownership story as state.json and the runtime
-// bookkeeping file.
-const PENDING_INSTRUCTION_FILE = ".pending-reconcile-instruction.txt";
-
-function pendingInstructionPath(worktree: string): string {
-  return join(worktree, ".claude-task", PENDING_INSTRUCTION_FILE);
-}
-
-// Default CLI runner for `task-store auto mark-dirty`.
-//
-// The CLI returns non-zero exit when invocation is structurally wrong;
-// for `auto mark-dirty` that should never happen during normal use, but
-// we still treat any non-zero as a soft failure (the auto-checkpoint
-// core itself no-ops when disabled, so the CLI's exit semantics are
-// "did we run the gate?" not "did we dirty something?").
 // Default CLI runner for `task-store auto mark-dirty`. The session id
 // (mandatory for the CLI gate in src/attachment.ts) is forwarded as a
 // flag; an absent session id causes the CLI to no-op the call silently,
@@ -276,14 +258,22 @@ export function defaultMarkDirty(
   };
 }
 
-// Default CLI runner for `task-store auto check --instruction`. Same
-// session-id plumbing as markDirty; the CLI's `detached` reason is the
-// expected outcome for a session that never attached or that has been
-// displaced, and it is handled by the caller as a no-op.
-export function defaultCheckReconcile(cli: string, worktree: string, sessionId: string): CliRunResult {
+// Default CLI runner for `task-store auto stage-instruction`. Same
+// session-id plumbing as markDirty; the CLI's `detached` / `clean` /
+// `debounced` reasons are the expected outcomes for a session that never
+// attached, that has been displaced, or that simply has nothing to do, and
+// the caller treats all of them as a no-op.
+//
+// This replaced a `check` call followed by an adapter-side file write. Those
+// were two steps with the CLI's lock released in between, which is what let a
+// session that had just been taken over stage an instruction anyway. The
+// decision, the debounce bookkeeping, and the staging now happen once, in the
+// core, under the lock — and the staged record is bound to this session, so
+// nobody else can collect it.
+export function defaultStageReconcile(cli: string, worktree: string, sessionId: string): CliRunResult {
   const result = spawnSync(
     "node",
-    [cli, "auto", "check", "--instruction", "--root", worktree, "--session-id", sessionId],
+    [cli, "auto", "stage-instruction", "--root", worktree, "--session-id", sessionId],
     {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
@@ -345,20 +335,20 @@ export function defaultTakeInstruction(
 
 let runMarkDirty: (cli: string, worktree: string, signal: string, sessionId: string) => CliRunResult =
   defaultMarkDirty;
-let runCheckReconcile: (cli: string, worktree: string, sessionId: string) => CliRunResult =
-  defaultCheckReconcile;
+let runStageReconcile: (cli: string, worktree: string, sessionId: string) => CliRunResult =
+  defaultStageReconcile;
 let runAttachStatus: (cli: string, worktree: string) => CliRunResult = defaultAttachStatus;
 let runTakeInstruction: (cli: string, worktree: string, sessionId: string) => CliRunResult =
   defaultTakeInstruction;
 
 export function _setRunCliForTests(opts: {
   markDirty?: typeof runMarkDirty;
-  checkReconcile?: typeof runCheckReconcile;
+  stageReconcile?: typeof runStageReconcile;
   attachStatus?: typeof runAttachStatus;
   takeInstruction?: typeof runTakeInstruction;
 }): void {
   if (opts.markDirty) runMarkDirty = opts.markDirty;
-  if (opts.checkReconcile) runCheckReconcile = opts.checkReconcile;
+  if (opts.stageReconcile) runStageReconcile = opts.stageReconcile;
   if (opts.attachStatus) runAttachStatus = opts.attachStatus;
   if (opts.takeInstruction) runTakeInstruction = opts.takeInstruction;
 }
@@ -398,25 +388,24 @@ export function markDirtyOnTool(worktree: string, tool: string, sessionId: strin
 }
 
 /**
- * Fire `task-store auto check --instruction` at a reconciliation boundary.
+ * Ask the core to decide and stage, in one step, at a reconciliation boundary.
  *
- * Returns:
- *   - {reconcile: true, instruction: <text>} when the CLI exits 0
- *   - {reconcile: false, instruction: null} otherwise (disabled, clean,
- *     debounced, missing CLI, missing sessionId, or any error)
+ * Returns the decision (the instruction text is not needed by the caller: the
+ * core wrote it to the pending record itself, which is what makes the
+ * ownership check and the staging atomic).
  *
- * The CLI itself records the request time when it returns reconcile=true,
- * opening the existing debounce window; this function does not duplicate
- * that bookkeeping.
+ * A `false` result is the normal outcome for a detached session, a clean
+ * checkpoint, a debounce window that has not elapsed, a project with
+ * auto-checkpoint off, or a missing CLI — all of which must stay silent.
  */
-export function checkReconcileBoundary(worktree: string, sessionId: string): ReconcileDecision {
+export function stageReconcileBoundary(worktree: string, sessionId: string): ReconcileDecision {
   if (!worktree) return { reconcile: false, instruction: null };
   if (!sessionId) return { reconcile: false, instruction: null };
   const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
   if (!existsSync(cli)) return { reconcile: false, instruction: null };
   let result: CliRunResult;
   try {
-    result = runCheckReconcile(cli, worktree, sessionId);
+    result = runStageReconcile(cli, worktree, sessionId);
   } catch {
     return { reconcile: false, instruction: null };
   }
@@ -425,24 +414,6 @@ export function checkReconcileBoundary(worktree: string, sessionId: string): Rec
   }
   return { reconcile: true, instruction: result.stdout };
 }
-/**
- * Stage a reconciliation instruction for delivery on the next chat call.
- *
- * The file lives under `.claude-task/` so it shares the project's
- * ownership boundary; it is purely ephemeral and is removed the first
- * time the owning session collects it via `takePendingInstruction`.
- */
-export function writePendingReconciliation(worktree: string, instruction: string): void {
-  if (!worktree || !instruction) return;
-  const dir = join(worktree, ".claude-task");
-  try {
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(pendingInstructionPath(worktree), instruction, "utf8");
-  } catch {
-    // swallow — best-effort bridge between boundary and next chat call
-  }
-}
-
 
 /**
  * Collect the staged reconciliation instruction, if any, for `sessionId`.
@@ -459,13 +430,14 @@ export function writePendingReconciliation(worktree: string, instruction: string
  */
 export function takePendingInstruction(worktree: string, sessionId: string): string | null {
   if (!worktree || !sessionId) return null;
-  // Nothing staged is the common case — a store stages at most one instruction
-  // per debounce window. Skipping the CLI here keeps the per-chat-turn cost at
-  // zero for turns that have nothing to collect. This check is only a
-  // short-circuit for "there is nothing to take"; it is deliberately NOT a
-  // substitute for the CLI's ownership check, which is what makes the take
-  // itself atomic.
-  if (!existsSync(pendingInstructionPath(worktree))) return null;
+  // Skip the spawn entirely when the project has no store directory: nothing
+  // can have been staged. This is the one cheap gate left in this file, and it
+  // is a directory that the adapter already reads config and state from — not
+  // a second copy of the pending file's name. Keeping that name in two places
+  // is what the core's staging move removed: if the adapter's copy drifted,
+  // the short-circuit would silently skip collection and the instruction would
+  // never be delivered, with nothing in the suite able to notice.
+  if (!existsSync(join(worktree, ".claude-task"))) return null;
   const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
   if (!existsSync(cli)) return null;
   let result: CliRunResult;
@@ -476,6 +448,28 @@ export function takePendingInstruction(worktree: string, sessionId: string): str
   }
   if (result.status !== 0 || !result.stdout) return null;
   return result.stdout;
+}
+
+// ─── Prompt-once bookkeeping ────────────────────────────────────────────────
+//
+// Sessions this process has already shown the attach prompt to.
+//
+// In-memory and per-process on purpose. Declining the prompt is a property of
+// a conversation, not of the project, so persisting it would outlive the thing
+// it describes — and would need an expiry story this feature deliberately does
+// not have (no TTL, no session manager, no background cleanup). Keyed by
+// session id, so two OpenCode sessions inside one process never share an
+// entry, and a restart re-prompts exactly once per session, at a boundary the
+// user may answer differently.
+//
+// Suppressing the *prompt* never suppresses the attach command: a user who
+// changes their mind can still run `task-store attach ...`, and the next chat
+// call sees the session as the owner.
+const promptedSessions = new Set<string>();
+
+/** Test seam: clear the in-process prompt memory between unrelated cases. */
+export function _resetPromptStateForTests(): void {
+  promptedSessions.clear();
 }
 
 // ─── System-prompt composition ──────────────────────────────────────────────
@@ -700,7 +694,15 @@ export function applySystemInjection(worktree: string, system: string[], session
   let attachPrompt: string | null = null;
   try {
     if (hasPromptableWork(worktree) && effectiveMode(worktree) === "conservative") {
-      attachPrompt = buildAttachPrompt(worktree, sessionId, readAttachStatus(worktree));
+      const candidate = buildAttachPrompt(worktree, sessionId, readAttachStatus(worktree));
+      // Ask once per session lifecycle. This hook fires on every chat call, so
+      // without this a detached session that declined would be asked again on
+      // every turn — the prompt stops reading as a decision point and starts
+      // reading as noise the user learns to skip.
+      if (candidate !== null && !promptedSessions.has(sessionId)) {
+        promptedSessions.add(sessionId);
+        attachPrompt = candidate;
+      }
     }
   } catch {
     // swallow — same

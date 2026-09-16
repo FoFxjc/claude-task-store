@@ -12,7 +12,8 @@
 #       - state.json is never mutated
 #
 #   * When auto_checkpoint = conservative + dirty state:
-#       - session.idle boundary fires checkReconcileBoundary
+#       - session.idle boundary stages the instruction through
+#         `task-store auto stage-instruction` (one locked call)
 #       - the pending reconciliation file is staged under .claude-task/
 #       - the staged instruction contains the trust hierarchy verbatim
 #       - state.json is never mutated
@@ -212,8 +213,8 @@ plugin_path = sys.argv[1]
 with open(plugin_path) as f:
     content = f.read()
 patched = content.replace(
-    'writePendingReconciliation(worktree, decision.instruction);',
-    '''writePendingReconciliation(worktree, decision.instruction);
+    'stageReconcileBoundary(worktree, sessionID);',
+    '''stageReconcileBoundary(worktree, sessionID);
     try {
       const fs = await import("node:fs");
       fs.appendFileSync(worktree + "/.claude-task/.boundary.log", "BOUNDARY HIT instruction-staged\\n");
@@ -380,7 +381,7 @@ echo "═══ Test 6: paths with spaces and apostrophes (conservative + dirty)
 
 T4_TEMPLATE="/tmp/pat's odd proj-XXXXXXXX"
 T4="$(mktemp -d "$T4_TEMPLATE")"
-trap 'rm -rf "${T1}" "${T2}" "${T3}" "${T5}" "${T4}"' EXIT
+trap 'rm -rf "${T1:-}" "${T2:-}" "${T3:-}" "${T5:-}" "${T4:-}" "${T6:-}"' EXIT
 
 git init -q "$T4"
 install_cli "$T4"
@@ -401,8 +402,8 @@ plugin_path = sys.argv[1]
 with open(plugin_path) as f:
     content = f.read()
 patched = content.replace(
-    'writePendingReconciliation(worktree, decision.instruction);',
-    '''writePendingReconciliation(worktree, decision.instruction);
+    'stageReconcileBoundary(worktree, sessionID);',
+    '''stageReconcileBoundary(worktree, sessionID);
     try {
       const fs = await import("node:fs");
       fs.appendFileSync(worktree + "/.claude-task/.boundary.log", "BOUNDARY HIT\\n");
@@ -424,6 +425,106 @@ check "spaced path: boundary hook fired" \
 
 check "spaced path: pending instruction staged" \
   "$([[ -s "$T4/.claude-task/.pending-reconcile-instruction.txt" ]] && echo true || echo false)"
+
+# ── Test 8: attach prompt on the first chat call, asked only once ─────────
+#
+# Two claims that only a real host can settle:
+#
+#   1. The session id used for the prompt comes from the transform hook's own
+#      input. On a session's FIRST chat call no tool event and no idle event
+#      has fired, so a real session id in the printed command can only have
+#      come from that input — which is what stops one session's identity
+#      leaking into another's.
+#   2. A detached session is asked once, not on every chat call.
+echo ""
+echo "═══ Test 8: first-call attach prompt, asked once per session ═══"
+
+T6=$(mktemp -d)
+trap 'rm -rf "${T1:-}" "${T2:-}" "${T3:-}" "${T4:-}" "${T5:-}" "${T6:-}"' EXIT
+
+git init -q "$T6"
+install_cli "$T6"
+
+CLI6="$T6/.claude/task-store/bin/task-store.js"
+node "$CLI6" init "Attach prompt" "Task A" --root "$T6" >/dev/null
+node "$CLI6" config auto-checkpoint conservative --root "$T6" >/dev/null
+# Deliberately no attachment: this is the fresh-session case.
+
+install_plugin "$T6"
+
+# Diagnostic patch: append each injected system block to a log so the test can
+# see what the model would have received. The anchor is asserted, so a refactor
+# fails loudly instead of silently recording nothing.
+python3 - "$T6/.opencode/plugin/task-store/injection.ts" <<'DIAGEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+
+anchor = """  const block = parts.join(SYSTEM_INJECTION_SEPARATOR);"""
+if anchor not in content:
+    sys.exit("diagnostic anchor not found in " + path)
+
+# The log line must come AFTER the anchor: `block` is declared by the anchor
+# statement, and a `const` reference before its declaration throws.
+patched = content.replace(anchor, anchor + """
+  try {
+    writeFileSync(worktree + "/.claude-task/.system-inject.log", block + "\\n=====\\n", { flag: "a" });
+  } catch {}""")
+
+if patched == content:
+    sys.exit("diagnostic patch did not apply to " + path)
+
+with open(path, "w") as f:
+    f.write(patched)
+DIAGEOF
+
+cd "$T6"
+INJECT_LOG="$T6/.claude-task/.system-inject.log"
+opencode run --print-logs --log-level INFO "exit" > /tmp/opencode_ac_prompt1.log 2>&1 || true
+SID6="$(grep -oE 'ses_[A-Za-z0-9]+' /tmp/opencode_ac_prompt1.log | head -1)"
+
+check "first-call prompt: a session id is available on the very first chat call" \
+  "$([[ -n "$SID6" ]] && echo true || echo false)"
+
+check "first-call prompt: the attach prompt is injected on the first chat call" \
+  "$(if [[ -s "$INJECT_LOG" ]]; then
+      grep -q 'Continue those tasks in this session?' "$INJECT_LOG" && echo true || echo false
+    else
+      echo false
+    fi)"
+
+check "first-call prompt: the printed command carries this session's own id" \
+  "$(if [[ -s "$INJECT_LOG" && -n "$SID6" ]]; then
+      # The command is shell-quoted, so match the id inside its quoting.
+      grep -qF -- "--session-id '$SID6'" "$INJECT_LOG" && echo true || echo false
+    else
+      echo false
+    fi)"
+
+# A single `opencode run` performs more than one chat call on this build, and
+# each one re-enters the transform hook. The question must appear once while the
+# resume projection keeps flowing — that is the per-session prompt memory, seen
+# from a real host rather than from a unit stub.
+CHAT_CALLS=$(grep -c '^=====$' "$INJECT_LOG" 2>/dev/null || echo 0)
+PROMPTS_IN_RUN=$(grep -c 'Continue those tasks in this session?' "$INJECT_LOG" 2>/dev/null || echo 0)
+RESUME_IN_RUN=$(grep -c 'RESUME CONTEXT' "$INJECT_LOG" 2>/dev/null || echo 0)
+check "prompt-once: asked once across ${CHAT_CALLS} chat call(s) in one run" \
+  "$([[ "$PROMPTS_IN_RUN" == "1" ]] && echo true || echo false)"
+check "prompt-once: every chat call in the run still injects the resume projection" \
+  "$([[ "$RESUME_IN_RUN" == "$CHAT_CALLS" && "$RESUME_IN_RUN" -ge 1 ]] && echo true || echo false)"
+
+# A second process re-prompts. That is the documented design — the memory is
+# in-process, so there is no decline state to persist, expire, or clean up —
+# and this pins it so nobody "fixes" it by writing decline state to the store.
+opencode run --session "$SID6" --print-logs --log-level INFO "exit" > /tmp/opencode_ac_prompt2.log 2>&1 || true
+PROMPTS_TOTAL=$(grep -c 'Continue those tasks in this session?' "$INJECT_LOG" 2>/dev/null || echo 0)
+check "prompt-once: a fresh process asks again (no persisted decline state)" \
+  "$([[ "$PROMPTS_TOTAL" -gt "$PROMPTS_IN_RUN" ]] && echo true || echo false)"
+
+check "prompt-once: declining wrote nothing to the task store" \
+  "$([[ ! -f "$T6/.claude-task/attachment.json" ]] && echo true || echo false)"
 
 # ── Results ───────────────────────────────────────────────────────────────
 echo ""

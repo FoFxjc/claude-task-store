@@ -17,7 +17,14 @@ import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 
 import { initState, readState, completeTask, setNextAction, getActiveTopic } from '../src/core.js';
-import { isAttached as _isAttached, attach, release } from '../src/attachment.js';
+import {
+  isAttached as _isAttached,
+  attach,
+  release,
+  clearAttachment,
+  normalizeIdentity,
+  readAttachment,
+} from '../src/attachment.js';
 import {
   readConfig,
   writeMode,
@@ -35,6 +42,9 @@ import {
   NEW_STORE_MODE,
   DEFAULT_DEBOUNCE_SECONDS,
   RECONCILE_INSTRUCTION,
+  stagePendingInstruction,
+  takePendingInstruction,
+  pendingInstructionFilePath,
 } from '../src/autocheckpoint.js';
 
 function makeTmpDir(): string {
@@ -61,6 +71,9 @@ function seed(root: string): void {
   storeSeed(root);
   attachTestSession(root);
 }
+function isAttachedOther(sessionId: string, root: string): boolean {
+  return _isAttached(sessionId, root);
+}
 function laterBy(seconds: number): Date {
   return new Date(Date.now() + seconds * 1000);
 }
@@ -69,6 +82,28 @@ describe('configuration', () => {
   let root: string;
   beforeEach(() => { root = makeTmpDir(); seed(root); });
   afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  it('switching the mode off clears the attachment, leaving no dead owner', () => {
+    // The scenario from the review: a session attaches, the user runs
+    // `config auto-checkpoint off`, the session later ends, and conservative
+    // mode is enabled again. The session-end hook releases only when the mode
+    // it observes is conservative, so nothing else clears the record — the
+    // next session would meet an owner that ended long ago and be pushed
+    // through a takeover confirmation for no reason.
+    expect(readAttachment(root)?.session_id).toBe(TEST_SESSION_ID);
+
+    writeMode('off', root);
+    expect(readAttachment(root)).toBeNull();
+
+    writeMode('conservative', root);
+    // No owner at all now, so a fresh session gets the first-time prompt.
+    expect(_isAttached(TEST_SESSION_ID, root)).toBe(false);
+  });
+
+  it('switching the mode on does not disturb the current owner', () => {
+    writeMode('conservative', root);
+    expect(readAttachment(root)?.session_id).toBe(TEST_SESSION_ID);
+  });
 
   it('defaults to off with no config file present', () => {
     expect(existsSync(configFilePath(root))).toBe(false);
@@ -259,7 +294,7 @@ describe('shouldReconcile', () => {
     writeMode('conservative', root);
     await new Promise(r => setTimeout(r, 5));
     markDirty(root, 'Edit', TEST_SESSION_ID);
-    markReconcileRequested(root);
+    markReconcileRequested(root, new Date(), TEST_SESSION_ID);
     // Even far past the debounce window, nothing new has happened.
     const d = shouldReconcile(root, laterBy(86400), TEST_SESSION_ID);
     expect(d.reconcile).toBe(false);
@@ -270,7 +305,7 @@ describe('shouldReconcile', () => {
     writeMode('conservative', root);
     await new Promise(r => setTimeout(r, 5));
     markDirty(root, 'Edit', TEST_SESSION_ID);
-    markReconcileRequested(root);
+    markReconcileRequested(root, new Date(), TEST_SESSION_ID);
     // Strictly after the request: timestamps are millisecond-resolution and a
     // signal landing in the same millisecond as the request is deliberately
     // NOT counted as new work (ties resolve toward asking less often).
@@ -285,7 +320,7 @@ describe('shouldReconcile', () => {
     writeMode('conservative', root);
     await new Promise(r => setTimeout(r, 5));
     markDirty(root, 'Edit', TEST_SESSION_ID);
-    markReconcileRequested(root);
+    markReconcileRequested(root, new Date(), TEST_SESSION_ID);
     await new Promise(r => setTimeout(r, 5));
     markDirty(root, 'Edit', TEST_SESSION_ID);
     const d = shouldReconcile(root, laterBy(DEFAULT_DEBOUNCE_SECONDS + 1), TEST_SESSION_ID);
@@ -302,7 +337,7 @@ describe('shouldReconcile', () => {
       // Simulate a boundary after every single tool call.
       if (shouldReconcile(root, new Date(), TEST_SESSION_ID).reconcile) {
         fired++;
-        markReconcileRequested(root);
+        markReconcileRequested(root, new Date(), TEST_SESSION_ID);
       }
     }
     expect(fired).toBe(1);
@@ -356,7 +391,7 @@ describe('markReconciled', () => {
   it('clears the dirty window and records the time', async () => {
     await new Promise(r => setTimeout(r, 5));
     markDirty(root, 'Edit', TEST_SESSION_ID);
-    markReconciled(root);
+    expect(markReconciled(root, new Date(), TEST_SESSION_ID)).toBe('applied');
     const runtime = readRuntime(root);
     expect(runtime.dirty_since).toBeNull();
     expect(runtime.signal_count).toBe(0);
@@ -368,12 +403,208 @@ describe('markReconciled', () => {
     await new Promise(r => setTimeout(r, 5));
     const before = readState(root)!;
     markDirty(root, 'Edit', TEST_SESSION_ID);
-    markReconcileRequested(root);
-    markReconciled(root);
+    markReconcileRequested(root, new Date(), TEST_SESSION_ID);
+    markReconciled(root, new Date(), TEST_SESSION_ID);
     const after = readState(root)!;
     expect(getActiveTopic(after).tasks.every(t => t.status !== 'done')).toBe(true);
     expect(getActiveTopic(after).next_action).toBe(getActiveTopic(before).next_action);
     expect(after.revision).toBe(before.revision);
+  });
+});
+
+describe('markReconciled ownership (issue #23 review)', () => {
+  // The one verb that CLEARS the shared dirty window. A session that does not
+  // own the attachment calling it would tell the real owner its checkpoint is
+  // clean while its work signal is still pending — so it gates on the same
+  // record markDirty and shouldReconcile use.
+  let root: string;
+  beforeEach(async () => {
+    root = makeTmpDir();
+    seed(root);
+    writeMode('conservative', root);
+    // seed() writes state.json, and freshness compares state.updated_at with
+    // last_signal_at at millisecond resolution — a dirty signal in the same
+    // millisecond reads as "the checkpoint was already written". Same 5ms
+    // barrier the rest of this suite uses.
+    await new Promise(r => setTimeout(r, 5));
+  });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  it('a detached side session cannot clear the owner\'s dirty window', () => {
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    expect(isAttachedOther('other-session', root)).toBe(false);
+
+    expect(markReconciled(root, new Date(), 'other-session')).toBe('detached');
+
+    // The owner's signal survives, and the owner is still asked to reconcile.
+    const runtime = readRuntime(root);
+    expect(runtime.signal_count).toBeGreaterThan(0);
+    expect(runtime.dirty_since).not.toBeNull();
+    expect(runtime.last_reconcile_at).toBeNull();
+    expect(shouldReconcile(root, new Date(), TEST_SESSION_ID).reconcile).toBe(true);
+  });
+
+  it('a session with no id at all cannot clear the window', () => {
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    expect(markReconciled(root)).toBe('detached');
+    expect(readRuntime(root).dirty_since).not.toBeNull();
+  });
+
+  it('reports disabled rather than lying when the mode is off', () => {
+    writeMode('off', root);
+    expect(markReconciled(root, new Date(), TEST_SESSION_ID)).toBe('disabled');
+  });
+
+  it('the owner can still clear its own window', () => {
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    expect(markReconciled(root, new Date(), TEST_SESSION_ID)).toBe('applied');
+    expect(readRuntime(root).dirty_since).toBeNull();
+  });
+
+  it('markReconcileRequested is owner-gated too, so a side session cannot open the debounce window', () => {
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    expect(markReconcileRequested(root, new Date(), 'other-session')).toBe('detached');
+    // Nothing was recorded: the owner's next boundary may still ask.
+    expect(readRuntime(root).last_reconcile_request_at).toBeNull();
+    expect(shouldReconcile(root, new Date(), TEST_SESSION_ID).reconcile).toBe(true);
+  });
+});
+
+describe('inactive-state gate', () => {
+  // An archived or completed checkpoint has no work to reconcile. Without this
+  // the Stop hook would inject a reconciliation instruction for a store the
+  // agent cannot act on, and — because `auto check` also records the request —
+  // it would burn the debounce window doing it.
+  let root: string;
+  beforeEach(async () => {
+    root = makeTmpDir();
+    seed(root);
+    writeMode('conservative', root);
+    // seed() writes state.json, and freshness compares state.updated_at with
+    // last_signal_at at millisecond resolution — a dirty signal in the same
+    // millisecond reads as "the checkpoint was already written". Same 5ms
+    // barrier the rest of this suite uses.
+    await new Promise(r => setTimeout(r, 5));
+  });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  for (const status of ['archived', 'completed'] as const) {
+    it(`never asks for reconciliation when the store is ${status}`, () => {
+      markDirty(root, 'Edit', TEST_SESSION_ID);
+      // Force the active topic into the inactive status.
+      const state = readState(root)!;
+      getActiveTopic(state).status = status;
+      writeFileSync(
+        join(root, '.claude-task', 'state.json'),
+        JSON.stringify(state, null, 2),
+      );
+
+      const decision = shouldReconcile(root, new Date(), TEST_SESSION_ID);
+      expect(decision.reconcile).toBe(false);
+      expect(decision.reason).toBe('inactive-state');
+    });
+  }
+
+  it('still asks when the store is active', () => {
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    expect(shouldReconcile(root, new Date(), TEST_SESSION_ID).reconcile).toBe(true);
+  });
+});
+
+describe('pending instruction staging and binding', () => {
+  let root: string;
+  beforeEach(async () => {
+    root = makeTmpDir();
+    seed(root);
+    writeMode('conservative', root);
+    // seed() writes state.json, and freshness compares state.updated_at with
+    // last_signal_at at millisecond resolution — a dirty signal in the same
+    // millisecond reads as "the checkpoint was already written". Same 5ms
+    // barrier the rest of this suite uses.
+    await new Promise(r => setTimeout(r, 5));
+  });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  it('stages the canonical instruction for the owning session', () => {
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    const staged = stagePendingInstruction(root, new Date(), TEST_SESSION_ID);
+    expect(staged.reconcile).toBe(true);
+    expect(staged.instruction).toBe(RECONCILE_INSTRUCTION);
+
+    const record = JSON.parse(readFileSync(pendingInstructionFilePath(root), 'utf8'));
+    expect(record.session_id).toBe(TEST_SESSION_ID);
+    expect(record.instruction).toBe(RECONCILE_INSTRUCTION);
+  });
+
+  it('a detached session cannot stage anything', () => {
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    const staged = stagePendingInstruction(root, new Date(), 'other-session');
+    expect(staged.reconcile).toBe(false);
+    expect(staged.reason).toBe('detached');
+    expect(existsSync(pendingInstructionFilePath(root))).toBe(false);
+  });
+
+  it('does not stage when the decision says no, and does not burn the debounce window doing it', () => {
+    // Clean store: nothing has changed since the last write.
+    const staged = stagePendingInstruction(root, new Date(), TEST_SESSION_ID);
+    expect(staged.reconcile).toBe(false);
+    expect(staged.instruction).toBeNull();
+    expect(readRuntime(root).last_reconcile_request_at).toBeNull();
+  });
+
+  it('the owner collects its own staged instruction exactly once', () => {
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    stagePendingInstruction(root, new Date(), TEST_SESSION_ID);
+    expect(takePendingInstruction(root, TEST_SESSION_ID)).toBe(RECONCILE_INSTRUCTION);
+    expect(existsSync(pendingInstructionFilePath(root))).toBe(false);
+    expect(takePendingInstruction(root, TEST_SESSION_ID)).toBeNull();
+  });
+
+  it('after a takeover the previous owner can neither stage nor consume', () => {
+    // This is the race the review found: the adapter used to ask the CLI and
+    // then write the file itself, with the lock released in between.
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    stagePendingInstruction(root, new Date(), TEST_SESSION_ID);
+
+    attach({ sessionId: 'new-owner', host: 'opencode', takeover: true, confirm: true }, root);
+
+    // Consume: the displaced session owns nothing to collect...
+    expect(takePendingInstruction(root, TEST_SESSION_ID)).toBeNull();
+    // ...and the record it staged is not handed to the new owner either.
+    expect(takePendingInstruction(root, 'new-owner')).toBeNull();
+    // The file is left in place for the new owner's own staging to replace.
+    expect(existsSync(pendingInstructionFilePath(root))).toBe(true);
+
+    // Stage: a displaced session cannot stage a fresh instruction.
+    expect(stagePendingInstruction(root, new Date(), TEST_SESSION_ID).reconcile).toBe(false);
+
+    // The new owner is not locked out: it stages and collects its own record
+    // normally. The debounce window the previous owner legitimately opened is
+    // shared runtime state and still applies — that is the existing design
+    // (no lease, and no takeover-resets-the-window rule), so the new owner's
+    // first genuine request comes once the window has elapsed.
+    markDirty(root, 'Edit', 'new-owner');
+    expect(stagePendingInstruction(root, laterBy(3600), 'new-owner').reconcile).toBe(true);
+    expect(takePendingInstruction(root, 'new-owner')).toBe(RECONCILE_INSTRUCTION);
+  });
+
+  it('after a release the previous owner can neither stage nor consume', () => {
+    markDirty(root, 'Edit', TEST_SESSION_ID);
+    stagePendingInstruction(root, new Date(), TEST_SESSION_ID);
+    release({ sessionId: TEST_SESSION_ID }, root);
+
+    expect(takePendingInstruction(root, TEST_SESSION_ID)).toBeNull();
+    expect(stagePendingInstruction(root, new Date(), TEST_SESSION_ID).reconcile).toBe(false);
+  });
+
+  it('discards an unreadable record instead of delivering it', () => {
+    // A file left by a pre-binding version is not deliverable by anyone.
+    const path = pendingInstructionFilePath(root);
+    mkdirSync(join(root, '.claude-task'), { recursive: true });
+    writeFileSync(path, 'free text from an older version', 'utf8');
+    attach({ sessionId: TEST_SESSION_ID, host: 'claude-code' }, root);
+    expect(takePendingInstruction(root, TEST_SESSION_ID)).toBeNull();
+    expect(existsSync(path)).toBe(false);
   });
 });
 

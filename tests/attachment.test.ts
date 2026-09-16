@@ -17,6 +17,8 @@ import {
   attach,
   release,
   readAttachment,
+  clearAttachment,
+  normalizeIdentity,
   attachmentFilePath,
   isAttached,
   renderAttachPrompt,
@@ -190,6 +192,59 @@ describe('release', () => {
     }
     // The record is still there, which is exactly why the failure must surface.
     expect(readAttachment(root)?.session_id).toBe('s');
+  });
+});
+
+describe('identity normalization', () => {
+  // readAttachment() trims what it reads back, so a stored id must be trimmed
+  // on the way in too — otherwise `--session-id " abc"` is written verbatim,
+  // read back as "abc", and the session can never prove ownership of its own
+  // record, including to release it.
+  let root: string;
+  beforeEach(() => { root = makeTmpDir(); seedStore(root); });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  it('attaching with padded whitespace still round-trips to ownership', () => {
+    attach({ sessionId: '  padded  ', host: ' claude-code ' }, root);
+    expect(readAttachment(root)?.session_id).toBe('padded');
+    expect(readAttachment(root)?.host).toBe('claude-code');
+    expect(isAttached('padded', root)).toBe(true);
+    // The padded spelling is the same session, so it must be recognised too.
+    expect(isAttached('  padded  ', root)).toBe(true);
+  });
+
+  it('a padded spelling can release the record it created', () => {
+    attach({ sessionId: ' padded ', host: 'opencode' }, root);
+    expect(release({ sessionId: '  padded' }, root).outcome).toBe('released');
+    expect(existsSync(attachmentFilePath(root))).toBe(false);
+  });
+
+  it('a padded spelling is not a different owner', () => {
+    attach({ sessionId: 'owner', host: 'opencode' }, root);
+    expect(attach({ sessionId: ' owner ', host: 'opencode' }, root).outcome).toBe('refreshed');
+  });
+
+  it('exposes the same normalization rule the pending record needs', () => {
+    expect(normalizeIdentity('  x  ')).toBe('x');
+    expect(normalizeIdentity('')).toBe('');
+  });
+});
+
+describe('clearAttachment', () => {
+  // The administrative clear used when auto-checkpoint is switched off: no
+  // session owns the record by definition any more, so it is not owner-gated.
+  let root: string;
+  beforeEach(() => { root = makeTmpDir(); seedStore(root); });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  it('removes a record owned by any session', () => {
+    attach({ sessionId: 'someone-else', host: 'claude-code' }, root);
+    expect(clearAttachment(root)).toBe(true);
+    expect(readAttachment(root)).toBeNull();
+  });
+
+  it('is a no-op when nothing is attached', () => {
+    expect(clearAttachment(root)).toBe(false);
   });
 });
 
