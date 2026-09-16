@@ -44,7 +44,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
-import { storePath, findProjectRoot } from './core.js';
+import { storePath, findProjectRoot } from './paths.js';
 
 const ATTACHMENT_FILE = 'attachment.json';
 

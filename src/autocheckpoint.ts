@@ -41,7 +41,8 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
-import { readState, storePath, findProjectRoot, getActiveTopic } from './core.js';
+import { readState, getActiveTopic } from './core.js';
+import { storePath, findProjectRoot } from './paths.js';
 import { isAttached, clearAttachment, normalizeIdentity } from './attachment.js';
 
 const CONFIG_FILE = 'config.json';

@@ -8,10 +8,11 @@ import {
   initState, readState, writeState, startTask, completeTask, blockTask,
   resumeTask, addTask, recordAttempt, recordDecision, setNextAction,
   archiveState, buildResumeContext, repairState, detectStaleTasks, RESUME_BUDGET_CHARS,
-  compareAndWriteState, ConflictError, withStoreLock, LockError,
-  stateFilePath, historyFilePath, StateError, findProjectRoot, storePath,
-  getActiveTopic, addTopic, useTopic, commitBatch,
+  compareAndWriteState, ConflictError,
+  StateError, getActiveTopic, addTopic, useTopic, commitBatch,
 } from './core.js';
+import { findProjectRoot, storePath, stateFilePath, historyFilePath } from './paths.js';
+import { withStoreLock, LockError } from './lock.js';
 import {
   readConfig, writeMode, markDirty, shouldReconcile, markReconcileRequested,
   markReconciled, freshness, readRuntime, RECONCILE_INSTRUCTION, takePendingInstruction,
