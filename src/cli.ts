@@ -9,16 +9,25 @@ import {
   resumeTask, addTask, recordAttempt, recordDecision, setNextAction,
   archiveState, buildResumeContext, repairState, detectStaleTasks, RESUME_BUDGET_CHARS,
   compareAndWriteState, ConflictError, withStoreLock, LockError,
-  stateFilePath, historyFilePath, StateError, findProjectRoot,
+  stateFilePath, historyFilePath, StateError, findProjectRoot, storePath,
   getActiveTopic, addTopic, useTopic, commitBatch,
 } from './core.js';
 import {
   readConfig, writeMode, markDirty, shouldReconcile, markReconcileRequested,
-  markReconciled, freshness, readRuntime, RECONCILE_INSTRUCTION,
+  markReconciled, freshness, readRuntime, RECONCILE_INSTRUCTION, takePendingInstruction,
+  stagePendingInstruction, pendingInstructionFilePath, isEnabled,
   DEFAULT_DEBOUNCE_SECONDS, debounceSeconds, configFilePath,
   NEW_STORE_MODE,
   type AutoCheckpointMode,
 } from './autocheckpoint.js';
+import {
+  attach as attachSession,
+  release as releaseSession,
+  readAttachment,
+  AttachmentConflictError,
+  isKnownHost,
+  isAttached as isAttachedSession,
+} from './attachment.js';
 import { readFileSync, existsSync } from 'fs';
 
 const HELP = `
@@ -56,17 +65,40 @@ CONFIG:
 AUTO-CHECKPOINT (adapter plumbing — used by hooks/plugins, rarely by hand):
   auto status                       Show dirty/freshness state and why
   auto mark-dirty [signal]          Record that repository state may have changed
+                                    (requires --session-id matching the attached session)
   auto check [--instruction]        Exit 0 if reconciliation is warranted, else 1
+                                    (requires --session-id matching the attached session)
   auto reconciled                   Record that reconciliation completed
+                                    (requires --session-id matching the attachment)
+  auto stage-instruction            Decide + stage a reconciliation instruction for
+                                    the owning session's next chat call, in one step
+  auto take-instruction             Hand the staged reconciliation instruction to
+                                    the owning session (one-shot), else exit 1
 
   These commands never read or write task state. Checkpoint mutation stays
   exclusive to the verbs above (start/done/attempt/block/decide/next).
+
+SESSION ATTACHMENT (intent boundary, conservative auto-checkpoint only):
+  attach status                     Show the current attachment (or "none")
+  attach --session-id <id> --host <h> --yes
+                                    Attach this session (fails if another owns)
+  attach --session-id <id> --host <h> --takeover --confirm
+                                    Attach by taking over an existing owner
+  attach --session-id <id> --release
+                                    Release the attachment if owned by this session
+                                    (--host is accepted but not required: release
+                                    checks ownership, which the host is not part of)
 
 FLAGS:
   --root <path>         Use a specific project root (default: auto-detect from cwd)
   --auto-checkpoint <mode>
                         Set the initial mode: ${NEW_STORE_MODE} (default) | off
   --by <agent>          Record who/what is writing (e.g. --by claude-code, --by codex)
+  --session-id <id>     Session identifier (used by auto/attach to gate on ownership)
+  --host <name>         Host identifier for attach: claude-code | opencode | manual
+  --yes                 Attach without --takeover (default when no current owner)
+  --takeover            Overwrite the existing attachment (requires --confirm)
+  --confirm             Confirm a --takeover (required for explicit takeover)
   --expect-rev <N>      Optimistic concurrency: fail if on-disk revision != N.
                          Enforced atomically via an O_EXCL lock file around the
                          read-compare-write cycle for this CLI invocation — see
@@ -76,7 +108,6 @@ FLAGS:
   --topic <name>        Topic scope for commit, status, and show.
   --help, -h            Show this help
 `;
-
 function parseArgs(argv: string[]): { command: string; args: string[]; flags: Record<string, string | boolean>; evidence: string[] } {
   const args: string[] = [];
   const flags: Record<string, string | boolean> = {};
@@ -126,6 +157,26 @@ function parseArgs(argv: string[]): { command: string; args: string[]; flags: Re
       }
       flags.topic = value;
     }
+    else if (a === '--session-id') {
+      const value = argv[++i];
+      if (value === undefined) {
+        console.error('Error: --session-id requires a value');
+        process.exit(1);
+      }
+      flags['session-id'] = value;
+    }
+    else if (a === '--host') {
+      const value = argv[++i];
+      if (value === undefined) {
+        console.error('Error: --host requires a value');
+        process.exit(1);
+      }
+      flags.host = value;
+    }
+    else if (a === '--yes') { flags.yes = true; }
+    else if (a === '--takeover') { flags.takeover = true; }
+    else if (a === '--confirm') { flags.confirm = true; }
+    else if (a === '--release') { flags.release = true; }
     else if (!command) { command = a; }
     else { args.push(a); }
   }
@@ -294,7 +345,6 @@ async function main(): Promise<void> {
       console.error('Error: --auto-checkpoint is only supported on `init`.');
       process.exit(1);
     }
-
     // --by is only meaningful on commands that write state. Passing it to a
     // read-only command was previously silently ignored, which is not
     // acceptable — reject it explicitly instead (see
@@ -314,6 +364,43 @@ async function main(): Promise<void> {
       process.exit(1);
     }
 
+    // Session-attachment flags are only meaningful on `attach` and `auto`.
+    // Reject them on every other command so an agent typing the wrong
+    // place gets a loud error rather than silently no-op'ing later.
+    const ATTACHMENT_FLAGS = ['session-id', 'host', 'yes', 'takeover', 'confirm', 'release'] as const;
+    if (command !== 'attach' && command !== 'auto') {
+      for (const f of ATTACHMENT_FLAGS) {
+        if (flags[f] !== undefined) {
+          console.error(`Error: --${f} is only supported on \`attach\` and \`auto\`.`);
+          process.exit(1);
+        }
+      }
+    }
+    // On `auto`, the only meaningful attachment flag is --session-id. The
+    // auto verbs never read a host, and a session cannot attach itself through
+    // `auto` — so --host / --yes / --takeover / --confirm / --release there
+    // were accepted and silently ignored, which reads as "the flag worked".
+    // An adapter that tried to take over through `auto` would get no error and
+    // no effect; fail loudly instead.
+    if (command === 'auto') {
+      for (const f of ATTACHMENT_FLAGS) {
+        if (f !== 'session-id' && flags[f] !== undefined) {
+          console.error(`Error: --${f} is not supported on \`auto\`.`);
+          process.exit(1);
+        }
+      }
+    }
+    // On `attach`, --takeover and --release are mutually exclusive: one
+    // writes the record, the other clears it. Forcing the caller to pick
+    // one prevents an accidental "do both, last one wins" silent failure.
+    if (command === 'attach' && flags.takeover && flags.release) {
+      console.error('Error: --takeover and --release are mutually exclusive on `attach`.');
+      process.exit(1);
+    }
+    if (command === 'attach' && flags.confirm && !flags.takeover) {
+      console.error('Error: --confirm is only meaningful with --takeover on `attach`.');
+      process.exit(1);
+    }
     // Every command that writes state performs a read-modify-write cycle, so
     // every one of them must hold the store lock for the whole cycle — not
     // just the `--expect-rev` ones. Locking only the `--expect-rev` path
@@ -322,16 +409,76 @@ async function main(): Promise<void> {
     // concurrent CLI invocations are serialized.
     //
     // This set is enumerated explicitly rather than derived as "not
-    // read-only" so that an unknown/misspelled command does not take the
-    // lock (and does not create .claude-task/) on its way to the usage error.
     const MUTATING_COMMANDS = new Set([
       'init', 'add', 'start', 'done', 'block', 'resume-task',
       'attempt', 'decide', 'next', 'archive', 'repair',
+      // 'attach' mutates the (gitignored) attachment record. It must run
+      // under the same store lock as task-state writers so a concurrent
+      // `auto check` from the same project cannot observe a half-written
+      // attachment record during a takeover.
+      'attach',
       // 'commit' is deliberately absent here: commitBatch() acquires the lock
       // internally, and wrapping runCommand() in yet another withStoreLock()
       // would cause a double-lock deadlock.
     ]);
     const topicIsMutating = command === 'topic' && (topicSubcommand === 'add' || topicSubcommand === 'use');
+    // Changing the auto-checkpoint mode mutates config plus ephemeral runtime
+    // (and, for `off`, clears attachment/pending state). It must serialize
+    // with the auto verbs and attach/takeover; otherwise a concurrent
+    // stage-instruction can make a decision under conservative mode and write
+    // pending state after another process has already switched the feature off.
+    // Read-only `config` queries stay lock-free.
+    const configIsMutating = command === 'config'
+      && args[0] === 'auto-checkpoint'
+      && args[1] !== undefined;
+    // `attach status` is a pure read of attachment.json. It must NOT take the
+    // store lock: withStoreLock() creates .claude-task/ before running, so
+    // locking a status query would materialize a store directory in a project
+    // that has never been initialized — which happens on every OpenCode chat
+    // call, where the adapter asks for the attachment before anything else.
+    const attachIsReadOnly = command === 'attach' && args[0] === 'status';
+    // `auto mark-dirty` / `auto check` / `auto reconciled` write the shared
+    // runtime, but they gate that write on the attachment record — which
+    // `attach` can change concurrently. Without the lock a takeover landing
+    // between the ownership check and the runtime write would attribute a
+    // detached session's activity to the new owner. Taking the store lock
+    // serializes the pair. `auto status` writes nothing and stays lock-free,
+    // for the same reason `attach status` does.
+    const autoSubcommand = command === 'auto' ? args[0] : undefined;
+    const autoIsMutating = command === 'auto'
+      && (autoSubcommand === 'mark-dirty'
+        || autoSubcommand === 'check'
+        || autoSubcommand === 'reconciled'
+        || autoSubcommand === 'stage-instruction'
+        || autoSubcommand === 'take-instruction');
+
+    // Zero-materialization gate, evaluated BEFORE lock acquisition.
+    //
+    // withStoreLock() creates `.claude-task/` when it is missing — taking the
+    // lock is itself a write. Without this gate, one `auto mark-dirty` from an
+    // adapter in a project that never ran `task-store init` (or an OpenCode
+    // project that has the plugin but no store) creates the directory the
+    // no-op was supposed to leave alone, and an opted-out project stops being
+    // free. So each verb must show it has something to do first.
+    //
+    // Both predicates are pure reads. When the gate says "not applicable" the
+    // core call still runs unlocked, but every mutating core verb re-checks
+    // the same conditions before it writes, so the only way to reach a write
+    // through that path is for the mode and the state file to both appear in
+    // the microseconds between the gate and the call — and the write itself is
+    // an atomic rename. The lock exists to stop concurrent writers losing
+    // updates; that window is not a new source of lost updates.
+    const autoStoreApplicable = isEnabled(projectRoot) && existsSync(stateFilePath(projectRoot));
+    const autoApplicable = autoSubcommand === 'take-instruction'
+      // Collection must hold the lock whenever a store already exists. Gating
+      // the lock on the pending file itself creates a TOCTOU hole: the file can
+      // be staged after the existence check but before the unlocked collector
+      // runs, reopening the exact owner-check/delete race this verb exists to
+      // close. Checking the directory preserves zero-materialization because
+      // an uninitialized project still does not create it.
+      ? existsSync(storePath(projectRoot))
+      : autoStoreApplicable;
+    const autoNeedsLock = autoIsMutating && autoApplicable;
 
     // The revision check and the command's mutation both run inside
     // runCommand(), so when the whole thing runs under withStoreLock() the
@@ -653,17 +800,20 @@ async function main(): Promise<void> {
       }
       case 'auto': {
         const sub = args[0];
+        const sessionId = flags['session-id'] !== undefined ? String(flags['session-id']) : undefined;
 
         switch (sub) {
           case 'mark-dirty': {
             // Hot path: called once per matched tool call by an adapter.
-            // No-ops silently when disabled or when no task store exists.
-            const runtime = markDirty(projectRoot, args[1]);
+            // No-ops silently when disabled, when no task store exists, or
+            // when the calling session is not the recorded owner — see
+            // attachment.ts for the intent boundary.
+            const runtime = markDirty(projectRoot, args[1], sessionId);
             if (runtime) console.log(`dirty since ${runtime.dirty_since} (${runtime.signal_count} signal(s))`);
             break;
           }
           case 'check': {
-            const decision = shouldReconcile(projectRoot);
+            const decision = shouldReconcile(projectRoot, new Date(), sessionId);
             if (!decision.reconcile) {
               console.log(`no-reconcile: ${decision.reason}`);
               process.exit(1);
@@ -672,7 +822,14 @@ async function main(): Promise<void> {
             // point of view: an adapter that prints the instruction has, by
             // definition, asked. Recording it here means no adapter can
             // forget to, and therefore no adapter can nag in a loop.
-            markReconcileRequested(projectRoot);
+            const recorded = markReconcileRequested(projectRoot, new Date(), sessionId);
+            if (recorded !== 'applied') {
+              // The decision and the bookkeeping are serialized by the store
+              // lock on the CLI path, but keep the second gate explicit: never
+              // print an instruction if ownership/mode ceased to apply.
+              console.log(`no-reconcile: ${recorded}`);
+              process.exit(1);
+            }
             if (args.includes('--instruction')) {
               console.log(RECONCILE_INSTRUCTION);
             } else {
@@ -680,15 +837,102 @@ async function main(): Promise<void> {
             }
             break;
           }
+          case 'stage-instruction': {
+            // The OpenCode boundary hook's replacement for
+            // `check` + an adapter-side file write. Asking whether
+            // reconciliation is warranted and *staging* the instruction are
+            // one operation here, under the store lock: the adapter used to do
+            // them in two steps with the lock released in between, so a
+            // takeover or a release landing in that gap let a session that had
+            // just lost ownership stage an instruction anyway. The staged
+            // record is bound to the session that staged it, and the core
+            // refuses to hand it to anyone else.
+            //
+            // Claude Code does not use this: its Stop hook delivers the
+            // instruction inline in the same call, so it calls `check`.
+            const decision = stagePendingInstruction(projectRoot, new Date(), sessionId);
+            if (!decision.reconcile || decision.instruction === null) {
+              console.log(`no-reconcile: ${decision.reason}`);
+              process.exit(1);
+            }
+            console.log(decision.instruction);
+            break;
+          }
+          case 'take-instruction': {
+            // The OpenCode adapter stages a reconciliation instruction to a
+            // project-wide file and collects it on the next chat call. That
+            // read-and-delete has to be atomic with the ownership check, or a
+            // session taken over (or released) in between could consume the
+            // instruction the current owner was staged for, leaving the owner
+            // with nothing. Running it here, under the store lock the other
+            // auto verbs also take, makes the pair indivisible — and keeps the
+            // ownership rule in one place rather than in each adapter.
+            // The core refuses a non-owner and a record staged by a different
+            // session; that check is the policy and it lives there. This one
+            // only exists to name the reason for a human or an agent reading
+            // the output.
+            if (!sessionId) {
+              console.log('no-instruction: detached');
+              process.exit(1);
+            }
+            // An instruction staged before the store was archived or completed
+            // is no longer actionable: the agent would be told to reconcile a
+            // checkpoint the resume projection no longer even shows it. Leave
+            // the file in place rather than delivering a dead request.
+            const current = readState(projectRoot);
+            if (!current) {
+              console.log('no-instruction: no-state');
+              process.exit(1);
+            }
+            const activeStatus = getActiveTopic(current).status;
+            if (activeStatus === 'archived' || activeStatus === 'completed') {
+              console.log(`no-instruction: ${activeStatus}-state`);
+              process.exit(1);
+            }
+            const staged = takePendingInstruction(projectRoot, sessionId);
+            if (staged === null || staged.length === 0) {
+              // Distinguish "you own nothing" from "there is nothing here"
+              // purely for the reader: the core already refused whatever could
+              // not be delivered.
+              const owns = isAttachedSession(sessionId, projectRoot);
+              console.log(`no-instruction: ${owns ? 'none-staged' : 'detached'}`);
+              process.exit(1);
+            }
+            console.log(staged);
+            break;
+          }
           case 'reconciled': {
-            markReconciled(projectRoot);
+            // Closes the loop for an adapter that reconciled explicitly.
+            // Optional: staleness is derived from state.updated_at, so an
+            // agent that writes through the normal verbs is already fresh.
+            //
+            // Gated on the attachment, like every other verb that writes this
+            // runtime. Clearing the shared dirty window is the most
+            // destructive thing in the auto-checkpoint surface: a session that
+            // does not own the attachment doing it would tell the real owner
+            // its checkpoint is clean while its work signal is still pending.
+            const outcome = markReconciled(projectRoot, new Date(), sessionId);
+            if (outcome !== 'applied') {
+              // Previously this printed success unconditionally, so a detached
+              // session got a ✓ for a write that never happened.
+              console.log(`no-reconcile: ${outcome}`);
+              process.exit(1);
+            }
             console.log('✓ reconciliation recorded');
             break;
           }
           case 'status': {
             const cfg = readConfig(projectRoot);
             const runtime = readRuntime(projectRoot);
-            const decision = shouldReconcile(projectRoot);
+            // Freshness is observed unconditionally: a user running
+            // `auto status` (with or without --session-id) wants to see
+            // whether the checkpoint is stale, not just whether *their*
+            // session is the owner. The session gate is reported
+            // separately as `attached:`, and `would_reconcile` still
+            // respects it.
+            const fresh = freshness(projectRoot);
+            const decision = shouldReconcile(projectRoot, new Date(), sessionId);
+            const attached = sessionId ? isAttachedSession(sessionId, projectRoot) : false;
             console.log(`mode: ${cfg.auto_checkpoint}`);
             console.log(`debounce: ${debounceSeconds(projectRoot)}s (default ${DEFAULT_DEBOUNCE_SECONDS}s)`);
             console.log(`dirty_since: ${runtime.dirty_since ?? '(clean)'}`);
@@ -696,14 +940,82 @@ async function main(): Promise<void> {
             console.log(`signal_count: ${runtime.signal_count}`);
             console.log(`last_reconcile_request_at: ${runtime.last_reconcile_request_at ?? '(never)'}`);
             console.log(`last_reconcile_at: ${runtime.last_reconcile_at ?? '(never)'}`);
-            console.log(`stale: ${decision.freshness.stale}`);
+            console.log(`attached: ${attached}`);
+            console.log(`stale: ${fresh.stale}`);
             console.log(`would_reconcile: ${decision.reconcile} (${decision.reason})`);
             break;
           }
           default: {
-            console.error('Usage: task-store auto <status|mark-dirty|check|reconciled>');
+            console.error('Usage: task-store auto <status|mark-dirty|check|reconciled|stage-instruction|take-instruction>');
             process.exit(1);
           }
+        }
+        break;
+      }
+      case 'attach': {
+        // `task-store attach status` takes neither flag; the attach/takeover
+        // forms take both; `--release` needs only --session-id, because
+        // ownership is the whole check. They are validated up-front rather
+        // than relying on attachSession() to throw — the error class carries
+        // useful context but the CLI surface still wants clear human-facing
+        // messages.
+        const sub = args[0];
+        if (sub === 'status') {
+          const current = readAttachment(projectRoot);
+          if (!current) {
+            console.log('attached: none');
+          } else {
+            const known = isKnownHost(current.host);
+            const hostLabel = known ? current.host : `${current.host} (unrecognised)`;
+            console.log(`attached: session_id=${current.session_id} host=${hostLabel} attached_at=${current.attached_at}`);
+          }
+          break;
+        }
+
+        const sessionId = flags['session-id'] !== undefined ? String(flags['session-id']) : '';
+        const host = flags.host !== undefined ? String(flags.host) : '';
+        if (!sessionId) {
+          console.error('Error: --session-id is required for `attach`.');
+          process.exit(1);
+        }
+
+        if (flags.release) {
+          // release() checks ownership, and the host is not part of the
+          // record's identity — so requiring --host here would be an argument
+          // that is parsed, validated, and then never read. It stays
+          // *accepted* because existing callers pass it (session-end.sh), and
+          // breaking a working invocation to tidy a signature is a worse
+          // trade than ignoring a redundant flag.
+          const result = releaseSession({ sessionId }, projectRoot);
+          if (result.outcome === 'released') {
+            console.log('✓ attachment released');
+          } else if (result.outcome === 'not-attached') {
+            console.log('(no attachment to release)');
+          } else {
+            console.error('Error: another session owns the attachment; this session cannot release it.');
+            process.exit(4);
+          }
+          break;
+        }
+
+        if (!host) {
+          console.error('Error: --host is required for `attach`.');
+          process.exit(1);
+        }
+
+        const result = attachSession({
+          sessionId,
+          host,
+          takeover: flags.takeover === true,
+          confirm: flags.confirm === true,
+        }, projectRoot);
+
+        if (result.outcome === 'attached') {
+          console.log(`✓ attached (session_id=${result.current.session_id}, host=${result.current.host})`);
+        } else if (result.outcome === 'refreshed') {
+          console.log(`✓ attached (refreshed; session_id=${result.current.session_id})`);
+        } else {
+          console.log(`✓ attached (took over from session_id=${result.previous?.session_id})`);
         }
         break;
       }
@@ -714,7 +1026,7 @@ async function main(): Promise<void> {
       }
     };
 
-    if (MUTATING_COMMANDS.has(command) || topicIsMutating) {
+    if ((MUTATING_COMMANDS.has(command) && !attachIsReadOnly) || autoNeedsLock || topicIsMutating || configIsMutating) {
       withStoreLock(projectRoot, runCommand);
     } else {
       // Read-only and unknown commands: no lock, so `status` on a project
@@ -734,6 +1046,10 @@ async function main(): Promise<void> {
     if (err instanceof LockError) {
       console.error(`Error: ${err.message}`);
       process.exit(3);
+    }
+    if (err instanceof AttachmentConflictError) {
+      console.error(`Error: ${err.message}`);
+      process.exit(4);
     }
     throw err;
   }

@@ -421,6 +421,10 @@ On next session start (or in a fresh model session), the agent automatically rec
 | `task-store token-estimate` | Estimate injected token count |
 | `task-store config` | Show project-local configuration |
 | `task-store config auto-checkpoint <off\|conservative>` | Enable/disable auto-checkpoint mode |
+| `task-store attach status` | Show which session owns this project's auto-checkpoint flow |
+| `task-store attach --session-id <id> --host <h> --yes` | Attach this session (fails if another session owns the store) |
+| `task-store attach --session-id <id> --host <h> --takeover --confirm` | Attach by explicitly taking over from the current owner |
+| `task-store attach --session-id <id> --host <h> --release` | Release the attachment if this session owns it |
 
 ### Cross-agent flags
 
@@ -514,14 +518,33 @@ through OpenCode's lifecycle hooks:
 | Phase | Claude Code | OpenCode |
 |---|---|---|
 | Tool activity → dirty | `PostToolUse` shell hook | `tool.execute.after` plugin hook |
-| Reconciliation boundary | `Stop` hook (`additionalContext`) | `event({type: "session.idle"})` plugin hook, staging the instruction to `.claude-task/.pending-reconcile-instruction.txt` |
-| Instruction delivery | Same call (the `Stop` output channel) | Next `experimental.chat.system.transform` (which consumes the pending file once and merges it into `output.system[0]`) |
+| Reconciliation boundary | `Stop` hook (`additionalContext`) | `event({type: "session.idle"})` plugin hook, which stages the instruction in one locked step via `task-store auto stage-instruction` into `.claude-task/.pending-reconcile-instruction.txt` |
+| Instruction delivery | Same call (the `Stop` output channel) | Next `experimental.chat.system.transform`, which collects the staged record through `task-store auto take-instruction` — owner-gated and one-shot, so a detached session cannot take what the owner was staged for — and merges it into `output.system[0]` |
 | Compaction | `PreCompact` writes history marker | `experimental.session.compacting` registered as a deliberate no-op |
 
-Both harnesses invoke the **same** `task-store auto mark-dirty`,
-`task-store auto check`, and `task-store resume` commands, so the dirty
-window, the 120-second debounce, and the trust hierarchy embedded in
-`RECONCILE_INSTRUCTION` are identical.
+Both harnesses share the **same provider-neutral auto-checkpoint core**,
+including `task-store auto mark-dirty`, the 120-second debounce, and the trust
+hierarchy embedded in `RECONCILE_INSTRUCTION`. Claude Code uses `auto check`
+at `Stop` because it can deliver the instruction inline; OpenCode uses
+`auto stage-instruction` at `session.idle` and `auto take-instruction` on
+the next chat call because its boundary has no direct model-feedback channel.
+Both paths apply the same ownership and reconciliation rules. All four verbs live in the
+provider-neutral core and gate on the same attachment record, so ownership is
+decided in exactly one place — including *when* an instruction may be staged,
+which the core does inside the same store lock as the ownership check. A
+session that has just been taken over can therefore neither stage nor collect
+an instruction, and the staged record is bound to the session that staged it.
+
+**Session attachment on OpenCode.** The [attachment prompt](#session-attachment-issue-23)
+needs a session id. Every hook the plugin registers receives one in its own
+input — `tool.execute.after` and `experimental.chat.system.transform` carry
+`sessionID`, and the `session.idle` event carries it in `properties` — so the
+prompt appears on the first chat call, with no warm-up turn. Each hook reads
+the id from its own input and never from state left by another hook: one
+plugin instance serves every session in the process, so a shared mutable id
+would attribute one session's activity to another. A hook whose input carries
+no usable id (OpenCode also triggers the transform internally with no session)
+injects the project-wide resume projection and nothing session-scoped.
 
 > **Compatibility note:** verified against OpenCode 1.18.25. Support relies
 > on exactly four plugin hooks — two of which OpenCode currently labels
@@ -594,6 +617,72 @@ Auto-checkpoint: conservative
 ```
 
 Only `off` and `conservative` exist. There is no `aggressive` mode; asking for one is an explicit error rather than a silent fallback.
+
+### Session attachment (issue #23)
+
+Auto-checkpoint is **session-intent-scoped**, not project-scoped. A fresh
+session in a project that already has active task-store work does **not**
+automatically inherit authority to dirty the auto-checkpoint runtime or
+receive reconciliation instructions — the user must explicitly opt in.
+
+When a session starts in a project with active state, the host (Claude Code
+`SessionStart` or OpenCode `experimental.chat.system.transform`) checks
+`.claude-task/attachment.json`. Three outcomes:
+
+1. **No attachment yet** — the session is fresh. The host injects a prompt:
+   > This project has active task-store work. Continue those tasks in this session?
+   The user confirms → the printed attach command runs → the session is
+   attached. The adapter prints it in full, e.g.
+   `node .claude/task-store/bin/task-store.js attach --session-id <id> --host claude-code --root <project> --yes`,
+   because a bare `task-store` would assume a global install this project is
+   not required to have.
+2. **A different session is the owner** — the host injects a takeover prompt:
+   > Another session is already attached to this project's task-store work. Continue those tasks in this session?
+   The user confirms → the printed takeover command runs (the same command
+   plus `--takeover --confirm`) → the previous owner's claim is replaced.
+   Explicit takeover is required; the CLI refuses to silently steal ownership.
+3. **This session is the owner** — no prompt, no friction; auto-checkpoint
+   works normally.
+
+Until attached, `auto mark-dirty` and `auto check` are silent no-ops for
+that session, so its tool activity does not dirty the checkpoint and it
+does not receive reconciliation instructions. The session can still run any
+task-store CLI verb by hand (e.g. `task-store status`, `task-store done`).
+Decline is recorded implicitly: a session that never attaches stays detached
+for its lifetime; it can opt in later by running an attach command. The
+question is asked **once per session** — OpenCode's system-transform hook fires
+on every chat call, so repeating it would train the user to ignore it. That
+memory is in-process only (keyed by session id, discarded when the process
+exits); nothing about a decline is written to task-store files. A session that
+declines and later attaches by hand is honoured immediately.
+
+The prompt is printed only when the project's mode is actually
+`conservative`. A project with `off` — including a configless legacy store —
+never sees it.
+
+The attachment record lives at `.claude-task/attachment.json` (gitignored,
+separate from `state.json` so the published schema is unchanged) and holds
+only the session id, host identifier, and an attached_at timestamp.
+`task-store attach status` prints the current owner. The attach and takeover
+forms require both `--session-id` and `--host` (the host is recorded for
+diagnostics). `--release` needs only `--session-id`, because ownership is the
+whole check and the host is not part of the record's identity:
+
+```bash
+task-store attach --release --session-id <id>
+```
+
+Clearing happens automatically in two cases:
+
+- **Session ends normally** — Claude Code's SessionEnd hook releases the
+  record when this session owns it.
+- **Auto-checkpoint is switched off** — `config auto-checkpoint off` clears
+  the attachment. With the mode off there is no flow left for it to gate, and
+  a session that ends (or crashes) while the mode is off would otherwise leave
+  a dead owner behind: the session-end release is skipped in that state, so
+  the next session to enable conservative mode would be forced through a
+  takeover confirmation for a session that ended long ago. Turning the mode
+  back on therefore starts with no owner, and the attach prompt appears again.
 
 ### How conservative mode works
 

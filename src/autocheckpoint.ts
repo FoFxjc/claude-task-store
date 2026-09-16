@@ -41,7 +41,8 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
-import { readState, storePath, findProjectRoot } from './core.js';
+import { readState, storePath, findProjectRoot, getActiveTopic } from './core.js';
+import { isAttached, clearAttachment, normalizeIdentity } from './attachment.js';
 
 const CONFIG_FILE = 'config.json';
 const RUNTIME_FILE = 'auto-checkpoint.json';
@@ -198,6 +199,22 @@ export function writeMode(mode: AutoCheckpointMode, projectRoot?: string): AutoC
   // immediately firing a reconciliation for work that predates the change.
   clearRuntime(projectRoot);
 
+  // Switching OFF must not leave a stale *owner* behind either. The
+  // attachment is the intent boundary for auto-checkpoint, so with the mode
+  // off there is nothing left for it to gate. Leaving the record makes the
+  // next session to enable the mode meet an owner that no longer exists —
+  // and, because the mode is off, the session-end hook deliberately skips its
+  // release, so nothing else would ever clear it. The user is forced through
+  // a takeover confirmation for a session that ended long ago.
+  if (mode === 'off') {
+    clearAttachment(projectRoot);
+    // A staged OpenCode reconciliation belongs to the auto-checkpoint flow
+    // just as much as the dirty runtime and attachment do. Leaving it behind
+    // after an explicit opt-out creates dead ephemeral state and makes the
+    // next chat call pay collection overhead for a feature that is off.
+    clearPendingInstruction(projectRoot);
+  }
+
   return readConfig(projectRoot);
 }
 
@@ -250,9 +267,16 @@ function clearRuntime(projectRoot?: string): void {
  * anything, and above all does not write task state.
  *
  * No-ops entirely when the mode is 'off', so a project that never opts in
- * never gets a single extra file write.
+ * never gets a single extra file write. No-ops also when the calling session
+ * is not the recorded owner of the auto-checkpoint flow: the intent
+ * boundary lives in attachment.ts, and a side session must not push dirty
+ * signals into a checkpoint it has no authority over.
  */
-export function markDirty(projectRoot?: string, signal?: string): AutoCheckpointRuntime | null {
+export function markDirty(
+  projectRoot?: string,
+  signal?: string,
+  sessionId?: string,
+): AutoCheckpointRuntime | null {
   if (!isEnabled(projectRoot)) return null;
 
   const root = projectRoot ?? findProjectRoot();
@@ -260,6 +284,13 @@ export function markDirty(projectRoot?: string, signal?: string): AutoCheckpoint
   // store that does not exist would create .claude-task/ as a side effect of
   // an unrelated tool call.
   if (!existsSync(join(storePath(root), 'state.json'))) return null;
+
+  // Intent boundary. Without a sessionId (or when this session is not the
+  // current owner) we cannot prove the call came from a session that opted
+  // into the task-store execution. A missing or wrong id is treated the
+  // same as "this session is detached" — silently no-op, so a misconfigured
+  // adapter or a fresh side session never escalates.
+  if (!sessionId || !isAttached(sessionId, root)) return null;
 
   const now = new Date().toISOString();
   const runtime = readRuntime(root);
@@ -342,6 +373,8 @@ export interface ReconcileDecision {
     | 'clean'
     | 'debounced'
     | 'already-requested'
+    | 'detached'
+    | 'inactive-state'
     | 'stale';
   freshness: Freshness;
 }
@@ -349,8 +382,12 @@ export interface ReconcileDecision {
 /**
  * Decide whether this boundary should ask the agent to reconcile.
  *
- * Two independent gates must both open:
+ * Three independent gates must all open:
  *
+ *   0. ATTACHMENT — this session is the recorded owner of the auto-checkpoint
+ *                   flow. Without this, a fresh session in a project with
+ *                   active task-store state would push reconciliation
+ *                   instructions it has no authority to act on.
  *   1. NEW WORK   — at least one dirty signal has arrived since the previous
  *                   request. Without this, a single unanswered request would
  *                   re-fire forever on an idle session.
@@ -361,7 +398,11 @@ export interface ReconcileDecision {
  * Pure function of persisted state — it starts no timer and spawns no process.
  * `now` is injectable so tests can exercise the debounce without sleeping.
  */
-export function shouldReconcile(projectRoot?: string, now: Date = new Date()): ReconcileDecision {
+export function shouldReconcile(
+  projectRoot?: string,
+  now: Date = new Date(),
+  sessionId?: string,
+): ReconcileDecision {
   const clean: Freshness = { stale: false, since: null, signals: 0 };
 
   if (!isEnabled(projectRoot)) {
@@ -371,6 +412,32 @@ export function shouldReconcile(projectRoot?: string, now: Date = new Date()): R
   const root = projectRoot ?? findProjectRoot();
   if (!existsSync(join(storePath(root), 'state.json'))) {
     return { reconcile: false, reason: 'no-state', freshness: clean };
+  }
+
+  // An archived or completed checkpoint has no work left to reconcile. Asking
+  // for one would deliver an instruction the agent cannot act on, and since
+  // `auto check` also records the request, it would burn the debounce window
+  // on nothing. This mirrors the suppression the SessionStart hook and the
+  // OpenCode adapter already apply to injection, and the guard on
+  // `auto take-instruction`.
+  let activeStatus: string | null;
+  try {
+    const state = readState(root);
+    activeStatus = state ? getActiveTopic(state).status : null;
+  } catch {
+    // A corrupt state file has its own recovery path (`task-store repair`).
+    // Do not ask an agent to reconcile a checkpoint we cannot read.
+    return { reconcile: false, reason: 'clean', freshness: clean };
+  }
+  if (activeStatus === 'archived' || activeStatus === 'completed') {
+    return { reconcile: false, reason: 'inactive-state', freshness: clean };
+  }
+
+  // Intent boundary, mirrored from markDirty. The 'detached' reason is
+  // treated like 'clean' / 'debounced' by every adapter — a no-op — but
+  // is distinct in status output so an operator can tell the gate fired.
+  if (!sessionId || !isAttached(sessionId, root)) {
+    return { reconcile: false, reason: 'detached', freshness: clean };
   }
 
   const fresh = freshness(root);
@@ -403,15 +470,37 @@ export function shouldReconcile(projectRoot?: string, now: Date = new Date()): R
 // ─── Verb 3: markReconciled ───────────────────────────────────────────────────
 
 /**
+ * Why a runtime-writing verb did or did not apply. Returned rather than
+ * thrown so an adapter can stay silent while the CLI can explain itself to an
+ * agent — "nothing happened" with no reason is the failure mode this exists
+ * to avoid.
+ */
+export type ReconcileRecordOutcome = 'applied' | 'disabled' | 'no-state' | 'detached';
+
+/**
  * Record that a reconciliation instruction was delivered to the agent.
  * Opens the debounce window; does NOT clear the dirty flag, because the agent
  * may ignore the request and the checkpoint would still be stale.
+ *
+ * Ownership: the same intent boundary as markDirty / shouldReconcile. The
+ * runtime is shared project state, so a session that does not own the
+ * attachment must not open the debounce window on the owner's behalf — that
+ * would silence the owner's next genuine request for a full debounce period,
+ * which is strictly worse than the detached session doing nothing.
  */
-export function markReconcileRequested(projectRoot?: string, now: Date = new Date()): void {
-  if (!isEnabled(projectRoot)) return;
-  const runtime = readRuntime(projectRoot);
+export function markReconcileRequested(
+  projectRoot?: string,
+  now: Date = new Date(),
+  sessionId?: string,
+): ReconcileRecordOutcome {
+  const root = projectRoot ?? findProjectRoot();
+  if (!isEnabled(root)) return 'disabled';
+  if (!existsSync(join(storePath(root), 'state.json'))) return 'no-state';
+  if (!sessionId || !isAttached(sessionId, root)) return 'detached';
+  const runtime = readRuntime(root);
   runtime.last_reconcile_request_at = now.toISOString();
-  writeRuntime(runtime, projectRoot);
+  writeRuntime(runtime, root);
+  return 'applied';
 }
 
 /**
@@ -420,15 +509,30 @@ export function markReconcileRequested(projectRoot?: string, now: Date = new Dat
  * Calling this is optional: staleness is derived from state.updated_at, so an
  * agent that reconciles via the normal CLI verbs is already reported fresh.
  * It exists so an adapter can explicitly close the loop.
+ *
+ * Ownership is enforced here, in the provider-neutral core, and not only in
+ * the CLI: this is the one verb that *clears* the shared dirty window, so a
+ * session that does not own the attachment calling it would silently discard
+ * the owner's pending work signal — the owner would then be told its
+ * checkpoint is clean when it is not. markDirty and shouldReconcile already
+ * gate on the same record; this closes the third verb of the set.
  */
-export function markReconciled(projectRoot?: string, now: Date = new Date()): void {
-  if (!isEnabled(projectRoot)) return;
-  const runtime = readRuntime(projectRoot);
+export function markReconciled(
+  projectRoot?: string,
+  now: Date = new Date(),
+  sessionId?: string,
+): ReconcileRecordOutcome {
+  const root = projectRoot ?? findProjectRoot();
+  if (!isEnabled(root)) return 'disabled';
+  if (!existsSync(join(storePath(root), 'state.json'))) return 'no-state';
+  if (!sessionId || !isAttached(sessionId, root)) return 'detached';
+  const runtime = readRuntime(root);
   runtime.dirty_since = null;
   runtime.last_signal_at = null;
   runtime.signal_count = 0;
   runtime.last_reconcile_at = now.toISOString();
-  writeRuntime(runtime, projectRoot);
+  writeRuntime(runtime, root);
+  return 'applied';
 }
 
 // ─── The instruction ──────────────────────────────────────────────────────────
@@ -458,3 +562,178 @@ export const RECONCILE_INSTRUCTION = [
   '',
   'Use the existing CLI: task-store start|done|attempt|block|decide|next',
 ].join('\n');
+
+// ─── Pending reconciliation instruction ──────────────────────────────────────
+//
+// The OpenCode adapter cannot deliver a reconciliation instruction at its
+// boundary the way Claude Code's `Stop` hook can, so the instruction is staged
+// to a file and collected on the next chat call.
+//
+// Both halves live here, in the provider-neutral core, rather than in the
+// adapter. The reason is a race that cannot be fixed from the adapter: the
+// adapter used to (1) ask the CLI whether reconciliation was warranted, then
+// (2) write the file itself. Between those two steps the CLI's lock is gone,
+// so a takeover or a release landing in the gap let a session that had just
+// lost ownership stage an instruction anyway — and, symmetrically, the old
+// owner could still collect a file the new owner had staged. Staging is now a
+// single core operation performed by the CLI under the store lock, so the
+// ownership check and the write are one step (see `auto stage-instruction`).
+//
+// The staged record is also bound to the session that staged it, so a
+// collected instruction can never be one that was produced for a different
+// session's view of the store. That is defence in depth: the ownership check
+// already refuses a displaced session, and the binding additionally refuses a
+// record staged before a takeover from being delivered after it.
+
+const PENDING_INSTRUCTION_FILE = '.pending-reconcile-instruction.txt';
+
+interface PendingInstructionRecord {
+  session_id: string;
+  instruction: string;
+  staged_at: string;
+}
+
+export function pendingInstructionFilePath(projectRoot?: string): string {
+  return join(storePath(projectRoot), PENDING_INSTRUCTION_FILE);
+}
+
+/**
+ * Remove any staged reconciliation instruction.
+ *
+ * This is administrative cleanup for disabling auto-checkpoint, not a
+ * session-scoped consume operation. Missing is fine; every other filesystem
+ * failure surfaces so `off` cannot claim the runtime was cleared while a
+ * dead pending record remains on disk.
+ */
+function clearPendingInstruction(projectRoot?: string): void {
+  const path = pendingInstructionFilePath(projectRoot);
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
+
+/**
+ * Write the staged record. Caller holds the store lock and has already
+ * established that `sessionId` owns the attachment.
+ */
+function writePendingInstruction(
+  root: string,
+  sessionId: string,
+  instruction: string,
+  now: Date,
+): void {
+  const record: PendingInstructionRecord = {
+    session_id: normalizeIdentity(sessionId),
+    instruction,
+    staged_at: now.toISOString(),
+  };
+  atomicWriteJson(pendingInstructionFilePath(root), record);
+}
+
+export interface StageDecision {
+  reconcile: boolean;
+  /** Same vocabulary as ReconcileDecision.reason, so adapters handle one set. */
+  reason: ReconcileDecision['reason'];
+  /** The instruction text that was staged when reconcile=true; null otherwise. */
+  instruction: string | null;
+}
+
+/**
+ * Decide whether this boundary should ask for reconciliation, and stage the
+ * instruction for the next chat call in the same step.
+ *
+ * This is the OpenCode analogue of Claude Code's `Stop` hook, which delivers
+ * inline: the decision and the opening of the debounce window must be
+ * indivisible with the staging, or a displaced session can act on a decision
+ * that is no longer its to make. Called by the CLI under the store lock.
+ */
+export function stagePendingInstruction(
+  projectRoot?: string,
+  now: Date = new Date(),
+  sessionId?: string,
+): StageDecision {
+  const root = projectRoot ?? findProjectRoot();
+  if (!sessionId) {
+    return { reconcile: false, reason: 'detached', instruction: null };
+  }
+  const decision = shouldReconcile(root, now, sessionId);
+  if (!decision.reconcile) {
+    return { reconcile: false, reason: decision.reason, instruction: null };
+  }
+  const recorded = markReconcileRequested(root, now, sessionId);
+  if (recorded !== 'applied') {
+    // Defence in depth for non-CLI callers: the CLI serializes mode/ownership
+    // changes with this operation, but the provider-neutral core should still
+    // refuse to stage if the preconditions changed between decision and write.
+    return { reconcile: false, reason: recorded, instruction: null };
+  }
+  writePendingInstruction(root, sessionId, RECONCILE_INSTRUCTION, now);
+  return { reconcile: true, reason: decision.reason, instruction: RECONCILE_INSTRUCTION };
+}
+
+/**
+ * Read and delete the staged instruction in one step.
+ *
+ * Ownership is enforced here rather than left to the caller, so that every
+ * path — CLI or library — answers the same two questions before anything is
+ * deleted:
+ *
+ *   1. Is the calling session the current owner? Without this, a session that
+ *      was taken over or that released could still collect an instruction,
+ *      because its own staged record is genuinely bound to it.
+ *   2. Was this record staged by the calling session? Without this, a new
+ *      owner would be handed an instruction produced for the *previous*
+ *      owner's view of the store.
+ *
+ * Callers should still hold the store lock so the check and the delete stay
+ * indivisible against a takeover landing in between. Returns null when nothing
+ * is ours to collect, and leaves a record that belongs to someone else alone.
+ */
+export function takePendingInstruction(projectRoot?: string, sessionId?: string): string | null {
+  if (!sessionId) return null;
+  const root = projectRoot ?? findProjectRoot();
+  // Owner check: a displaced session must not collect, even its own record.
+  if (!isAttached(sessionId, root)) return null;
+  const path = pendingInstructionFilePath(root);
+
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+
+  let record: PendingInstructionRecord | null = null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<PendingInstructionRecord>;
+    if (
+      typeof parsed?.session_id === 'string' &&
+      typeof parsed.instruction === 'string' &&
+      parsed.instruction.length > 0
+    ) {
+      record = {
+        session_id: parsed.session_id,
+        instruction: parsed.instruction,
+        staged_at: typeof parsed.staged_at === 'string' ? parsed.staged_at : '',
+      };
+    }
+  } catch {
+    // Not our format at all — a file left by a pre-binding version. Fall
+    // through to the removal below; it can never be delivered by anyone.
+  }
+
+  if (record && record.session_id !== normalizeIdentity(sessionId)) {
+    // Staged for someone else. Leave it: the owner may still be running, and
+    // the next stage overwrites it either way.
+    return null;
+  }
+
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  return record ? record.instruction : null;
+}

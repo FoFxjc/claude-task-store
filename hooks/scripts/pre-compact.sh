@@ -109,7 +109,20 @@ fi
 # same "records the request" side effect — so a compaction immediately after
 # a Stop-triggered request does not ask twice.
 set +e
-INSTRUCTION=$("${TASK_STORE_CMD[@]}" auto check --instruction --root "$PROJECT_DIR" 2>/dev/null)
+# Session identity: PreCompact fires near the end of a session's life, but
+# the session is still alive — its session_id is on the event JSON the
+# rest of this script already drained. We re-parse it here (cheap; same
+# one-liner as post-tool-use.sh) and forward it; without it, the CLI would
+# no-op this hook for the same reason it no-ops the Stop hook.
+SESSION_ID=$(printf '%s' "$INPUT" | python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    sys.exit(0)
+print(data.get("session_id", "") or "")
+' 2>/dev/null || echo "")
+INSTRUCTION=$("${TASK_STORE_CMD[@]}" auto check --instruction --root "$PROJECT_DIR" --session-id "$SESSION_ID" 2>/dev/null)
 CHECK_RC=$?
 set -e
 

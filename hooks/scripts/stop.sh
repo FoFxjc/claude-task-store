@@ -39,6 +39,20 @@ INPUT=$(cat || true)
 [[ -f "$CONFIG_FILE" ]] || exit 0
 grep -Eq '"auto_checkpoint"[[:space:]]*:[[:space:]]*"conservative"' "$CONFIG_FILE" 2>/dev/null || exit 0
 
+# Extract the Claude Code session id from the event JSON so the CLI can
+# gate reconcile on it. Mirrors post-tool-use.sh: a missing/malformed id
+# is a no-op, never a failure, because a checkpoint aid must never break
+# a coding session.
+SESSION_ID=$(printf '%s' "$INPUT" | python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    sys.exit(0)
+print(data.get("session_id", "") or "")
+' 2>/dev/null || echo "")
+[[ -n "$SESSION_ID" ]] || exit 0
+
 LOCAL_RUNTIME="$PROJECT_DIR/.claude/task-store/bin/task-store.js"
 TASK_STORE_CMD=()
 if [[ -f "$LOCAL_RUNTIME" ]] && command -v node &>/dev/null; then
@@ -48,15 +62,20 @@ elif command -v task-store &>/dev/null; then
 else
   exit 0
 fi
-
 # `auto check` is the single decision point: exit 0 means "ask now" and also
 # records the request (opening the debounce window), so this hook cannot nag
-# in a loop even if it is invoked repeatedly. Exit 1 means "nothing to do".
+# in a loop even if it is invoked repeatedly. Exit 1 means "nothing to do"
+# (or — relevant for issue #23 — that this session is not the recorded
+# owner of the auto-checkpoint flow; the CLI returns the 'detached' reason
+# and the hook stays silent, by design).
 set +e
-INSTRUCTION=$("${TASK_STORE_CMD[@]}" auto check --instruction --root "$PROJECT_DIR" 2>/dev/null)
+INSTRUCTION=$("${TASK_STORE_CMD[@]}" auto check --instruction --root "$PROJECT_DIR" --session-id "$SESSION_ID" 2>/dev/null)
 CHECK_RC=$?
+# Restore errexit immediately: the soft-failure window is this one call, not
+# the rest of the script. Every other hook in this directory does the same,
+# and leaving it off would silently swallow a failure in the delivery step
+# below — which is the part that actually has to work.
 set -e
-
 if [[ $CHECK_RC -ne 0 ]] || [[ -z "$INSTRUCTION" ]]; then
   exit 0
 fi

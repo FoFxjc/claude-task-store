@@ -8,5 +8,20 @@
 # Commit it only if you want a full audit trail in version control.
 .claude-task/history.jsonl
 
+# Ephemeral, machine-local runtime files. These are per-checkout and
+# per-session, so they are never meaningful to another developer or another
+# machine — there is no scenario in which committing them is useful:
+#   attachment.json                    which session owns auto-checkpoint (issue #23)
+#   auto-checkpoint.json               the dirty/debounce window
+#   .pending-reconcile-instruction.txt staged by the OpenCode adapter
+#   .lock                              transient O_EXCL write lock
+#
+# (Each pattern goes on its own line. A trailing `# comment` after a pattern is
+# NOT a comment to git — the pattern silently stops matching.)
+.claude-task/attachment.json
+.claude-task/auto-checkpoint.json
+.claude-task/.pending-reconcile-instruction.txt
+.claude-task/.lock
+
 # Uncomment below to gitignore state.json too (private/noisy work):
 # .claude-task/state.json

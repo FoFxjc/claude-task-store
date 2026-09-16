@@ -110,6 +110,16 @@ the last checkpoint write.
    - Do not invent a `next_action`, decision, or blocker to satisfy the
      request. If nothing material changed, say so in one line and move on.
 
+8. **The session-attachment prompt.** In a project with active task-store
+   work, your session may start detached: auto-checkpoint will not record
+   your tool activity or ask you to reconcile until you opt in. If you see a
+   `[task-store]` note asking whether to continue the existing task-store
+   work, **ask the user** — it is their call, not yours — then run the exact
+   `task-store attach …` command the note prints (add `--takeover --confirm`
+   if it says another session already owns the store). Declining is fine:
+   normal repository work continues and `task-store` commands still work by
+   hand; only the automatic checkpoint flow stays off for this session.
+
 ## Trust Hierarchy
 
 **Critical**: The task store is an execution checkpoint, NOT authoritative project truth.
@@ -256,6 +266,7 @@ The injected context is designed to stay under 400 tokens. If you're working wit
     ├── state.json           ← Human-readable, can be git-committed
     ├── history.jsonl        ← Append-only audit trail
     ├── config.json          ← Optional settings (e.g. auto-checkpoint mode)
+    ├── attachment.json      ← Which session owns auto-checkpoint; ephemeral, ignore it
     └── auto-checkpoint.json ← Ephemeral bookkeeping; ignore it, never edit it
 ```
 
