@@ -9,13 +9,9 @@ import { tmpdir } from 'os';
 import { randomBytes, createHash } from 'crypto';
 
 import {
-  buildResumeContext,
-  fitResumeToBudget,
-  RESUME_BUDGET_CHARS,
-  RESUME_TRUNCATION_SUFFIX,
   repairState,
 } from '../src/core.js';
-import { commitBatch, parseBatchInput, applyBatch, ConflictError } from '../src/batch.js';
+import { buildResumeContext, fitResumeToBudget, RESUME_BUDGET_CHARS, RESUME_TRUNCATION_SUFFIX } from '../src/resume.js';
 import {
   initState,
   startTask,
@@ -30,6 +26,7 @@ import {
   addTopic,
   useTopic,
 } from '../src/operations.js';
+import { commitBatch, parseBatchInput, applyBatch, ConflictError } from '../src/batch.js';
 import { readState, writeState } from '../src/storage.js';
 import { stateFilePath, historyFilePath } from '../src/paths.js';
 import { StateError, getActiveTopic, validateState } from '../src/codec.js';

@@ -5,8 +5,9 @@
  */
 
 import {
-  buildResumeContext, repairState, detectStaleTasks, RESUME_BUDGET_CHARS,
+  repairState, detectStaleTasks,
 } from './core.js';
+import { buildResumeContext, RESUME_BUDGET_CHARS } from './resume.js';
 import {
   initState, startTask, completeTask, blockTask,
   resumeTask, addTask, recordAttempt, recordDecision, setNextAction,
