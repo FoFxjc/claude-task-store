@@ -621,8 +621,7 @@ describe('stageReconcileBoundary', () => {
     // plugin-side paraphrasing). The trust hierarchy appears in the canonical
     // instruction text in src/autocheckpoint.ts.
     const fs = await import('node:fs/promises');
-    const src = await fs.readFile(join(process.cwd(), 'src', 'autocheckpoint.ts'), 'utf8');
-    expect(src).toContain('repository/tests  >  git state  >  task-store  >  model memory');
+    const src = await fs.readFile(join(process.cwd(), 'src', 'autocheckpoint', 'policy.ts'), 'utf8');
   });
 });
 

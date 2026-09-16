@@ -17,13 +17,18 @@ import { StateError, getActiveTopic } from './codec.js';
 import { findProjectRoot, storePath, stateFilePath, historyFilePath } from './paths.js';
 import { withStoreLock, LockError } from './lock.js';
 import {
-  readConfig, writeMode, markDirty, shouldReconcile, markReconcileRequested,
-  markReconciled, freshness, readRuntime, RECONCILE_INSTRUCTION, takePendingInstruction,
-  stagePendingInstruction, pendingInstructionFilePath, isEnabled,
+  readConfig, writeMode, isEnabled,
   DEFAULT_DEBOUNCE_SECONDS, debounceSeconds, configFilePath,
-  NEW_STORE_MODE,
-  type AutoCheckpointMode,
-} from './autocheckpoint.js';
+  NEW_STORE_MODE, type AutoCheckpointMode,
+} from './autocheckpoint/config.js';
+import { readRuntime } from './autocheckpoint/runtime.js';
+import {
+  markDirty, shouldReconcile, markReconcileRequested, markReconciled,
+  freshness, RECONCILE_INSTRUCTION,
+} from './autocheckpoint/policy.js';
+import {
+  takePendingInstruction, stagePendingInstruction, pendingInstructionFilePath,
+} from './autocheckpoint/pending.js';
 import {
   attach as attachSession,
   release as releaseSession,

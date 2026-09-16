@@ -28,26 +28,18 @@ import {
   readAttachment,
 } from '../src/attachment.js';
 import {
-  readConfig,
-  writeMode,
-  isEnabled,
-  markDirty,
-  shouldReconcile,
-  markReconcileRequested,
-  markReconciled,
-  freshness,
-  readRuntime,
-  configFilePath,
-  runtimeFilePath,
-  debounceSeconds,
-  DEFAULT_MODE,
-  NEW_STORE_MODE,
+  readConfig, writeMode, isEnabled,
+  configFilePath, debounceSeconds, DEFAULT_MODE, NEW_STORE_MODE,
   DEFAULT_DEBOUNCE_SECONDS,
-  RECONCILE_INSTRUCTION,
-  stagePendingInstruction,
-  takePendingInstruction,
-  pendingInstructionFilePath,
-} from '../src/autocheckpoint.js';
+} from '../src/autocheckpoint/config.js';
+import { readRuntime, runtimeFilePath } from '../src/autocheckpoint/runtime.js';
+import {
+  markDirty, shouldReconcile, markReconcileRequested, markReconciled,
+  freshness, RECONCILE_INSTRUCTION,
+} from '../src/autocheckpoint/policy.js';
+import {
+  stagePendingInstruction, takePendingInstruction, pendingInstructionFilePath,
+} from '../src/autocheckpoint/pending.js';
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `task-store-autockpt-${randomBytes(6).toString('hex')}`);

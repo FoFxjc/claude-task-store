@@ -107,7 +107,7 @@ echo "  ✓ Installed hooks: session-start, pre-compact, session-end, post-tool-
 # only), so the built .js files plus the bin entry point are the whole runtime.
 RUNTIME_DIR="$CLAUDE_DIR/task-store"
 
-if [[ ! -f "$SCRIPT_DIR/dist/cli.js" ]] || [[ ! -f "$SCRIPT_DIR/dist/core.js" ]]; then
+if [[ ! -f "$SCRIPT_DIR/dist/cli.js" ]] || [[ ! -d "$SCRIPT_DIR/dist/autocheckpoint" ]]; then
   echo "  ✗ Build output missing at $SCRIPT_DIR/dist/."
   echo "    Run 'npm install && npm run build' in the claude-task-store checkout first."
   exit 1
@@ -118,6 +118,7 @@ fi
 rm -rf "$RUNTIME_DIR"
 mkdir -p "$RUNTIME_DIR/bin" "$RUNTIME_DIR/dist"
 cp "$SCRIPT_DIR"/dist/*.js "$RUNTIME_DIR/dist/"
+cp -R "$SCRIPT_DIR/dist/autocheckpoint" "$RUNTIME_DIR/dist/"
 cp "$SCRIPT_DIR/bin/task-store.js" "$RUNTIME_DIR/bin/task-store.js"
 chmod +x "$RUNTIME_DIR/bin/task-store.js"
 

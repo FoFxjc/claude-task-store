@@ -66,6 +66,7 @@ install_cli() {
   local pj="$1"
   mkdir -p "$pj/.claude/task-store/dist" "$pj/.claude/task-store/bin"
   cp "$ROOT/dist/"*.js "$pj/.claude/task-store/dist/"
+  cp -R "$ROOT/dist/autocheckpoint" "$pj/.claude/task-store/dist/"
   cp "$ROOT/bin/task-store.js" "$pj/.claude/task-store/bin/"
   cat > "$pj/.claude/task-store/package.json" <<EOF
 {

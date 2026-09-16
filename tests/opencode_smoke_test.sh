@@ -126,6 +126,7 @@ git init -q "$TEST_DIR"
 # Install the project-local CLI runtime, exactly as install.sh would.
 mkdir -p "$TEST_DIR/.claude/task-store/dist" "$TEST_DIR/.claude/task-store/bin"
 cp "$ROOT/dist/"*.js "$TEST_DIR/.claude/task-store/dist/"
+  cp -R "$ROOT/dist/autocheckpoint" "$TEST_DIR/.claude/task-store/dist/"
 cp "$ROOT/bin/task-store.js" "$TEST_DIR/.claude/task-store/bin/"
 cat > "$TEST_DIR/.claude/task-store/package.json" <<EOF
 {
@@ -272,6 +273,7 @@ trap 'rm -rf "$TEST_DIR" "$TEST_DIR2"' EXIT
 git init -q "$TEST_DIR2"
 mkdir -p "$TEST_DIR2/.claude/task-store/dist" "$TEST_DIR2/.claude/task-store/bin"
 cp "$ROOT/dist/"*.js "$TEST_DIR2/.claude/task-store/dist/"
+  cp -R "$ROOT/dist/autocheckpoint" "$TEST_DIR2/.claude/task-store/dist/"
 cp "$ROOT/bin/task-store.js" "$TEST_DIR2/.claude/task-store/bin/"
 cat > "$TEST_DIR2/.claude/task-store/package.json" <<EOF
 {
@@ -306,6 +308,7 @@ trap 'rm -rf "$TEST_DIR" "$TEST_DIR2" "$TEST_DIR3"' EXIT
 git init -q "$TEST_DIR3"
 mkdir -p "$TEST_DIR3/.claude/task-store/dist" "$TEST_DIR3/.claude/task-store/bin"
 cp "$ROOT/dist/"*.js "$TEST_DIR3/.claude/task-store/dist/"
+  cp -R "$ROOT/dist/autocheckpoint" "$TEST_DIR3/.claude/task-store/dist/"
 cp "$ROOT/bin/task-store.js" "$TEST_DIR3/.claude/task-store/bin/"
 cat > "$TEST_DIR3/.claude/task-store/package.json" <<EOF
 {
@@ -339,6 +342,7 @@ trap 'rm -rf "$TEST_DIR" "$TEST_DIR2" "$TEST_DIR3" "$TEST_DIR4"' EXIT
 git init -q "$TEST_DIR4"
 mkdir -p "$TEST_DIR4/.claude/task-store/dist" "$TEST_DIR4/.claude/task-store/bin"
 cp "$ROOT/dist/"*.js "$TEST_DIR4/.claude/task-store/dist/"
+  cp -R "$ROOT/dist/autocheckpoint" "$TEST_DIR4/.claude/task-store/dist/"
 cp "$ROOT/bin/task-store.js" "$TEST_DIR4/.claude/task-store/bin/"
 cat > "$TEST_DIR4/.claude/task-store/package.json" <<EOF
 {
