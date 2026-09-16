@@ -92,8 +92,22 @@ describe('configuration', () => {
     // through a takeover confirmation for no reason.
     expect(readAttachment(root)?.session_id).toBe(TEST_SESSION_ID);
 
+    // Pending delivery is ephemeral auto-checkpoint state too. A request
+    // staged just before opt-out must not survive an explicit `off` and make
+    // later chat turns pay collection cost for a disabled feature.
+    writeFileSync(
+      pendingInstructionFilePath(root),
+      JSON.stringify({
+        session_id: TEST_SESSION_ID,
+        instruction: RECONCILE_INSTRUCTION,
+        staged_at: new Date().toISOString(),
+      }),
+    );
+    expect(existsSync(pendingInstructionFilePath(root))).toBe(true);
+
     writeMode('off', root);
     expect(readAttachment(root)).toBeNull();
+    expect(existsSync(pendingInstructionFilePath(root))).toBe(false);
 
     writeMode('conservative', root);
     // No owner at all now, so a fresh session gets the first-time prompt.
