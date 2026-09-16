@@ -691,16 +691,14 @@ describe('pending instruction collection', () => {
     expect(calls).toEqual([]);
   });
 
-  it('asks the CLI about the pending record without knowing its filename', () => {
-    // The adapter used to keep its own copy of the pending file's name for a
-    // cheap existence check. If that copy drifted, collection would silently
-    // stop happening with nothing in the suite able to notice — so the name
-    // now lives only in the core, and the adapter's only gate is the store
-    // directory it already reads config and state from.
+  it('does not invoke the CLI when a store exists but no pending record does', () => {
+    // System transform runs on every chat call. An initialized task-store with
+    // no staged instruction is by far the common case, so collection must stay
+    // a cheap file-existence check rather than spawning Node every turn.
     writeCli(root);
     mkdirSync(join(root, '.claude-task'), { recursive: true });
     expect(takePendingInstruction(root, 'sess-1')).toBeNull();
-    expect(calls).toHaveLength(1);
+    expect(calls).toEqual([]);
   });
 
   it('returns null when the CLI exits 0 but prints nothing', () => {
