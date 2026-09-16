@@ -5,12 +5,13 @@
  */
 
 import {
-  initState, readState, writeState, startTask, completeTask, blockTask,
+  initState, startTask, completeTask, blockTask,
   resumeTask, addTask, recordAttempt, recordDecision, setNextAction,
   archiveState, buildResumeContext, repairState, detectStaleTasks, RESUME_BUDGET_CHARS,
   compareAndWriteState, ConflictError,
   addTopic, useTopic, commitBatch,
 } from './core.js';
+import { readState, writeState } from './storage.js';
 import { StateError, getActiveTopic } from './codec.js';
 import { findProjectRoot, storePath, stateFilePath, historyFilePath } from './paths.js';
 import { withStoreLock, LockError } from './lock.js';

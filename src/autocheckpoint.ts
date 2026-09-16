@@ -41,7 +41,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
-import { readState } from './core.js';
+import { readState } from './storage.js';
 import { getActiveTopic } from './codec.js';
 import { storePath, findProjectRoot } from './paths.js';
 import { isAttached, clearAttachment, normalizeIdentity } from './attachment.js';

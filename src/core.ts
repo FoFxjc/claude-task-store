@@ -6,33 +6,17 @@
  * Uses atomic writes to prevent corruption.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, renameSync, unlinkSync, openSync, closeSync, statSync } from 'fs';
-import { join } from 'path';
-import { randomBytes } from 'crypto';
-import { findProjectRoot, historyFilePath, stateFilePath, storePath } from './paths.js';
+import { readFileSync, existsSync } from 'fs';
+import { historyFilePath } from './paths.js';
 import { withStoreLock } from './lock.js';
 import { getActiveTopic, StateError, validateState } from './codec.js';
+import { readState, writeState, appendHistory } from './storage.js';
 import type {
   Attempt, Blocker, Decision, Task, TaskState, TopicState,
 } from './types.js';
 import { DEFAULT_TOPIC, SCHEMA_VERSION } from './types.js';
 
 export { SCHEMA_VERSION, DEFAULT_TOPIC } from './types.js';
-
-// ─── Atomic write ────────────────────────────────────────────────────────────
-
-function atomicWrite(filePath: string, content: string): void {
-  const dir = filePath.replace(/[/\\][^/\\]+$/, '') || '.';
-  const tmp = join(dir, `.tmp_${randomBytes(8).toString('hex')}`);
-  try {
-    writeFileSync(tmp, content, 'utf8');
-    renameSync(tmp, filePath);
-  } catch (err) {
-    try { unlinkSync(tmp); } catch {}
-    throw err;
-  }
-}
-// ─── Batch commit types ────────────────────────────────────────────────────────
 
 /** Input shape for a single operation in a commit batch. */
 export type BatchOperationInput =
@@ -369,57 +353,6 @@ export function commitBatch(
   });
 }
 
-// ─── Read / Write ─────────────────────────────────────────────────────────────
-
-export function readState(projectRoot?: string): TaskState | null {
-  const path = stateFilePath(projectRoot);
-  if (!existsSync(path)) return null;
-
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch (err) {
-    throw new StateError(`Failed to read state file: ${(err as Error).message}`);
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new StateError('State file contains invalid JSON. Run `task-store repair` to recover from history.');
-  }
-
-  return validateState(parsed);
-}
-
-export function writeState(
-  state: TaskState,
-  projectRoot?: string,
-  updatedBy?: string,
-  touchActiveTopic = true,
-): void {
-  const dir = storePath(projectRoot);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-
-  const now = new Date().toISOString();
-  state.updated_at = now;
-  if (touchActiveTopic) getActiveTopic(state).updated_at = now;
-  state.revision = (state.revision ?? 0) + 1;
-  if (updatedBy !== undefined) {
-    state.updated_by = updatedBy || null;
-  }
-  const content = JSON.stringify(state, null, 2) + '\n';
-  atomicWrite(stateFilePath(projectRoot), content);
-  appendHistory({ event: 'state_updated', snapshot: state }, projectRoot);
-}
-
-function appendHistory(entry: Record<string, unknown>, projectRoot?: string): void {
-  const path = historyFilePath(projectRoot);
-  const line = JSON.stringify({ ...entry, at: new Date().toISOString() }) + '\n';
-  appendFileSync(path, line, 'utf8');
-}
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 

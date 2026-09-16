@@ -10,8 +10,6 @@ import { randomBytes, createHash } from 'crypto';
 
 import {
   initState,
-  readState,
-  writeState,
   startTask,
   completeTask,
   blockTask,
@@ -33,6 +31,7 @@ import {
   applyBatch,
   ConflictError,
 } from '../src/core.js';
+import { readState, writeState } from '../src/storage.js';
 import { stateFilePath, historyFilePath } from '../src/paths.js';
 import { StateError, getActiveTopic, validateState } from '../src/codec.js';
 
