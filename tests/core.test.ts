@@ -26,11 +26,8 @@ import {
   repairState,
   addTopic,
   useTopic,
-  commitBatch,
-  parseBatchInput,
-  applyBatch,
-  ConflictError,
 } from '../src/core.js';
+import { commitBatch, parseBatchInput, applyBatch, ConflictError } from '../src/batch.js';
 import { readState, writeState } from '../src/storage.js';
 import { stateFilePath, historyFilePath } from '../src/paths.js';
 import { StateError, getActiveTopic, validateState } from '../src/codec.js';
