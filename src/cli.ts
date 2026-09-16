@@ -9,7 +9,7 @@ import {
   resumeTask, addTask, recordAttempt, recordDecision, setNextAction,
   archiveState, buildResumeContext, repairState, detectStaleTasks, RESUME_BUDGET_CHARS,
   compareAndWriteState, ConflictError, withStoreLock, LockError,
-  stateFilePath, historyFilePath, StateError, findProjectRoot,
+  stateFilePath, historyFilePath, StateError, findProjectRoot, storePath,
   getActiveTopic, addTopic, useTopic, commitBatch,
 } from './core.js';
 import {
@@ -422,6 +422,15 @@ async function main(): Promise<void> {
       // would cause a double-lock deadlock.
     ]);
     const topicIsMutating = command === 'topic' && (topicSubcommand === 'add' || topicSubcommand === 'use');
+    // Changing the auto-checkpoint mode mutates config plus ephemeral runtime
+    // (and, for `off`, clears attachment/pending state). It must serialize
+    // with the auto verbs and attach/takeover; otherwise a concurrent
+    // stage-instruction can make a decision under conservative mode and write
+    // pending state after another process has already switched the feature off.
+    // Read-only `config` queries stay lock-free.
+    const configIsMutating = command === 'config'
+      && args[0] === 'auto-checkpoint'
+      && args[1] !== undefined;
     // `attach status` is a pure read of attachment.json. It must NOT take the
     // store lock: withStoreLock() creates .claude-task/ before running, so
     // locking a status query would materialize a store directory in a project
@@ -461,9 +470,13 @@ async function main(): Promise<void> {
     // updates; that window is not a new source of lost updates.
     const autoStoreApplicable = isEnabled(projectRoot) && existsSync(stateFilePath(projectRoot));
     const autoApplicable = autoSubcommand === 'take-instruction'
-      // Nothing staged is the common case, and the file can only exist once
-      // `.claude-task/` does, so locking here materializes nothing either.
-      ? existsSync(pendingInstructionFilePath(projectRoot))
+      // Collection must hold the lock whenever a store already exists. Gating
+      // the lock on the pending file itself creates a TOCTOU hole: the file can
+      // be staged after the existence check but before the unlocked collector
+      // runs, reopening the exact owner-check/delete race this verb exists to
+      // close. Checking the directory preserves zero-materialization because
+      // an uninitialized project still does not create it.
+      ? existsSync(storePath(projectRoot))
       : autoStoreApplicable;
     const autoNeedsLock = autoIsMutating && autoApplicable;
 
@@ -809,7 +822,14 @@ async function main(): Promise<void> {
             // point of view: an adapter that prints the instruction has, by
             // definition, asked. Recording it here means no adapter can
             // forget to, and therefore no adapter can nag in a loop.
-            markReconcileRequested(projectRoot, new Date(), sessionId);
+            const recorded = markReconcileRequested(projectRoot, new Date(), sessionId);
+            if (recorded !== 'applied') {
+              // The decision and the bookkeeping are serialized by the store
+              // lock on the CLI path, but keep the second gate explicit: never
+              // print an instruction if ownership/mode ceased to apply.
+              console.log(`no-reconcile: ${recorded}`);
+              process.exit(1);
+            }
             if (args.includes('--instruction')) {
               console.log(RECONCILE_INSTRUCTION);
             } else {
@@ -1006,7 +1026,7 @@ async function main(): Promise<void> {
       }
     };
 
-    if ((MUTATING_COMMANDS.has(command) && !attachIsReadOnly) || autoNeedsLock || topicIsMutating) {
+    if ((MUTATING_COMMANDS.has(command) && !attachIsReadOnly) || autoNeedsLock || topicIsMutating || configIsMutating) {
       withStoreLock(projectRoot, runCommand);
     } else {
       // Read-only and unknown commands: no lock, so `status` on a project
