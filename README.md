@@ -1,77 +1,53 @@
 # claude-task-store
 
-Persistent execution checkpoints for Claude Code, OpenCode, and coding agents.
+Persistent execution checkpoints for Claude Code, OpenCode, and other coding agents.
 
 **Your context window should not be your task lifetime.**
 
-Long coding tasks often outlive a single model session. When a session restarts, compacts, or switches models, the next agent should not have to reconstruct the entire execution history.
+Long coding tasks often outlive one model session. The code survives in the repository; what gets lost is the small amount of execution state needed to continue efficiently:
 
-claude-task-store keeps only the small amount of state required to continue:
-what is done, what failed, what is active, and what should happen next.
+- what the goal is
+- what is already done
+- what is active or blocked
+- what failed and why
+- which decisions constrain the work
+- what should happen next
 
-Typical validated resume context: ~100–300 tokens.
+claude-task-store keeps that state in plain local files and injects a compact resume projection when a supported coding session starts.
 
-Plain JSON · Local-first · No cloud · No embeddings · No database · No workflow framework
+**Plain JSON · Local-first · No cloud · No embeddings · No database · No workflow framework**
 
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](LICENSE)
 [![CI](https://github.com/FoFxjc/claude-task-store/actions/workflows/ci.yml/badge.svg)](https://github.com/FoFxjc/claude-task-store/actions/workflows/ci.yml)
 
 ---
 
-## Why this exists
+## The idea
 
-This project came from repeatedly encountering the same failure mode while using coding agents with constrained-context models: the implementation survived in the repository, but the execution state did not.
+A fresh session usually does not need the previous transcript. It needs a checkpoint.
 
-A typical failure sequence:
+Without one:
 
-1. A coding agent works through a long implementation.
-2. It reaches 70–90% completion.
-3. The session approaches the model's context limit.
-4. A new session must be started.
-5. The new session has no compact, reliable record of:
-   - the original goal
-   - what is already done
-   - what failed and why
-   - what decisions were made
-   - what is currently in progress
-   - what should happen next
-6. The human ends up manually copying fragments from the old session and reconstructing task state.
-
-After the restart:
-- **The code is still there.** Git is still there. Tests are still there.
-- **What is missing is the tiny amount of process state needed to continue efficiently.**
-
-This is not a memory problem. It is an execution continuity problem.
-
-Human users were acting as the state synchronization layer between coding-agent sessions. claude-task-store externalizes that state.
-
-**Without task-store:**
 ```
-Long task
-→ context fills up
-→ new session
+long task
+→ context fills / session ends / model changes
 → reread repository
 → reconstruct prior work
-→ repeat failed approaches
-→ human manually copies old output
+→ rediscover failed approaches
 → continue
 ```
 
-**With task-store:**
+With claude-task-store:
+
 ```
-Long task
+long task
 → checkpoint
-→ new session
-→ read one state file
-→ ~100–300 token resume projection
+→ fresh session
+→ small resume projection
 → continue from next_action
 ```
 
----
-
-## 30-second example
-
-A resume context injected at session start looks like this:
+A typical injected projection looks like:
 
 ```
 GOAL: Add OAuth support to the API
@@ -85,151 +61,129 @@ DONE:
   ✓ [T2] Callback route
   ✓ [T3] Token validation
 
-REMAINING:
-  ○ [T5] Update API documentation
-
 KEY DECISIONS:
   • Use PKCE flow — implicit flow deprecated in OAuth 2.1
 
-NEXT ACTION: Replace mock with local HTTP fixture, then complete streaming test
+NEXT ACTION: Replace mock with local HTTP fixture, then complete T4
 ```
 
-Typical size: 100–300 tokens. One file. No transcript replay.
+The default resume projection is intentionally bounded to **under 400 tokens**. Older history stays outside the default prompt and is loaded only when needed.
 
-The <400-token resume ceiling is a **design constraint**: as state accumulates, older completed tasks and historical details stay out of the default projection and are only loaded on explicit request.
-
----
-
-## Execution state vs. conversation memory
-
-These are different problems.
-
-**Conversation memory** asks: *"What happened before?"*  
-It stores dialogue, facts, and learnings accumulated over time.
-
-**Execution state** asks: *"What is the minimum state required to keep working?"*  
-It stores only the navigation data needed to continue: goal, current task, completed work, failed attempts, decisions, next action.
-
-claude-task-store stores the latter. It does not record conversation history. It does not summarize sessions. It preserves only what cannot be cheaply derived from the repository — the process state that disappears when a session ends.
+This is execution continuity, not conversation memory.
 
 ---
 
-## What about automatic compaction?
+## Quick start
 
-Automatic compaction is useful, and this is not a replacement for it. It solves a
-different problem.
+### Let your coding agent install it
 
-Compaction asks: *"What parts of this conversation should remain in context?"*
+Give your agent this instruction:
 
-claude-task-store asks: *"What execution state should not need to live in the
-conversation at all?"*
+> Install `https://github.com/FoFxjc/claude-task-store` into this repository and follow `docs/agent-installation.md`.
 
-Both can be true at once. But a compacted conversation still consumes context:
-the system reads the existing context, generates a summary, and the model carries
-that summary forward — where later compactions may compress already-compressed
-history again. Execution-critical state also ends up interleaved with
-conversational background, so the parts you most need to survive are not stored
-separately from the parts you do not.
+The installation runbook is written for coding agents and keeps repository inspection bounded.
 
-For execution continuity, a fresh session usually needs much less than a summary
-of everything that was said:
+### Manual install
 
-- the goal
-- what is done
-- what failed, and how
-- what is active or blocked
-- the decisions that constrain the next step
-- what happens next
+Prerequisites: Node.js 18+, `python3`, and Claude Code and/or OpenCode.
 
-claude-task-store keeps that state outside the conversation and injects only a
-small resume projection when a session starts.
+```bash
+git clone https://github.com/FoFxjc/claude-task-store.git
+cd claude-task-store
+npm install
+npm run build
 
-**Don't compact what you can externalize.**
+./install.sh /path/to/your/project
+```
 
-Compaction for conversation continuity. Task store for execution continuity.
+The project-local runtime is installed under `.claude/task-store/`; your application dependencies and `package.json` are not modified.
 
-### Why this matters in auto-compacting harnesses
+To uninstall the integration while keeping task state:
 
-Coding harnesses that compact automatically — Claude Code and OpenCode among them
-— can keep a session alive considerably longer. But task lifetime stays coupled to
-an accumulating conversational summary. A durable execution checkpoint decouples
-the two: the task survives even when the conversation is discarded completely, so
-starting a genuinely fresh session becomes a normal move rather than a loss.
+```bash
+./uninstall.sh /path/to/your/project
+```
 
-That trade matters most with private or smaller-context models, internal inference
-gateways, long-running agents, and workflows where starting clean is cheaper or
-more reliable than compressing history again.
-
-|  | Auto-compaction | claude-task-store |
-| --- | --- | --- |
-| Primary goal | Conversation continuity | Execution continuity |
-| Stored form | Conversation summary | Structured execution state |
-| Lives in context | Yes | Only a small resume projection |
-| Needs the prior transcript | Yes, during compaction | No |
-| Survives a fresh session or provider | Platform-dependent | Yes, via local state |
-| Typical role | Keep the current session going | Let work continue after the session ends |
+See [docs/agent-installation.md](docs/agent-installation.md) for the exact installation contract.
 
 ---
 
-## For constrained-context models
+## Use it
 
-Many development environments cannot simply use the largest frontier model with effectively unlimited context. Relevant constraints include:
+Initialize a goal and a few tasks:
 
-- private or on-prem models (14B / 27B / 32B / 70B)
-- internal inference gateways
-- privacy or compliance restrictions
-- limited GPU capacity
-- smaller practical context windows
-- agent frameworks that consume substantial context through system prompts, tool definitions, repository files, diffs, test output, and prior conversation
+```bash
+task-store init "Implement OAuth for the API" \
+  "Database schema migration" \
+  "Callback route" \
+  "Token validation" \
+  "Integration tests"
+```
 
-For constrained-context models, execution history competes directly with the code and reasoning needed for the current step.
+Track only meaningful execution state:
 
-Externalizing execution state allows:
-- fresh sessions with shorter prompts
-- cleaner local reasoning on the current task
-- lower reorientation cost after context loss
-- model switching without transcript replay
+```bash
+task-store start T1
 
-Smaller models often do not fail because they cannot perform the next coding step. They fail because too much of their context is occupied by accumulated execution history.
+task-store done T1 \
+  -e db/migrations/001_oauth.sql \
+  -e "npm test: 8/8 pass"
 
-**Make longer tasks more practical on constrained-context models.**
+task-store attempt T4   "mocked fetch"   "does not support streaming responses"
 
-> This improves continuity and reduces repeated orientation work. It does not make a weaker model equivalent to a stronger one, and it does not remove the need for context on the current task.
+task-store decide   "Use PKCE flow"   "implicit flow is deprecated in OAuth 2.1"
 
----
+task-store next   "Replace mock with local HTTP fixture, then complete T4"
+```
 
-## Context is a budget
+Inspect the checkpoint or the compact projection:
 
-A larger context window is genuinely useful, and nothing here argues against it.
-But available capacity and justified consumption are separate questions: context
-that is carried forward or re-read still costs latency, money, and attention,
-whatever the limit happens to be.
+```bash
+task-store status
+task-store resume
+task-store show T4
+```
 
-claude-task-store tries to reduce unnecessary context use in two directions:
+For parallel areas of work in the same repository, use named topics:
 
-- **Execution** — externalize durable task state instead of carrying execution
-  history through every session.
-- **Observation** — give an agent the smallest useful view of the environment
-  instead of making it rediscover installation and operating boundaries from the
-  whole repository.
+```bash
+task-store topic add docs "Refresh API guide" "Draft examples" "Review links"
+task-store topic use docs
+task-store topic list
+```
 
-The second direction applies to setup, not only to running work. For example,
-[`docs/agent-installation.md`](docs/agent-installation.md) gives a coding agent a
-bounded installation procedure and a minimal observation set, so it does not need
-to traverse the target repository broadly just to learn how to install and
-operate the tool.
-
-Broad inspection is not forbidden — it is demand-driven. An agent should expand
-what it observes when the task actually requires it, such as when installation
-validation fails and the cause has to be found.
-
-> Context capacity is not context permission.
+Run `task-store --help` for the complete CLI surface.
 
 ---
 
-## Source of truth
+## What gets stored
 
-The task store is a navigation aid, not an authoritative record.
+The durable checkpoint lives in `.claude-task/`:
+
+```
+.claude-task/
+├── state.json               # execution checkpoint; safe to commit
+├── history.jsonl            # append-only local history
+├── config.json              # project-local configuration
+├── auto-checkpoint.json     # ephemeral freshness bookkeeping
+└── attachment.json          # ephemeral auto-checkpoint session owner
+```
+
+Only `state.json` is needed to resume the work.
+
+Recommended Git policy:
+
+- commit `.claude-task/state.json` for cross-session / cross-model handoff
+- commit `.claude-task/config.json` if the project should share its auto-checkpoint choice
+- leave history, runtime bookkeeping, and session attachment local
+
+The installer configures the ephemeral files accordingly.
+
+---
+
+## Repository reality wins
+
+The task store is a navigation checkpoint, not an authoritative record.
 
 ```
 repository / tests
@@ -241,667 +195,164 @@ repository / tests
  model memory
 ```
 
-If the task store claims something is complete but the repository or tests disagree, repository reality wins. Before acting on a consequential claim — task complete, test passing, file modified — verify against the repository.
+If the checkpoint says a task is done but the repository or tests disagree, the repository wins.
+
+For this reason:
+
+- `task-store done` requires evidence
+- auto-checkpoint never marks a task complete
+- failed approaches and decisions are recorded explicitly instead of inferred from tool activity
 
 ---
 
-## Validated results
+## Auto-checkpoint
 
-The validation suites cover small-context pressure, state decay, failure
-recovery, installation safety, concurrent CLI writes, and Claude ↔ Codex/OpenCode
-handoffs. These scenarios consistently keep the default resume projection below
-the documented budget.
-
-**Design constraint:** default resume projection must remain below 400 tokens. As state accumulates, older completed tasks and historical detail stay outside the default projection and load only on explicit request. Context is treated as an expensive resource.
-
-In every validated handoff scenario:
-- no completed work was repeated
-- no failed approaches were retried
-- correct next task was selected
-- only one file was read to resume
-
-See [`docs/phase2-reliability-report.md`](docs/phase2-reliability-report.md) and [`docs/phase3-cross-agent-handoff.md`](docs/phase3-cross-agent-handoff.md) for full experiment details.
-
----
-
-## How it works
-
-State lives in two plain files inside your project:
-
-```
-.claude-task/
-├── state.json      ← Human-readable, git-committable execution checkpoint
-└── history.jsonl   ← Append-only audit trail (gitignored by default)
-```
-
-At session start, a compact summary is automatically injected into the agent's
-context. The exact hook surface differs per host — Claude Code uses a
-`SessionStart` hook, OpenCode uses an auto-discovered plugin that hooks
-`experimental.chat.system.transform` — but both call the same `task-store resume`
-CLI and project the same canonical output. The agent reads the current task,
-completed work, failed approaches, and the explicit next action — and continues
-without re-reading transcripts.
-
----
-
-## Installation
-
-### Let your coding agent install it for you
-
-You just need to send this to your coding agent:
-
-> Install `https://github.com/FoFxjc/claude-task-store` into this repository and follow `docs/agent-installation.md`.
-
-[`docs/agent-installation.md`](docs/agent-installation.md) is a machine-facing
-runbook that tells the agent how to install safely — without modifying your
-application or package dependencies, without overwriting unrelated Claude
-Code/OpenCode configuration, and without enabling auto-checkpoint unless you
-explicitly ask for it. The guide intentionally defines a minimal observation
-set, so the agent does not need to broadly inspect the repository unless
-installation validation fails.
-
-### Manual installation
-
-**Prerequisites:** Node.js ≥ 18, Claude Code or OpenCode, `python3`
+New stores default to **conservative auto-checkpoint**. Existing configless stores remain off until explicitly enabled.
 
 ```bash
-git clone https://github.com/FoFxjc/claude-task-store.git
-cd claude-task-store
-npm install && npm run build
-
-# Install into your project
-./install.sh /path/to/your/project
+task-store config auto-checkpoint conservative
+task-store config auto-checkpoint off
+task-store config auto-checkpoint
 ```
 
-That is the whole installation. The installer copies the built CLI runtime into
-`.claude/task-store/` inside your project, so the hooks can run the canonical
-resume renderer without anything else on your machine — no global npm install,
-no PATH shim, and no changes to your project's `package.json`. The installed
-project is self-contained: you can delete this checkout afterwards.
+Conservative mode does not manage tasks for you. It only notices that meaningful work happened and, at a safe boundary, asks the agent to reconcile the checkpoint.
 
-Start Claude Code or OpenCode in that project and the full resume projection is
-injected at session start.
-
-The installer:
-1. Builds the TypeScript CLI
-2. Copies the built runtime to `.claude/task-store/` (the CLI has no runtime dependencies)
-3. Copies the skill to `.claude/skills/task-store/SKILL.md`
-4. Copies hook scripts to `.claude/hooks/scripts/`
-5. Merges hook config into `.claude/settings.json` — only claude-task-store's own hook entries are ever added or removed (matched by exact command path, not substring), so any other hooks you or another plugin registered for `SessionStart`/`PreCompact`/`SessionEnd` are left untouched. A backup is written to `.claude/settings.json.bak` before each rewrite.
-6. Copies the OpenCode adapter (a thin auto-discovered plugin) to `.opencode/plugin/task-store.ts` plus a sibling helper module in `.opencode/plugin/task-store/`. Nothing else under `.opencode/` is touched; no `opencode.json` change is required.
-7. Updates `.gitignore`
-
-The `SessionStart` hook (Claude Code) resolves the CLI in this order:
-
-1. the project-local runtime at `.claude/task-store/` (installed above)
-2. `task-store` on `PATH`
-3. a minimal goal/next-action fallback, used only when neither is available
-   (for example, if Node is missing) and clearly labelled as such
-
-The OpenCode plugin uses the same project-local runtime directly and does not
-fall back to PATH — install.sh always installs `.claude/task-store/` and the
-plugin reads it. To opt out of OpenCode integration in a future install, run
-`TASK_STORE_SKIP_OPENCODE=1 ./install.sh /path/to/project`.
-
-**Optional — `task-store` on your PATH.** Only needed if you want to run the CLI
-by hand from any directory; the hooks and the OpenCode plugin never require it:
-
-```bash
-TASK_STORE_INSTALL_GLOBAL=1 ./install.sh /path/to/your/project
-# or, any time:  npm install -g .
+```
+tool activity
+→ mark checkpoint possibly stale
+→ wait for a safe boundary + debounce
+→ ask the agent to reconcile
+→ agent decides whether ordinary task-store state should change
 ```
 
-**Uninstall:**
-```bash
-./uninstall.sh /path/to/your/project
-```
-Uninstalling backs up `.claude/settings.json` to `.claude/settings.json.bak` first and removes only claude-task-store's own hook entries, in the same exact-match-safe way as install. It also removes the project-local runtime at `.claude/task-store/`, but only after confirming that directory carries claude-task-store's own marker. It removes the OpenCode plugin at `.opencode/plugin/task-store.ts` (and its sibling helper subdirectory when it contains no other files), but only when the plugin file carries claude-task-store's ownership marker. Anything else under `.claude/` or `.opencode/` — your own hooks, agents, commands, plugins, MCP servers, skills, and `opencode.json` — is left untouched. Your task state in `.claude-task/` is left in place.
+It will never infer:
+
+- file changed → task done
+- tests passed → task done
+- commit exists → milestone complete
+- a next action, blocker, or decision
+
+Those remain explicit checkpoint claims.
+
+### Session attachment
+
+Auto-checkpoint is **session-intent-scoped**.
+
+Opening another terminal or coding-agent session in the same repository does not automatically give that session authority over the active checkpoint. A fresh session is asked whether it should continue the existing task-store work.
+
+- **Yes** → the session attaches and auto-checkpoint operates normally.
+- **No** → the session stays detached; ordinary repository work and manual task-store commands still work, but automatic dirty/reconciliation signals are ignored.
+- **Another session already owns it** → takeover requires explicit confirmation.
+
+Only one session owns the automatic flow at a time.
+
+This is deliberately an intent boundary, not a session manager: there is no TTL, heartbeat, automatic takeover, session history, or multi-owner orchestration.
+
+Turning auto-checkpoint off clears the ephemeral runtime, attachment, and staged reconciliation state.
 
 ---
 
-## Quick start
+## Claude Code and OpenCode
 
-```bash
-# Initialize with a goal and tasks
-task-store init "Implement OAuth for the API" \
-  "Database schema migration" \
-  "Callback route" \
-  "Token validation" \
-  "Integration tests" \
-  "Update API docs"
+Both hosts use the same state schema, resume renderer, CLI, trust hierarchy, and provider-neutral auto-checkpoint core.
 
-# Start working
-task-store start T1
-
-# Mark done with evidence (required — prevents false completions)
-task-store done T1 -e db/migrations/001_oauth.sql -e "npm test: 8/8 pass"
-
-# Record a failed approach so future sessions don't repeat it
-task-store attempt T4 "mocked fetch" "does not support streaming responses"
-
-# Mark blocked
-task-store block T4 "need local HTTP fixture before streaming test works"
-
-# Always set next action before ending a session
-task-store next "Replace mock with local HTTP fixture, then complete T4"
-
-# Keep a second topic on the same branch without losing the first checkpoint
-task-store topic add docs "Refresh the API guide" "Draft examples" "Review links"
-task-store topic use docs
-```
-
-On next session start (or in a fresh model session), the agent automatically receives the compact resume context shown above — identically in Claude Code and in OpenCode, since both render it through the same `task-store resume` CLI.
-
----
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `task-store init "<goal>" [tasks...] [--auto-checkpoint off\|conservative]` | Initialize a new task store; auto-checkpoint defaults to `conservative` |
-| `task-store status [--topic <name>]` | Show full state for the active or named topic |
-| `task-store show <taskId> [--topic <name>]` | Show one task's notes, attempts, evidence, timestamps, and blockers |
-| `task-store resume` | Print compact resume context |
-| `task-store topic add <name> "<goal>" [tasks...]` | Add a named topic without switching |
-| `task-store topic list` | List topics and identify the active one |
-| `task-store topic use <name>` | Switch the active topic |
-| `task-store add "<title>"` | Add a new task |
-| `task-store start T1` | Mark task in-progress |
-| `task-store done T1 -e <evidence>` | Mark done with evidence |
-| `task-store block T1 "<reason>"` | Mark blocked |
-| `task-store resume-task T1` | Resume a blocked task |
-| `task-store attempt T1 "<tried>" "<why-failed>"` | Record a failed approach |
-| `task-store decide "<summary>" [rationale]` | Record a key decision |
-| `task-store next "<action>"` | Set the next action |
-| `task-store commit --topic <name> [--expect-rev N] < batch.json` | Apply a batch of operations atomically (see `docs/batch-commit.md`) |
-| `task-store history [--tail N]` | Show history log |
-| `task-store archive` | Archive the current topic; archived topics are excluded from resume injection |
-| `task-store repair` | Recover from corrupted state |
-| `task-store stale` | Detect tasks stuck in-progress >48h |
-| `task-store token-estimate` | Estimate injected token count |
-| `task-store config` | Show project-local configuration |
-| `task-store config auto-checkpoint <off\|conservative>` | Enable/disable auto-checkpoint mode |
-| `task-store attach status` | Show which session owns this project's auto-checkpoint flow |
-| `task-store attach --session-id <id> --host <h> --yes` | Attach this session (fails if another session owns the store) |
-| `task-store attach --session-id <id> --host <h> --takeover --confirm` | Attach by explicitly taking over from the current owner |
-| `task-store attach --session-id <id> --host <h> --release` | Release the attachment if this session owns it |
-
-### Cross-agent flags
-
-```bash
-task-store start T1 --by claude-code       # record which agent is writing
-task-store done T1 --by codex -e proof     # handoff provenance (informational)
-task-store next "action" --expect-rev 14   # reject write if another agent wrote first
-task-store commit --topic my-topic < batch.json  # apply batch atomically on a named topic
-task-store status --topic docs                  # inspect an inactive topic without switching
-task-store show T2 --topic docs                 # inspect one task in an inactive topic
-```
-
-`--by` is accepted on every command that writes state (`init`, `topic add`, `topic use`, `add`, `start`, `done`, `block`, `resume-task`, `attempt`, `decide`, `next`, `commit`, `archive`, `repair`) and is rejected as an unsupported flag if you pass it to a purely read-only command.
-
-`--expect-rev` is enforced atomically: the revision check and the write both happen inside an O_EXCL lock file (`.claude-task/.lock`) held for the full read-compare-write cycle, so two concurrent `task-store` CLI invocations cannot race each other into a lost update. This protects concurrent **CLI** invocations specifically; code that imports `src/core.ts` directly and calls `writeState()` without going through `withStoreLock()` bypasses it. See [`docs/pre-release-remediation.md`](docs/pre-release-remediation.md) item 3 for the exact guarantee.
-
----
-
-## Claude Code integration
-
-After installation, these hooks run automatically:
-
-| Hook | Event | Action |
-|------|-------|--------|
-| `session-start.sh` | `SessionStart` | Injects compact resume context if state exists |
-| `pre-compact.sh` | `PreCompact` | Saves a checkpoint to history before compaction |
-| `session-end.sh` | `SessionEnd` | Warns if `next_action` is not set |
-| `post-tool-use.sh` | `PostToolUse` | Auto-checkpoint only — marks the checkpoint possibly stale |
-| `stop.sh` | `Stop` | Auto-checkpoint only — asks the agent to reconcile at a boundary |
-
-The last two are installed unconditionally. New stores enable conservative mode during `task-store init`; use `--auto-checkpoint off` to opt out. Configless legacy stores remain inert: each hook exits in a few milliseconds of shell, before starting Node, when `.claude-task/config.json` is absent or not set to `conservative`. See [Auto-checkpoint mode](#auto-checkpoint-mode).
-
-The `/task-store` skill is also installed. Claude uses it when starting long-running tasks, after milestones, and before ending sessions. Invoke directly with `/task-store`.
-
----
-
-## OpenCode integration
-
-A thin auto-discovered OpenCode plugin is installed alongside the Claude Code
-side. It uses OpenCode's `experimental.chat.system.transform` hook to push the
-same `task-store resume` projection into the system prompt for every chat
-call — including the first user message of a fresh session, which is the
-OpenCode analog of Claude Code's `SessionStart`. No `opencode.json` change is
-required.
-
-Architecture:
-
-```
-OpenCode session
-  ↓
-.opencode/plugin/task-store.ts        (auto-discovered thin adapter)
-  ↓  imports ./task-store/injection.ts
-.opencode/plugin/task-store/injection.ts   (helper; not itself a plugin —
-                                            OpenCode's discovery glob
-                                            .opencode/{plugin,plugins}/*.{ts,js}
-                                            is a single level)
-  ↓
-experimental.chat.system.transform
-  ↓
-node .claude/task-store/bin/task-store.js resume --root <worktree>
-  ↓
-merged into output.system[0]   (never pushed as a new array element)
-```
-
-**Single system block.** Everything the plugin contributes — the resume
-projection and any pending reconciliation instruction — is appended to the
-*first* element of `output.system`, after whatever system content OpenCode
-already put there. A new element is created only when OpenCode supplied an
-empty array. This is deliberate: OpenCode maps each element of
-`output.system` to its own `role: "system"` message for OpenAI-compatible
-providers, and LiteLLM-backed endpoints reject any request whose system
-message is not the first message
-(`litellm.BadRequestError: System message must be at the beginning`). The
-plugin therefore never increases the number of system message blocks. Order
-is fixed: existing OpenCode system content → resume projection → pending
-reconciliation instruction.
-
-The plugin contains no task-state logic of its own. It is a thin adapter that
-reuses the canonical CLI installed by step 2 of the installer. The same
-Claude-compatible SKILL.md at `.claude/skills/task-store/` is also discovered
-by OpenCode as an "external skill" (OpenCode auto-loads SKILL.md files from
-both `~/.claude/skills/` and `.claude/skills/`), so no duplicate
-`.opencode/skills/` copy is needed.
-
-### OpenCode auto-checkpoint parity
-
-OpenCode supports the same conservative auto-checkpoint mode as Claude Code.
-The plugin wires the existing provider-neutral core (`src/autocheckpoint.ts`)
-through OpenCode's lifecycle hooks:
-
-| Phase | Claude Code | OpenCode |
+| Capability | Claude Code | OpenCode |
 |---|---|---|
-| Tool activity → dirty | `PostToolUse` shell hook | `tool.execute.after` plugin hook |
-| Reconciliation boundary | `Stop` hook (`additionalContext`) | `event({type: "session.idle"})` plugin hook, which stages the instruction in one locked step via `task-store auto stage-instruction` into `.claude-task/.pending-reconcile-instruction.txt` |
-| Instruction delivery | Same call (the `Stop` output channel) | Next `experimental.chat.system.transform`, which collects the staged record through `task-store auto take-instruction` — owner-gated and one-shot, so a detached session cannot take what the owner was staged for — and merges it into `output.system[0]` |
-| Compaction | `PreCompact` writes history marker | `experimental.session.compacting` registered as a deliberate no-op |
+| Resume injection | `SessionStart` hook | auto-discovered plugin |
+| Dirty signal | `PostToolUse` | `tool.execute.after` |
+| Reconciliation boundary | `Stop` | `session.idle` |
+| Session identity | hook `session_id` | hook/event `sessionID` |
+| State format | same | same |
+| CLI | same | same |
 
-Both harnesses share the **same provider-neutral auto-checkpoint core**,
-including `task-store auto mark-dirty`, the 120-second debounce, and the trust
-hierarchy embedded in `RECONCILE_INSTRUCTION`. Claude Code uses `auto check`
-at `Stop` because it can deliver the instruction inline; OpenCode uses
-`auto stage-instruction` at `session.idle` and `auto take-instruction` on
-the next chat call because its boundary has no direct model-feedback channel.
-Both paths apply the same ownership and reconciliation rules. All four verbs live in the
-provider-neutral core and gate on the same attachment record, so ownership is
-decided in exactly one place — including *when* an instruction may be staged,
-which the core does inside the same store lock as the ownership check. A
-session that has just been taken over can therefore neither stage nor collect
-an instruction, and the staged record is bound to the session that staged it.
+The adapters are intentionally thin. Any agent with shell access can use the same checkpoint through the CLI, including Codex or another coding harness.
 
-**Session attachment on OpenCode.** The [attachment prompt](#session-attachment-issue-23)
-needs a session id. Every hook the plugin registers receives one in its own
-input — `tool.execute.after` and `experimental.chat.system.transform` carry
-`sessionID`, and the `session.idle` event carries it in `properties` — so the
-prompt appears on the first chat call, with no warm-up turn. Each hook reads
-the id from its own input and never from state left by another hook: one
-plugin instance serves every session in the process, so a shared mutable id
-would attribute one session's activity to another. A hook whose input carries
-no usable id (OpenCode also triggers the transform internally with no session)
-injects the project-wide resume projection and nothing session-scoped.
-
-> **Compatibility note:** verified against OpenCode 1.18.25. Support relies
-> on exactly four plugin hooks — two of which OpenCode currently labels
-> experimental: `experimental.chat.system.transform` and
-> `experimental.session.compacting`, plus the `event()` bus hook (filtered
-> to `session.idle`) and the `tool.execute.after` callback. These are not a
-> stable API and OpenCode compatibility is not guaranteed across future
-> OpenCode releases: if any of them changes, this adapter needs updating.
-> The change is contained to one file, and the plugin source ships with the
-> install so you can patch it locally.
->
-> The plugin does **not** use `experimental.compaction.autocontinue`. That
-> is deliberate — see the compaction paragraph below.
-
-Around automatic compaction: the plugin intentionally does not mutate state
-at compaction time. `experimental.session.compacting` is registered as a
-no-op — the task store is the source of truth for execution state, and the
-next chat call re-injects fresh state via `system.transform`, so execution
-continuity does not depend on the conversation summary preserving task-store
-state.
-
-To opt out of OpenCode integration in a future install, run
-`TASK_STORE_SKIP_OPENCODE=1 ./install.sh /path/to/project`. The Claude Code
-side is unaffected.
-
-The plugin's behavior is verified end-to-end by two shell suites that run
-the locally installed `opencode` binary:
-
-- `tests/opencode_smoke_test.sh` — resume injection
-- `tests/opencode_autockpt_smoke_test.sh` — auto-checkpoint parity
+OpenCode compatibility is validated against OpenCode 1.18.25. Its adapter depends on experimental plugin hooks, so future OpenCode releases may require an adapter update.
 
 ---
 
-## Auto-checkpoint mode
+## Cross-agent handoff
 
-**New stores default to `conservative`.** `task-store init` writes that choice explicitly to `.claude-task/config.json`. Use `task-store init ... --auto-checkpoint off` to opt out. Existing stores with no config file—and stores with missing or invalid configuration—continue to resolve to `off`, so upgrading does not silently change their behavior.
+No migration is required when changing agents.
 
-`claude-task-store` covers session boundaries well, but not the middle of a long session. The agent can edit files, run tests and finish milestones without ever calling the CLI, and `.claude-task/state.json` quietly falls behind the repository. Auto-checkpoint is a conservative fix for exactly that drift.
-
-**Primarily, auto-checkpoint is interruption insurance.** It reduces recovery
-cost when a session ends unexpectedly — a crash, a timeout, a closed terminal —
-before the agent has a chance to update the checkpoint manually. It is not
-automatic task management: it never decides that a task is finished, and
-completion still requires an explicit `task-store done` with evidence.
-
-> Auto-checkpoint does not try to guess what your code means. It only notices that meaningful work happened and asks the agent to reconcile the checkpoint at a safe boundary.
-
-### Enable / disable
+A handoff can be as small as:
 
 ```bash
-task-store config auto-checkpoint conservative   # turn it on
-task-store config auto-checkpoint off            # turn it off
-task-store config auto-checkpoint                # print the current mode
+task-store status
+task-store resume
 ```
 
-The setting lives in `.claude-task/config.json`, alongside your state:
+Then open the same repository in another agent.
 
-```json
-{
-  "auto_checkpoint": "conservative"
-}
-```
-
-`task-store status` always shows it, so you never have to open the file to find out whether it is on:
-
-```
-Auto-checkpoint: conservative
-⚠  task-store may be stale — 4 change signal(s) since the last checkpoint write.
-   Reconcile with: task-store start|done|attempt|block|decide|next
-```
-
-Only `off` and `conservative` exist. There is no `aggressive` mode; asking for one is an explicit error rather than a silent fallback.
-
-### Session attachment (issue #23)
-
-Auto-checkpoint is **session-intent-scoped**, not project-scoped. A fresh
-session in a project that already has active task-store work does **not**
-automatically inherit authority to dirty the auto-checkpoint runtime or
-receive reconciliation instructions — the user must explicitly opt in.
-
-When a session starts in a project with active state, the host (Claude Code
-`SessionStart` or OpenCode `experimental.chat.system.transform`) checks
-`.claude-task/attachment.json`. Three outcomes:
-
-1. **No attachment yet** — the session is fresh. The host injects a prompt:
-   > This project has active task-store work. Continue those tasks in this session?
-   The user confirms → the printed attach command runs → the session is
-   attached. The adapter prints it in full, e.g.
-   `node .claude/task-store/bin/task-store.js attach --session-id <id> --host claude-code --root <project> --yes`,
-   because a bare `task-store` would assume a global install this project is
-   not required to have.
-2. **A different session is the owner** — the host injects a takeover prompt:
-   > Another session is already attached to this project's task-store work. Continue those tasks in this session?
-   The user confirms → the printed takeover command runs (the same command
-   plus `--takeover --confirm`) → the previous owner's claim is replaced.
-   Explicit takeover is required; the CLI refuses to silently steal ownership.
-3. **This session is the owner** — no prompt, no friction; auto-checkpoint
-   works normally.
-
-Until attached, `auto mark-dirty` and `auto check` are silent no-ops for
-that session, so its tool activity does not dirty the checkpoint and it
-does not receive reconciliation instructions. The session can still run any
-task-store CLI verb by hand (e.g. `task-store status`, `task-store done`).
-Decline is recorded implicitly: a session that never attaches stays detached
-for its lifetime; it can opt in later by running an attach command. The
-question is asked **once per session** — OpenCode's system-transform hook fires
-on every chat call, so repeating it would train the user to ignore it. That
-memory is in-process only (keyed by session id, discarded when the process
-exits); nothing about a decline is written to task-store files. A session that
-declines and later attaches by hand is honoured immediately.
-
-The prompt is printed only when the project's mode is actually
-`conservative`. A project with `off` — including a configless legacy store —
-never sees it.
-
-The attachment record lives at `.claude-task/attachment.json` (gitignored,
-separate from `state.json` so the published schema is unchanged) and holds
-only the session id, host identifier, and an attached_at timestamp.
-`task-store attach status` prints the current owner. The attach and takeover
-forms require both `--session-id` and `--host` (the host is recorded for
-diagnostics). `--release` needs only `--session-id`, because ownership is the
-whole check and the host is not part of the record's identity:
+Optional provenance and concurrency controls:
 
 ```bash
-task-store attach --release --session-id <id>
+task-store start T1 --by claude-code
+task-store done T1 --by codex -e "npm test: pass"
+
+task-store next "Implement parser" --expect-rev 14
 ```
 
-Clearing happens automatically in two cases:
+`--expect-rev` provides atomic compare-and-write protection against concurrent CLI writers.
 
-- **Session ends normally** — Claude Code's SessionEnd hook releases the
-  record when this session owns it.
-- **Auto-checkpoint is switched off** — `config auto-checkpoint off` clears
-  the attachment. With the mode off there is no flow left for it to gate, and
-  a session that ends (or crashes) while the mode is off would otherwise leave
-  a dead owner behind: the session-end release is skipped in that state, so
-  the next session to enable conservative mode would be forced through a
-  takeover confirmation for a session that ended long ago. Turning the mode
-  back on therefore starts with no owner, and the attach prompt appears again.
-
-### How conservative mode works
-
-```
-tool activity  →  mark possibly stale   (no task-store write)
-                        ↓
-             wait for a safe boundary + debounce
-                        ↓
-          ask the agent to reconcile (one short instruction)
-                        ↓
-      agent uses the ordinary CLI: start | done | attempt | block | decide | next
-                        ↓
-        checkpoint changes only if the agent decides it should
-```
-
-**Dirty signals** are tool calls that can change repository or execution state. In Claude Code that is a specific matcher list — `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash`. Read-only tools are deliberately excluded, so browsing the codebase never marks anything stale. OpenCode classifies against its own host tool lifecycle instead, excluding its read-only tools (`read`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `skill`, `task`, `question`, `todowrite`) and treating the rest as dirty; the dirty/reconcile semantics it feeds are the same provider-neutral ones. Either way, a dirty signal records two timestamps and a counter. It never writes task state.
-
-**Reconciliation boundaries** are where the checkpoint is allowed to be questioned. The events below are Claude Code's; for OpenCode's `session.idle` boundary and its `system.transform` instruction delivery, see [OpenCode auto-checkpoint parity](#opencode-auto-checkpoint-parity):
-
-| Boundary | What happens | Why |
-|----------|--------------|-----|
-| `Stop` | Emits the reconciliation instruction to the model as `additionalContext`; the conversation continues so the agent can act on it | The only event that can actually get the agent to reconcile |
-| `PreCompact` | Emits the same instruction as custom compact instructions | Compaction is when a stale checkpoint hurts most |
-| `SessionEnd` | Warns **you** on stderr that the checkpoint looks stale | This event has no channel back to the model — the session is already over |
-
-**Debounce.** A boundary asks only when *both* gates open: new work has arrived since the last request, **and** at least 120 seconds have passed since it. So a burst of fifty edits produces exactly one request, and a rapid back-and-forth does not carry a nag on every turn. No timers, no background processes — just two timestamps compared on demand.
-
-**Freshness** is derived, not scanned. Because every CLI write bumps `state.updated_at`, "stale" simply means *work was signalled and the checkpoint has not been written since*. There is no repository scan, no diffing, and no dependency on Git — it works in a project with no version control at all. It is a hint, never a claim of certainty, which is why the wording is always "may be stale".
-
-### What it will never do
-
-Auto-checkpoint **never mutates your task state.** It emits an instruction; the agent decides. Specifically forbidden, by design rather than by convention:
-
-- ❌ file changed → task done
-- ❌ tests passed → related task done
-- ❌ commit exists → milestone complete
-- ❌ inventing a `next_action`, decision, or blocker
-
-A file edit or a passing test is *evidence that work happened*, not proof that a task is complete. Completion still requires an explicit `task-store done` with evidence, exactly as it does with the feature off. The trust hierarchy is unchanged, and the injected instruction restates it verbatim:
-
-```
-repository / tests  >  git state  >  task-store  >  model memory
-```
-
-### Cost when off
-
-Zero writes and no Node process. When auto-checkpoint is off—including in a configless legacy project—the hooks bail out in bash before spawning anything. Each matched tool call in conservative mode spawns one short-lived Node process to record the signal.
-
-### Provider neutrality
-
-The core knows nothing about Claude Code event names. Adapters map their own lifecycle onto three verbs — `markDirty()`, `shouldReconcile()`, `markReconciled()` — in [`src/autocheckpoint.ts`](src/autocheckpoint.ts). That is the entire extension surface. The OpenCode adapter reuses the same config file and the same behavior without touching the core.
+For larger atomic updates, see [docs/batch-commit.md](docs/batch-commit.md).
 
 ---
 
-## Cross-agent use
+## What this is not
 
-The state format is model-neutral. Any agent that can run shell commands can read and update the checkpoint using the CLI alone — no Claude Code skills or hooks required.
+claude-task-store intentionally does **not** try to become:
 
-Validated: Claude Code ↔ Codex handoffs in both directions. See [`docs/phase3-cross-agent-handoff.md`](docs/phase3-cross-agent-handoff.md).
+- conversation memory
+- RAG or semantic search
+- a long-term knowledge base
+- a project-management system
+- a worktree/workspace manager
+- an agent orchestrator
+- a workflow engine
+- a cloud service
 
-Claude Code and OpenCode can both resume from the same execution checkpoint: the
-CLI runtime, state schema, resume renderer, and trust hierarchy are shared, and
-the only host-specific code is the thin adapter (Claude Code hooks vs the
-OpenCode plugin). Handoff between hosts is therefore just "open the same
-project in the other host"; the state in `.claude-task/state.json` is the
-bridge, with no extra migration step.
+If you need those things, use a system designed for them.
 
----
+This project does one small job: **keep a coding task resumable without keeping the whole conversation alive.**
 
-## Not another memory system
-
-`claude-task-store` is intentionally not:
-
-- **Conversation memory** — it does not store what was said
-- **RAG or semantic search** — no embeddings, no vector database
-- **Long-term knowledge base** — not designed for "what do I know about X?"
-- **Project management** — no kanban, no sprint planning, no issue tracker
-- **Workspace manager** — does not create worktrees or isolated task environments
-- **Agent orchestration** — no multi-agent coordination or routing
-- **Workflow framework** — does not drive sequences of agent actions
-- **Cloud service** — everything stays on your local filesystem
-
-**Execution continuity without the workflow system.**
-
-If you do not need a workspace manager, do not create one. claude-task-store is a checkpoint underneath your existing workflow — not a replacement for it.
-
-| | claude-memory / context-memory | **claude-task-store** |
-|--|--|--|
-| Question answered | "What do I know about X?" | "Where am I in this task?" |
-| Storage | SQLite + vector embeddings | Plain JSON files |
-| Retrieval | Semantic search | Direct file read |
-| Dependencies | sqlite-vec, embeddings | Node.js only |
-| Token injection | Variable (relevant facts) | Compact fixed-structure summary |
-| Update trigger | Session end (all turns) | Meaningful milestones only |
-| Task tracking | ✗ | ✓ |
-| Failure recording | ✗ | ✓ |
-| Evidence required | ✗ | ✓ |
-| Git-committable | Awkward | Native |
-
-See [`DESIGN.md`](DESIGN.md) for full analysis.
+For design rationale and comparison with adjacent approaches, see [DESIGN.md](DESIGN.md).
 
 ---
 
-## Related projects
+## Architecture
 
-Several projects solve adjacent problems. This is a known area with multiple active approaches:
-
-- [**ddaanet/handoff**](https://github.com/ddaanet/handoff) — A minimal task-frame bridge for Claude Code. Best suited when the core need is preserving the active task context across `/clear` or `/compact` within a single Claude Code project. No per-project setup required.
-
-- [**joeeeeey/task-workspace**](https://github.com/joeeeeey/task-workspace) — Isolated task environments with dedicated worktrees, `AGENTS.md`, `goal.md`, `decisions.md`, and `status.md`. Better suited when the work requires per-task isolation, artifact tracking, and structured multi-day agent sessions.
-
-- [**stefan-jansen/coding-agent-toolkit**](https://github.com/stefan-jansen/coding-agent-toolkit) — A structured idea-to-PR workflow using GitHub issues/milestones as the canonical state machine. Better suited when adopting a spec-first engineering process with explicit handoff assertions and GitHub integration.
-
-- [**jonmmease/jons-plan**](https://github.com/jonmmease/jons-plan) — A full workflow engine with typed phases, artifact systems, parallel subagents (Opus + Codex CLI), and a `/jons-plan` slash interface. Better suited for sophisticated multi-session planning workflows.
-
-**claude-task-store** targets a different point in this space: execution continuity without workflow adoption. It requires no worktree setup, no GitHub integration, no new process model — just a small durable checkpoint that keeps any coding agent oriented across session boundaries.
-
----
-
-## State schema
-
-There are two related status layers. `topics[].status` describes the lifecycle
-of the selected workstream; `topics[].tasks[].status` describes individual
-work items. They are not interchangeable:
-
-| Layer | Status | Meaning |
-|-------|--------|---------|
-| Topic | `active` | Work can continue; a current task may or may not be selected |
-| Topic | `blocked` | One or more tasks or external conditions block progress |
-| Topic | `completed` | Every task is `done` or `skipped`; the checkpoint is ready to archive |
-| Topic | `archived` | Intentionally closed; it is not injected into a fresh session |
-| Task | `pending` | Not started |
-| Task | `in_progress` | Currently being worked on |
-| Task | `blocked` | Cannot currently proceed |
-| Task | `done` | Recorded as complete with evidence supplied by the agent |
-| Task | `skipped` | Explicitly not required |
-
-`done` and `completed` are checkpoint claims, not repository truth. Evidence
-must still be checked against the repository and tests. Auto-checkpoint
-freshness (`task-store may be stale`) is a separate warning about whether the
-checkpoint was updated after observed activity; it is not another topic or task
-status. Archiving is a separate lifecycle step after completion, or when a
-topic is intentionally being closed without further work.
-
-```json
-{
-  "version": "2",
-  "revision": 5,
-  "active_topic": "oauth",
-  "topics": [
-    {
-      "name": "oauth",
-      "goal": "Add OAuth support",
-      "status": "blocked",
-      "current_task": "T4",
-      "tasks": [
-        {
-          "id": "T4",
-          "title": "Write integration tests",
-          "status": "blocked",
-          "notes": "need local HTTP fixture before streaming test works",
-          "evidence": [],
-          "attempts": [
-            { "description": "mocked fetch", "outcome": "does not support streaming" }
-          ]
-        }
-      ],
-      "decisions": [{ "summary": "Use PKCE flow", "rationale": "implicit flow is deprecated" }],
-      "blockers": [{ "description": "need local HTTP fixture", "task_id": "T4" }],
-      "next_action": "Replace mock with local HTTP fixture, then complete T4",
-      "created_at": "2024-01-01T00:00:00Z",
-      "updated_at": "2024-01-02T00:00:00Z"
-    }
-  ],
-  "updated_by": "claude-code",
-  "updated_at": "2024-01-02T00:00:00Z"
-}
+```
+coding host
+   │
+   ├── Claude Code hooks
+   └── OpenCode plugin
+           │
+           ▼
+     task-store CLI
+           │
+           ▼
+     .claude-task/state.json
 ```
 
-Each topic owns its tasks, attempts, decisions, blockers, and next action. All
-ordinary task commands operate on `active_topic`, and session injection renders
-only that topic. Topic selection is explicit; there is no concurrent execution
-or orchestration. Version-1 files are read as a `default` topic without changing
-the file, then written as version 2 on the next normal state mutation.
+The CLI is the interoperability boundary. Host integrations adapt lifecycle events to the same core rather than implementing task semantics themselves.
 
-Full JSON schema: [`schemas/state.schema.json`](schemas/state.schema.json)
+The state model supports named topics, tasks, evidence, failed attempts, blockers, decisions, and an explicit next action.
+
+Full schema: [schemas/state.schema.json](schemas/state.schema.json)
 
 ---
 
-## Git integration
+## Useful docs
 
-**Recommended:** commit `state.json`, ignore `history.jsonl`.
-
-```bash
-git add .claude-task/state.json
-git commit -m "chore: update task checkpoint"
-# history.jsonl is already in .gitignore
-```
-
-This enables another developer or model to resume the task from git alone.
-
-Options:
-- **Commit state.json** ← Recommended for cross-session/cross-model handoffs
-- **Gitignore everything** — For private or transient work
-- **Commit both** — Full audit trail in git (history.jsonl grows unbounded)
-
-`.claude-task/config.json` is yours and is committable — commit it to share the project's auto-checkpoint choice. `.claude-task/auto-checkpoint.json` is ephemeral machine-local bookkeeping (dirty/debounce timestamps) and is gitignored by the installer.
-
----
-
-## Security and limitations
-
-- State files are injected into the agent's context (Claude Code or OpenCode). Treat `.claude-task/state.json` with the same trust as other project config. A malicious state file could inject arbitrary text into the AI context (prompt injection).
-- No network requests are made. All state is local.
-- Concurrent `task-store` CLI invocations are serialized by an O_EXCL lock file around each command's full read-modify-write cycle; `--expect-rev` makes this an atomic compare-and-write (not last-writer-wins) against other CLI callers. Direct library callers that bypass `withStoreLock()` are not protected. See [`SECURITY.md`](SECURITY.md).
-- Evidence (`-e` values) is kept as a plain string array end-to-end — no delimiter-based joining/splitting — so evidence text may safely contain commas, quotes, or other special characters.
-- Evidence paths in state.json are claims, not verified proofs. The trust hierarchy is: repository/tests > git state > task-store > model memory.
-
-See [`SECURITY.md`](SECURITY.md) for full details.
+| Document | Purpose |
+|---|---|
+| [docs/agent-installation.md](docs/agent-installation.md) | Safe installation runbook for coding agents |
+| [DESIGN.md](DESIGN.md) | Design rationale, scope, and adjacent projects |
+| [SECURITY.md](SECURITY.md) | Trust model and security considerations |
+| [docs/batch-commit.md](docs/batch-commit.md) | Atomic batch checkpoint updates |
+| [docs/phase2-reliability-report.md](docs/phase2-reliability-report.md) | Reliability experiments |
+| [docs/phase3-cross-agent-handoff.md](docs/phase3-cross-agent-handoff.md) | Cross-agent handoff validation |
 
 ---
 
@@ -910,43 +361,34 @@ See [`SECURITY.md`](SECURITY.md) for full details.
 ```bash
 npm install
 npm run build
-npm run typecheck                  # tsc --noEmit on src/ AND opencode-plugin/
-npm test                           # Unit tests
-bash tests/acceptance.sh           # Cross-session recovery test
-bash tests/phase2/pressure_test.sh # 22-session pressure test
-bash tests/phase3/handoff_test.sh  # Cross-agent handoff test
-bash tests/phase3/batch_commit_test.sh # Atomic batch checkpoint regression
-bash tests/autocheckpoint_test.sh  # Auto-checkpoint mode regression
-bash tests/multi_topic_test.sh     # Named topics and v1 migration regression
-bash tests/opencode_install_test.sh     # OpenCode install/uninstall regression
-bash tests/opencode_smoke_test.sh       # Real OpenCode resume-injection smoke
-bash tests/opencode_autockpt_smoke_test.sh # Real OpenCode auto-checkpoint smoke
+npm run typecheck
+npm test
+
+bash tests/acceptance.sh
+bash tests/autocheckpoint_test.sh
+bash tests/multi_topic_test.sh
+bash tests/phase3/handoff_test.sh
+bash tests/opencode_install_test.sh
+bash tests/opencode_smoke_test.sh
+bash tests/opencode_autockpt_smoke_test.sh
 ```
 
-The OpenCode smoke tests need a working `opencode` binary on `PATH`. They
-skip cleanly (`exit 77`) if it isn't installed; the other suites are pure
-shell and run anywhere.
+CI runs the full regression matrix on Node 18, 20, and 22. The OpenCode smoke suites use a real local `opencode` binary when available.
 
-653 automated checks pass across 19 test files: 3 Jest and 16 shell
-— unit 213, acceptance 17, multi-topic 15, Phase 2 reliability 52, Phase 3 handoff 22,
-atomic batch commit 27,
-installer regression 17, path safety 32, project-local runtime 32,
-auto-checkpoint 68, OpenCode install regression 117, OpenCode resume smoke 21,
-OpenCode auto-checkpoint smoke 20.
+---
 
-CI runs every suite on Node 18/20/22 **except** the two real-OpenCode smoke
-suites: GitHub runners have no `opencode` binary, so those two steps report
-themselves as skipped. The 41 checks they contribute are verified locally
-against an installed OpenCode, not by CI.
+## Security
+
+State is injected into an agent's context, so treat `.claude-task/state.json` with the same trust as other repository configuration.
+
+The tool makes no network requests. CLI mutations are serialized with a project-local lock, and optimistic revision checks are available through `--expect-rev`.
+
+See [SECURITY.md](SECURITY.md) for the full threat model and guarantees.
 
 ---
 
 ## License
 
-[Mozilla Public License 2.0](LICENSE) — see [`LICENSE`](LICENSE)
+[Mozilla Public License 2.0](LICENSE).
 
-- **Commercial use is allowed.** You may use and integrate claude-task-store in commercial and proprietary projects without restriction.
-- **Proprietary projects are not affected.** If you use claude-task-store as a tool or integrate it into a Larger Work, your proprietary code is not subject to MPL-2.0.
-- **Source file modifications remain MPL-2.0.** If you modify any MPL-covered source files in this repository, those modified files must be made available under MPL-2.0.
-
-See the [MPL 2.0 FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/) for details.
+Commercial and proprietary use is allowed. MPL-covered source files that you modify remain subject to MPL-2.0.
