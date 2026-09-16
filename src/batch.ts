@@ -25,7 +25,7 @@
 import { appendHistory, readState, writeState } from './storage.js';
 import { StateError, validateState } from './codec.js';
 import { withStoreLock } from './lock.js';
-import { nextTaskId } from './core.js';
+import { nextTaskId } from './operations.js';
 import type { TaskState } from './types.js';
 
 /** Input shape for a single operation in a commit batch. */

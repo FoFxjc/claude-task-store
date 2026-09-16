@@ -25,7 +25,7 @@ import {
   AttachmentConflictError,
   isKnownHost,
 } from '../src/attachment.js';
-import { initState } from '../src/core.js';
+import { initState } from '../src/operations.js';
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `task-store-attach-${randomBytes(6).toString('hex')}`);

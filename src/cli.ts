@@ -5,11 +5,13 @@
  */
 
 import {
+  buildResumeContext, repairState, detectStaleTasks, RESUME_BUDGET_CHARS,
+} from './core.js';
+import {
   initState, startTask, completeTask, blockTask,
   resumeTask, addTask, recordAttempt, recordDecision, setNextAction,
-  archiveState, buildResumeContext, repairState, detectStaleTasks, RESUME_BUDGET_CHARS,
-  addTopic, useTopic,
-} from './core.js';
+  archiveState, addTopic, useTopic,
+} from './operations.js';
 import { commitBatch, compareAndWriteState, ConflictError } from './batch.js';
 import { readState, writeState } from './storage.js';
 import { StateError, getActiveTopic } from './codec.js';
