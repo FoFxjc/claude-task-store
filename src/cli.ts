@@ -4,9 +4,7 @@
  * Usage: task-store <command> [args]
  */
 
-import {
-  repairState, detectStaleTasks,
-} from './core.js';
+import { detectStaleTasks, repairState } from './stale.js';
 import { buildResumeContext, RESUME_BUDGET_CHARS } from './resume.js';
 import {
   initState, startTask, completeTask, blockTask,

@@ -8,9 +8,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes, createHash } from 'crypto';
 
-import {
-  repairState,
-} from '../src/core.js';
+import { repairState } from '../src/stale.js';
 import { buildResumeContext, fitResumeToBudget, RESUME_BUDGET_CHARS, RESUME_TRUNCATION_SUFFIX } from '../src/resume.js';
 import {
   initState,
