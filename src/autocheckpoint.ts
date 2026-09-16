@@ -208,6 +208,11 @@ export function writeMode(mode: AutoCheckpointMode, projectRoot?: string): AutoC
   // a takeover confirmation for a session that ended long ago.
   if (mode === 'off') {
     clearAttachment(projectRoot);
+    // A staged OpenCode reconciliation belongs to the auto-checkpoint flow
+    // just as much as the dirty runtime and attachment do. Leaving it behind
+    // after an explicit opt-out creates dead ephemeral state and makes the
+    // next chat call pay collection overhead for a feature that is off.
+    clearPendingInstruction(projectRoot);
   }
 
   return readConfig(projectRoot);
@@ -593,6 +598,23 @@ export function pendingInstructionFilePath(projectRoot?: string): string {
 }
 
 /**
+ * Remove any staged reconciliation instruction.
+ *
+ * This is administrative cleanup for disabling auto-checkpoint, not a
+ * session-scoped consume operation. Missing is fine; every other filesystem
+ * failure surfaces so `off` cannot claim the runtime was cleared while a
+ * dead pending record remains on disk.
+ */
+function clearPendingInstruction(projectRoot?: string): void {
+  const path = pendingInstructionFilePath(projectRoot);
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
+
+/**
  * Write the staged record. Caller holds the store lock and has already
  * established that `sessionId` owns the attachment.
  */
@@ -640,7 +662,13 @@ export function stagePendingInstruction(
   if (!decision.reconcile) {
     return { reconcile: false, reason: decision.reason, instruction: null };
   }
-  markReconcileRequested(root, now, sessionId);
+  const recorded = markReconcileRequested(root, now, sessionId);
+  if (recorded !== 'applied') {
+    // Defence in depth for non-CLI callers: the CLI serializes mode/ownership
+    // changes with this operation, but the provider-neutral core should still
+    // refuse to stage if the preconditions changed between decision and write.
+    return { reconcile: false, reason: recorded, instruction: null };
+  }
   writePendingInstruction(root, sessionId, RECONCILE_INSTRUCTION, now);
   return { reconcile: true, reason: decision.reason, instruction: RECONCILE_INSTRUCTION };
 }
