@@ -11,68 +11,13 @@ import { join } from 'path';
 import { randomBytes } from 'crypto';
 import { findProjectRoot, historyFilePath, stateFilePath, storePath } from './paths.js';
 import { withStoreLock } from './lock.js';
+import { getActiveTopic, StateError, validateState } from './codec.js';
+import type {
+  Attempt, Blocker, Decision, Task, TaskState, TopicState,
+} from './types.js';
+import { DEFAULT_TOPIC, SCHEMA_VERSION } from './types.js';
 
-export const SCHEMA_VERSION = '2';
-export const DEFAULT_TOPIC = 'default';
-
-export interface Attempt {
-  description: string;
-  outcome: string;
-  at?: string;
-}
-
-export interface Task {
-  id: string;
-  title: string;
-  status: 'pending' | 'in_progress' | 'blocked' | 'done' | 'skipped';
-  notes?: string | null;
-  evidence?: string[];
-  attempts?: Attempt[];
-  started_at?: string | null;
-  completed_at?: string | null;
-}
-
-export interface Decision {
-  summary: string;
-  rationale?: string | null;
-  at?: string | null;
-}
-
-export interface Blocker {
-  description: string;
-  task_id?: string | null;
-  since?: string | null;
-}
-
-export interface TopicState {
-  name: string;
-  goal: string;
-  status: 'active' | 'blocked' | 'completed' | 'archived';
-  current_task: string | null;
-  tasks: Task[];
-  decisions?: Decision[];
-  blockers?: Blocker[];
-  next_action: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface TaskState {
-  version: string;
-  /** Monotonically increasing integer. Incremented on every write. Used for optimistic concurrency. */
-  revision: number;
-  active_topic: string;
-  topics: TopicState[];
-  updated_at: string;
-  /** Optional agent/tool that last wrote this state. Never affects execution semantics. */
-  updated_by?: string | null;
-}
-
-interface LegacyTaskStateV1 extends Omit<TopicState, 'name'> {
-  version: '1';
-  revision?: number;
-  updated_by?: string | null;
-}
+export { SCHEMA_VERSION, DEFAULT_TOPIC } from './types.js';
 
 // ─── Atomic write ────────────────────────────────────────────────────────────
 
@@ -87,16 +32,6 @@ function atomicWrite(filePath: string, content: string): void {
     throw err;
   }
 }
-
-// ─── State validation ─────────────────────────────────────────────────────────
-
-export class StateError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'StateError';
-  }
-}
-
 // ─── Batch commit types ────────────────────────────────────────────────────────
 
 /** Input shape for a single operation in a commit batch. */
@@ -432,131 +367,6 @@ export function commitBatch(
 
     return { revision: state.revision ?? 0, operationsApplied: parsed.operations.length, topic: parsed.topic };
   });
-}
-
-
-function validateTimestamp(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim() === '' || Number.isNaN(Date.parse(value))) {
-    throw new StateError(`${label} must be a valid date-time string`);
-  }
-  return value;
-}
-
-function validateNullableString(value: unknown, label: string): void {
-  if (value !== null && typeof value !== 'string') {
-    throw new StateError(`${label} must be a string or null`);
-  }
-}
-
-function validateTask(data: unknown, label: string): Task {
-  if (typeof data !== 'object' || data === null) {
-    throw new StateError(`${label} must be a JSON object`);
-  }
-  const task = data as Record<string, unknown>;
-  if (typeof task.id !== 'string' || !/^T[0-9]+$/.test(task.id)) {
-    throw new StateError(`${label}.id must match T<number>`);
-  }
-  if (typeof task.title !== 'string') {
-    throw new StateError(`${label}.title must be a string`);
-  }
-  if (!['pending', 'in_progress', 'blocked', 'done', 'skipped'].includes(task.status as string)) {
-    throw new StateError(`Invalid task status in ${label}: ${task.status}`);
-  }
-  return data as Task;
-}
-
-function validateTopic(data: unknown, label: string): TopicState {
-  if (typeof data !== 'object' || data === null) {
-    throw new StateError(`${label} must be a JSON object`);
-  }
-  const topic = data as Record<string, unknown>;
-  if (typeof topic.name !== 'string' || topic.name.trim() === '') {
-    throw new StateError(`${label}.name must be a non-empty string`);
-  }
-  if (typeof topic.goal !== 'string' || topic.goal.trim() === '') {
-    throw new StateError(`${label}.goal must be a non-empty string`);
-  }
-  if (!['active', 'blocked', 'completed', 'archived'].includes(topic.status as string)) {
-    throw new StateError(`Invalid status: ${topic.status}`);
-  }
-  if (!Array.isArray(topic.tasks)) {
-    throw new StateError(`${label}.tasks must be an array`);
-  }
-  validateNullableString(topic.current_task, `${label}.current_task`);
-  validateNullableString(topic.next_action, `${label}.next_action`);
-  const tasks = topic.tasks.map((task, index) => validateTask(task, `${label}.tasks[${index}]`));
-  const ids = tasks.map(task => task.id);
-  const unique = new Set(ids);
-  if (unique.size !== ids.length) {
-    throw new StateError(`Duplicate task IDs found in ${label}`);
-  }
-  validateTimestamp(topic.created_at, `${label}.created_at`);
-  validateTimestamp(topic.updated_at, `${label}.updated_at`);
-  return data as TopicState;
-}
-
-function migrateV1State(data: Record<string, unknown>): TaskState {
-  const legacy = data as unknown as LegacyTaskStateV1;
-  const topic = validateTopic({
-    name: DEFAULT_TOPIC,
-    goal: legacy.goal,
-    status: legacy.status,
-    current_task: legacy.current_task ?? null,
-    tasks: legacy.tasks,
-    decisions: legacy.decisions ?? [],
-    blockers: legacy.blockers ?? [],
-    next_action: legacy.next_action ?? null,
-    created_at: legacy.created_at ?? legacy.updated_at,
-    updated_at: legacy.updated_at,
-  }, `Topic ${DEFAULT_TOPIC}`);
-
-  return {
-    version: SCHEMA_VERSION,
-    revision: typeof legacy.revision === 'number' ? legacy.revision : 0,
-    active_topic: DEFAULT_TOPIC,
-    topics: [topic],
-    updated_at: topic.updated_at,
-    ...(legacy.updated_by !== undefined ? { updated_by: legacy.updated_by } : {}),
-  };
-}
-
-export function validateState(data: unknown): TaskState {
-  if (typeof data !== 'object' || data === null) {
-    throw new StateError('State must be a JSON object');
-  }
-  const s = data as Record<string, unknown>;
-  if (s.version === '1') {
-    return migrateV1State(s);
-  }
-  if (s.version !== SCHEMA_VERSION) {
-    throw new StateError(`Unknown schema version: ${s.version}`);
-  }
-  if (typeof s.active_topic !== 'string' || s.active_topic.trim() === '') {
-    throw new StateError('State.active_topic must be a non-empty string');
-  }
-  if (!Array.isArray(s.topics) || s.topics.length === 0) {
-    throw new StateError('State.topics must be a non-empty array');
-  }
-  const topics = s.topics.map((topic, index) => validateTopic(topic, `State.topics[${index}]`));
-  const names = topics.map(topic => topic.name);
-  if (new Set(names).size !== names.length) {
-    throw new StateError('Duplicate topic names found in state');
-  }
-  if (!names.includes(s.active_topic)) {
-    throw new StateError(`Active topic not found: ${s.active_topic}`);
-  }
-  validateTimestamp(s.updated_at, 'State.updated_at');
-  // Backfill revision for states created before it was added.
-  if (typeof s.revision !== 'number') {
-    s.revision = 0;
-  }
-  return data as TaskState;
-}
-
-export function getActiveTopic(state: TaskState): TopicState {
-  const topic = state.topics.find(candidate => candidate.name === state.active_topic);
-  if (!topic) throw new StateError(`Active topic not found: ${state.active_topic}`);
-  return topic;
 }
 
 // ─── Read / Write ─────────────────────────────────────────────────────────────

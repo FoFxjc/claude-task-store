@@ -26,10 +26,6 @@ import {
   RESUME_BUDGET_CHARS,
   RESUME_TRUNCATION_SUFFIX,
   repairState,
-
-  StateError,
-  validateState,
-  getActiveTopic,
   addTopic,
   useTopic,
   commitBatch,
@@ -38,6 +34,7 @@ import {
   ConflictError,
 } from '../src/core.js';
 import { stateFilePath, historyFilePath } from '../src/paths.js';
+import { StateError, getActiveTopic, validateState } from '../src/codec.js';
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `task-store-test-${randomBytes(6).toString('hex')}`);

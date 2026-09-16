@@ -9,8 +9,9 @@ import {
   resumeTask, addTask, recordAttempt, recordDecision, setNextAction,
   archiveState, buildResumeContext, repairState, detectStaleTasks, RESUME_BUDGET_CHARS,
   compareAndWriteState, ConflictError,
-  StateError, getActiveTopic, addTopic, useTopic, commitBatch,
+  addTopic, useTopic, commitBatch,
 } from './core.js';
+import { StateError, getActiveTopic } from './codec.js';
 import { findProjectRoot, storePath, stateFilePath, historyFilePath } from './paths.js';
 import { withStoreLock, LockError } from './lock.js';
 import {

@@ -16,7 +16,8 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 
-import { initState, readState, completeTask, setNextAction, getActiveTopic } from '../src/core.js';
+import { initState, readState, completeTask, setNextAction } from '../src/core.js';
+import { getActiveTopic } from '../src/codec.js';
 import {
   isAttached as _isAttached,
   attach,
