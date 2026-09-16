@@ -13,24 +13,23 @@
  *
  * The runtime file lives in `runtime.ts`; the policy / freshness
  * verbs in `policy.ts`; the staged instruction file in `pending.ts`.
- * They are coordinated through this module's exported surface.
- *
- * The module-load cycle between config, pending, and policy
- * (`config.writeMode` calls `pending.clearPendingInstruction`, which
- * via `policy.shouldReconcile` reads back `config.isEnabled`) is
- * fine under ESM live bindings — the cycle is only used at
- * function-call time, never at module-initialisation time.
+ * The low-level pending-instruction helpers used by `writeMode`
+ * (`clearPendingInstruction`) come from `_pending-file.ts`, which
+ * does not import `policy.js` — that keeps the module-load graph
+ * acyclic at the top level. There is no high-level call into the
+ * `pending` module from here; `pending.writeMode === 'off'` does
+ * NOT touch `clearPendingInstruction` from a module that imports
+ * `policy`.
  */
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { findProjectRoot, storePath } from '../paths.js';
+import { storePath } from '../paths.js';
 import { clearAttachment } from '../attachment.js';
 import { clearRuntime } from './runtime.js';
-import { clearPendingInstruction } from './pending.js';
+import { clearPendingInstruction } from './_pending-file.js';
 import { atomicWriteJson } from './_write.js';
 
 const CONFIG_FILE = 'config.json';
-export const RUNTIME_FILE = 'auto-checkpoint.json';
 
 /**
  * Supported modes. `aggressive` is intentionally NOT implemented in v0.1.x —
@@ -162,6 +161,3 @@ export function writeMode(mode: AutoCheckpointMode, projectRoot?: string): AutoC
   return readConfig(projectRoot);
 }
 
-// Touch findProjectRoot to keep its import live for testing consumers
-// that swap the locator in tests.
-void findProjectRoot;

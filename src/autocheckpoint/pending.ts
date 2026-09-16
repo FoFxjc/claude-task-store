@@ -6,19 +6,20 @@
  * adapter uses as the channel-agnostic counterpart to Claude Code's
  * inline `Stop` hook:
  *
- *   - the file path {@link pendingInstructionFilePath};
- *   - the staging-and-record-keeping pair
- *     {@link stagePendingInstruction} / {@link takePendingInstruction};
- *   - the binding of every staged record to the session that staged
- *     it, defended in depth against takeover-window races.
+ *   - {@link stagePendingInstruction} / {@link takePendingInstruction};
+ *   - the session-binding of every staged record to the session that
+ *     staged it, defended in depth against takeover-window races;
+ *   - the public re-exports of the underlying file-path and clear
+ *     helpers so callers do not need to know about `_pending-file.ts`.
  *
- * Both halves live here, in the provider-neutral core, rather than in
- * the adapter. The decision (gates) lives in `policy.ts`; this module
- * owns only the file lifecycle around it.
+ * File lifecycle (path / read / write / unconditional clear) lives in
+ * `_pending-file.ts` to keep this module focused on the policy-aware
+ * flow: it uses {@link shouldReconcile}, {@link markReconcileRequested},
+ * and {@link RECONCILE_INSTRUCTION} to gate staging, and
+ * {@link isAttached} + {@link normalizeIdentity} to bind records to a
+ * session.
  */
-import { readFileSync, unlinkSync } from 'fs';
-import { join } from 'path';
-import { findProjectRoot, storePath } from '../paths.js';
+import { findProjectRoot } from '../paths.js';
 import { isAttached, normalizeIdentity } from '../attachment.js';
 import {
   RECONCILE_INSTRUCTION,
@@ -26,54 +27,18 @@ import {
   shouldReconcile,
   type ReconcileDecision,
 } from './policy.js';
-import { atomicWriteJson } from './_write.js';
+import {
+  clearPendingInstruction,
+  pendingInstructionFilePath,
+  readPendingInstruction,
+  writePendingInstruction,
+  type PendingInstructionRecord,
+} from './_pending-file.js';
 
-const PENDING_INSTRUCTION_FILE = '.pending-reconcile-instruction.txt';
-
-interface PendingInstructionRecord {
-  session_id: string;
-  instruction: string;
-  staged_at: string;
-}
-
-export function pendingInstructionFilePath(projectRoot?: string): string {
-  return join(storePath(projectRoot), PENDING_INSTRUCTION_FILE);
-}
-
-/**
- * Remove any staged reconciliation instruction.
- *
- * This is administrative cleanup for disabling auto-checkpoint, not a
- * session-scoped consume operation. Missing is fine; every other filesystem
- * failure surfaces so `off` cannot claim the runtime was cleared while a
- * dead pending record remains on disk.
- */
-export function clearPendingInstruction(projectRoot?: string): void {
-  const path = pendingInstructionFilePath(projectRoot);
-  try {
-    unlinkSync(path);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
-}
-
-/**
- * Write the staged record. Caller holds the store lock and has already
- * established that `sessionId` owns the attachment.
- */
-function writePendingInstruction(
-  root: string,
-  sessionId: string,
-  instruction: string,
-  now: Date,
-): void {
-  const record: PendingInstructionRecord = {
-    session_id: normalizeIdentity(sessionId),
-    instruction,
-    staged_at: now.toISOString(),
-  };
-  atomicWriteJson(pendingInstructionFilePath(root), record);
-}
+// Re-export the public surface that exists primarily for the on-disk
+// side; the policy-aware entry points below remain in this module.
+export { pendingInstructionFilePath, clearPendingInstruction };
+export type { PendingInstructionRecord };
 
 export interface StageDecision {
   reconcile: boolean;
@@ -134,49 +99,26 @@ export function stagePendingInstruction(
  * indivisible against a takeover landing in between. Returns null when nothing
  * is ours to collect, and leaves a record that belongs to someone else alone.
  */
-export function takePendingInstruction(projectRoot?: string, sessionId?: string): string | null {
+export function takePendingInstruction(
+  projectRoot?: string,
+  sessionId?: string,
+): string | null {
   if (!sessionId) return null;
   const root = projectRoot ?? findProjectRoot();
   // Owner check: a displaced session must not collect, even its own record.
   if (!isAttached(sessionId, root)) return null;
-  const path = pendingInstructionFilePath(root);
 
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch {
-    return null;
-  }
-
-  let record: PendingInstructionRecord | null = null;
-  try {
-    const parsed = JSON.parse(raw) as Partial<PendingInstructionRecord>;
-    if (
-      typeof parsed?.session_id === 'string' &&
-      typeof parsed.instruction === 'string' &&
-      parsed.instruction.length > 0
-    ) {
-      record = {
-        session_id: parsed.session_id,
-        instruction: parsed.instruction,
-        staged_at: typeof parsed.staged_at === 'string' ? parsed.staged_at : '',
-      };
-    }
-  } catch {
-    // Not our format at all — a file left by a pre-binding version. Fall
-    // through to the removal below; it can never be delivered by anyone.
-  }
-
+  const record = readPendingInstruction(root);
   if (record && record.session_id !== normalizeIdentity(sessionId)) {
     // Staged for someone else. Leave it: the owner may still be running, and
     // the next stage overwrites it either way.
     return null;
   }
 
-  try {
-    unlinkSync(path);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
+  // Record exists but doesn't pass the binding check (missing session_id /
+  // instruction, parse error, etc.) — still leave no instruction behind,
+  // because the record can never be delivered by anyone. Authoritative
+  // cleanup of a malformed file falls within this verifier's scope.
+  clearPendingInstruction(root);
   return record ? record.instruction : null;
 }

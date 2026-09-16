@@ -27,7 +27,7 @@ import { isAttached } from '../attachment.js';
 import { readState } from '../storage.js';
 import { getActiveTopic } from '../codec.js';
 import { debounceSeconds, isEnabled } from './config.js';
-import { readRuntime, type AutoCheckpointRuntime } from './runtime.js';
+import { readRuntime, writeRuntime, type AutoCheckpointRuntime } from './runtime.js';
 
 export interface Freshness {
   /** True when work was signalled and the checkpoint has not been written since. */
@@ -244,8 +244,6 @@ export type ReconcileRecordOutcome = 'applied' | 'disabled' | 'no-state' | 'deta
  * would silence the owner's next genuine request for a full debounce period,
  * which is strictly worse than the detached session doing nothing.
  */
-import { writeRuntime } from './runtime.js';
-
 export function markReconcileRequested(
   projectRoot?: string,
   now: Date = new Date(),

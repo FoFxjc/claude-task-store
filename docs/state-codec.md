@@ -3,23 +3,47 @@
 This document fixes the read/write contract for `.claude-task/state.json`
 as a stable, named boundary. It is the single source of truth for the
 behaviour the on-disk file is allowed to exhibit. The implementation
-lives in [`src/codec.ts`](../src/codec.ts), [`src/storage.ts`](../src/storage.ts),
-and [`src/types.ts`](../src/types.ts); this document is the contract
-those implementations honour.
+lives in [`src/codec.ts`](../src/codec.ts) — the validation/migration
+boundary — and [`src/storage.ts`](../src/storage.ts) — the read/write
+boundary that loads and persists validated state — with the canonical
+shape in [`src/types.ts`](../src/types.ts). This document is the
+contract those implementations honour.
 
 ## Definitions
 
 - **Disk schema** — the JSON shape on disk in `.claude-task/state.json`,
   identified by `version`.
-- **Canonical in-memory schema** — the v2 {@link TaskState} represented
-  by the TypeScript types in `src/types.ts`.
-- **`decodeDiskState(raw)`** — the codec entry point used by readers
-  (currently `codec.validateState`). Returns a canonical in-memory
-  state or throws `codec.StateError`.
-- **`encodeDiskState(state)`** — the codec entry point used by writers
-  (`storage.writeState` already does this implicitly by
-  `JSON.stringify`). The canonical in-memory state is written as
-  the current disk schema.
+- **Canonical in-memory schema** — the v2 `TaskState` represented by
+  the TypeScript types in `src/types.ts`.
+- **Raw decode / validation boundary** —
+  [`codec.validateState(raw)`](../src/codec.ts). Returns a canonical
+  in-memory `TaskState` or throws `codec.StateError`. Pure — does not
+  read or write files.
+- **Read boundary (file → canonical)** —
+  [`storage.readState(projectRoot?)`](../src/storage.ts). Reads
+  `.claude-task/state.json`, JSON-parses it, then funnels the
+  resulting `unknown` through `codec.validateState`. Returns `null`
+  when the file is absent; throws `StateError` on read failure,
+  malformed JSON, or unknown schema.
+- **Write boundary (canonical → file)** —
+  [`storage.writeState(state, projectRoot?, updatedBy?, touchActiveTopic?)`](../src/storage.ts).
+  Stamps `updated_at`, bumps `revision` exactly once, refreshes the
+  active topic's `updated_at` unless `touchActiveTopic` is `false`,
+  atomically renames a temp file into place, and appends a
+  `state_updated` entry to `history.jsonl`.
+
+## Three boundaries, by responsibility
+
+| Step | Function | Reads disk? | Writes disk? |
+| --- | --- | --- | --- |
+| Decode / validate raw JSON | `codec.validateState(raw)` | no | no |
+| Open the file, decode it, surface canonical state or `null` | `storage.readState(projectRoot?)` | yes | no |
+| Persist canonical state | `storage.writeState(state, …)` | no | yes |
+
+A reader goes through `storage.readState`. A writer goes through
+`storage.writeState` (typically wrapped by the CLI's
+`withStoreLock`). The CLI verbs in `src/operations.ts` and
+`src/batch.ts` all funnel through these three boundaries.
 
 ## Supported on-disk readers
 
@@ -27,7 +51,7 @@ The codec recognises two disk schemas:
 
 | `version` | Status | Reader behaviour |
 | --- | --- | --- |
-| `"1"` (legacy) | read-only | Migrated in memory to canonical v2; the file is **not** modified. |
+| `"1"` (legacy) | read-only | Migrated in memory to canonical v2; the file is **not** modified by `validateState` or `readState`. |
 | `SCHEMA_VERSION` (current) | full read | Validated field-by-field as the canonical v2 shape. |
 | anything else | refused | `Unknown schema version: <v>` thrown. **Fail closed.** |
 
@@ -37,9 +61,9 @@ guessing.
 
 ## Writer rules
 
-After any successful write path (any of `storage.writeState`,
-`batch.commitBatch`, `batch.compareAndWriteState`, or
-`stale.repairState`):
+After any successful write path — `storage.writeState` called from
+`src/operations.ts`, `src/batch.ts` (`commitBatch`,
+`compareAndWriteState`), or `src/stale.ts` (`repairState`):
 
 - The persisted file uses the **current** disk schema. A v1 file
   persisted through a writer becomes v2.
@@ -50,30 +74,41 @@ After any successful write path (any of `storage.writeState`,
 - `state.updated_at` is refreshed for the state and (unless the writer
   opted out via `touchActiveTopic = false`) the active topic's
   `updated_at`. `updated_by` is set when supplied.
-- One history entry is appended (the codec does not interpret the
-  event discriminator; that's the caller's job). The history append
-  is outside the byte-for-byte durability contract of the canonical
-  state, so a partial system crash between the rename and the append
-  is recoverable from `state.json` alone.
+- One history entry is appended (`storage.appendHistory`). The history
+  append is outside the byte-for-byte durability contract of the
+  canonical state, so a partial system crash between the rename and
+  the append is recoverable from `state.json` alone.
 
 `stale.repairState` is the special-case writer that walks
 `history.jsonl` in reverse to find a validatable snapshot and writes
-it back. It is the only writer that reads from history rather than
-from memory; the rest of the rules above apply unchanged.
+it back through `storage.writeState`. It is the only writer that
+reads from history rather than from memory; the rest of the rules
+above apply unchanged.
 
 ## Read-only invariants
 
-Read paths (`storage.readState`, direct `codec.decodeDiskState`,
-`codec.getActiveTopic`, etc.):
+These are the guarantees readers can rely on. They are the contract
+that any future migration must preserve.
 
-- **No rewrites.** A `readState` on a v1 file does not touch the
-  file. Verified by `tests/multi_topic_test.sh`:
-  *read-only migration does not dirty Git-trackable state*.
-- **No eager migration.** v1 reads do not trigger a v1→v2 rewrite.
-  The rewrite fires on the next normal write.
-- **No mid-state mutation.** The codec translates `raw → canonical`
-  immutably from the caller's perspective; the in-memory state is a
-  fresh object tree.
+- **Reading and validating a legacy state does not mutate or rewrite
+  the on-disk file.** `codec.validateState` is pure; `storage.readState`
+  only reads. There is no eager persistence on a read path.
+- **No eager migration to v2 on read.** A v1 read stays a v1 file on
+  disk until the next normal write rewrites it as v2.
+- **No mid-state mutation by the reader.** A read returns whatever was
+  on disk (after passing validation); the writer is the only thing
+  that advances timestamps or revision.
+
+The first item is verified by `tests/multi_topic_test.sh`
+(*read-only migration does not dirty Git-trackable state*).
+
+The third item is **not** a deep-copy guarantee. The v1 migration
+reuses nested parsed values from the `JSON.parse` output for fields
+like `tasks`, `decisions`, and `blockers` — it does not allocate a
+fresh deep object tree. Callers that need to mutate a state
+returned from `storage.readState` should treat it as read-only input
+to the next write; defensive cloning is the caller's responsibility,
+not the codec's.
 
 ## Lossiness rules
 
@@ -96,10 +131,11 @@ file through a v1-only reader is out of scope.
 
 ## Concurrency
 
-`--expect-rev` and `compareAndWriteState` rely on `lock.withStoreLock`
-to make the read-compare-write atomic against other CLI invocations.
-The codec itself is not concurrency-aware; locking is the caller's
-responsibility and only the CLI wraps every mutating command.
+`--expect-rev` and `batch.compareAndWriteState` rely on
+`lock.withStoreLock` to make the read-compare-write atomic against
+other CLI invocations. The codec itself is not concurrency-aware;
+locking is the caller's responsibility and only the CLI wraps every
+mutating command.
 
 Direct library callers that mutate without going through
 `withStoreLock` race with other writers; that limitation is the

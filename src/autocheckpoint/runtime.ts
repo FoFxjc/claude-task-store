@@ -9,15 +9,17 @@
  * the policy module uses to debounce reconciliation requests.
  *
  * Writes happen through {@link atomicWriteJson} (shared with
- * `pending.ts` and `config.ts`). The clear path is exposed for both
- * `writeMode` (config) and the policy verbs to use.
+ * `_pending-file.ts` and `config.ts`). The clear path is exposed
+ * for `writeMode` (config) and the policy verbs to use.
  */
 import { existsSync, readFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
-import { findProjectRoot, storePath } from '../paths.js';
-import { RUNTIME_FILE } from './config.js';
+import { storePath } from '../paths.js';
 import { atomicWriteJson } from './_write.js';
 
+const RUNTIME_FILE = 'auto-checkpoint.json';
+
+/** Absolute path to the runtime-marker file inside the store directory. */
 export function runtimeFilePath(projectRoot?: string): string {
   return join(storePath(projectRoot), RUNTIME_FILE);
 }
@@ -76,7 +78,3 @@ export function clearRuntime(projectRoot?: string): void {
   const path = runtimeFilePath(projectRoot);
   try { unlinkSync(path); } catch { /* already absent */ }
 }
-
-// findProjectRoot is imported for completeness of the locator surface;
-// it is used by policy/pending indirectly via the projectRoot defaults.
-void findProjectRoot;
