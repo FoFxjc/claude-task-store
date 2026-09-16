@@ -874,7 +874,10 @@ describe('OpenCode adapter session identity', () => {
     );
     expect(dirtyCalls).toEqual(['session-a']);
 
-    // Session B's chat call must be attributed to B, not to A.
+    // Session B's chat call must be attributed to B, not to A. Stage a
+    // pending record first so the collector's file-existence fast path opens;
+    // without a record, the correct behavior is to skip the CLI entirely.
+    stagePendingRecord(root, 'session-b', 'reconcile');
     await plugin['experimental.chat.system.transform']({ sessionID: 'session-b' }, { system: ['sys'] });
     expect(takeCalls).toEqual(['session-b']);
     expect(stageCalls).toEqual([]);
