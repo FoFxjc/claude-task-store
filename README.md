@@ -522,13 +522,13 @@ through OpenCode's lifecycle hooks:
 | Instruction delivery | Same call (the `Stop` output channel) | Next `experimental.chat.system.transform`, which collects the staged record through `task-store auto take-instruction` — owner-gated and one-shot, so a detached session cannot take what the owner was staged for — and merges it into `output.system[0]` |
 | Compaction | `PreCompact` writes history marker | `experimental.session.compacting` registered as a deliberate no-op |
 
-Both harnesses invoke the **same** `task-store auto mark-dirty`,
-`task-store auto check`, and `task-store resume` commands, so the dirty
-window, the 120-second debounce, and the trust hierarchy embedded in
-`RECONCILE_INSTRUCTION` are identical. OpenCode additionally calls
-`task-store auto stage-instruction` at the boundary and `auto
-take-instruction` on the next chat call; Claude Code needs neither because its
-`Stop` hook delivers in the same call. All four verbs live in the
+Both harnesses share the **same provider-neutral auto-checkpoint core**,
+including `task-store auto mark-dirty`, the 120-second debounce, and the trust
+hierarchy embedded in `RECONCILE_INSTRUCTION`. Claude Code uses `auto check`
+at `Stop` because it can deliver the instruction inline; OpenCode uses
+`auto stage-instruction` at `session.idle` and `auto take-instruction` on
+the next chat call because its boundary has no direct model-feedback channel.
+Both paths apply the same ownership and reconciliation rules. All four verbs live in the
 provider-neutral core and gate on the same attachment record, so ownership is
 decided in exactly one place — including *when* an instruction may be staged,
 which the core does inside the same store lock as the ownership check. A
