@@ -574,7 +574,7 @@ describe('pending instruction staging and binding', () => {
     expect(takePendingInstruction(root, TEST_SESSION_ID)).toBeNull();
   });
 
-  it('after a takeover the previous owner can neither stage nor consume', () => {
+  it('after a takeover the previous owner can neither stage nor consume', async () => {
     // This is the race the review found: the adapter used to ask the CLI and
     // then write the file itself, with the lock released in between.
     markDirty(root, 'Edit', TEST_SESSION_ID);
@@ -593,10 +593,10 @@ describe('pending instruction staging and binding', () => {
     expect(stagePendingInstruction(root, new Date(), TEST_SESSION_ID).reconcile).toBe(false);
 
     // The new owner is not locked out: it stages and collects its own record
-    // normally. The debounce window the previous owner legitimately opened is
-    // shared runtime state and still applies — that is the existing design
-    // (no lease, and no takeover-resets-the-window rule), so the new owner's
-    // first genuine request comes once the window has elapsed.
+    // normally. Ensure the new dirty signal lands after the previous owner's
+    // request timestamp; both are millisecond-resolution ISO strings and a
+    // same-tick signal is correctly classified as already-requested.
+    await new Promise(r => setTimeout(r, 5));
     markDirty(root, 'Edit', 'new-owner');
     expect(stagePendingInstruction(root, laterBy(3600), 'new-owner').reconcile).toBe(true);
     expect(takePendingInstruction(root, 'new-owner')).toBe(RECONCILE_INSTRUCTION);
