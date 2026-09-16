@@ -1,6 +1,6 @@
 {
   "name": "claude-task-store",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Persistent execution checkpoints for Claude Code, OpenCode, and coding agents. Resume long coding tasks across sessions and models without replaying the full conversation.",
   "type": "module",
   "bin": {
@@ -58,7 +58,9 @@
   "jest": {
     "preset": "ts-jest/presets/default-esm",
     "testEnvironment": "node",
-    "extensionsToTreatAsEsm": [".ts"],
+    "extensionsToTreatAsEsm": [
+      ".ts"
+    ],
     "moduleNameMapper": {
       "^(\\.{1,2}/.*)\\.js$": "$1"
     },
