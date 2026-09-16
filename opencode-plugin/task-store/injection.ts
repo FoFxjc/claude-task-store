@@ -21,13 +21,13 @@
 //                                we never inspect command arguments).
 //
 //   3. Auto-checkpoint boundary — on `session.idle`, the plugin calls
-//                                 `task-store auto check --instruction`. If the
-//                                 CLI exits 0 (the reconciliation gates pass),
-//                                 the instruction text is staged to a pending
-//                                 file under `.claude-task/`. The next
+//                                 `task-store auto stage-instruction`. The
+//                                 CLI decides, records the request, and stages
+//                                 a session-bound pending record under the same
+//                                 store lock. The next
 //                                 `experimental.chat.system.transform`
-//                                 consumes that file and injects the
-//                                 instruction alongside the resume projection.
+//                                 collects it through `auto take-instruction`
+//                                 and injects it alongside the resume projection.
 //
 // The pending-file bridge is needed because OpenCode does not expose a
 // direct analog of Claude Code's `Stop` hook's `additionalContext` channel
@@ -59,6 +59,13 @@ import { spawnSync } from "node:child_process";
 // 5s leaves headroom for cold-start on a slow filesystem while still
 // returning fast enough that a hung process can't stall chat.
 export const CLI_TIMEOUT_MS = 5000;
+
+// Internal ephemeral bridge path. The provider-neutral core remains the
+// authority for the record format and ownership rules; the adapter keeps this
+// one path constant only as a cheap existence fast-path so the common chat
+// turn does not spawn a Node CLI process merely to discover there is nothing
+// to collect. Real-host smoke tests pin this path to the core staging path.
+const PENDING_INSTRUCTION_FILE = ".pending-reconcile-instruction.txt";
 
 export interface CacheEntry {
   // Composite key: worktree + state mtime + state size. Auto-invalidates on
@@ -430,14 +437,13 @@ export function stageReconcileBoundary(worktree: string, sessionId: string): Rec
  */
 export function takePendingInstruction(worktree: string, sessionId: string): string | null {
   if (!worktree || !sessionId) return null;
-  // Skip the spawn entirely when the project has no store directory: nothing
-  // can have been staged. This is the one cheap gate left in this file, and it
-  // is a directory that the adapter already reads config and state from — not
-  // a second copy of the pending file's name. Keeping that name in two places
-  // is what the core's staging move removed: if the adapter's copy drifted,
-  // the short-circuit would silently skip collection and the instruction would
-  // never be delivered, with nothing in the suite able to notice.
-  if (!existsSync(join(worktree, ".claude-task"))) return null;
+  // Common-case fast path: no pending record means no subprocess. The system
+  // transform runs on every chat call, so spawning Node here unconditionally
+  // would make even an idle/opted-out task-store project pay per-turn runtime
+  // cost. The CLI still owns every semantic decision once a file exists:
+  // ownership, session binding, active-state validation, and one-shot delete.
+  const pending = join(worktree, ".claude-task", PENDING_INSTRUCTION_FILE);
+  if (!existsSync(pending)) return null;
   const cli = join(worktree, ".claude", "task-store", "bin", "task-store.js");
   if (!existsSync(cli)) return null;
   let result: CliRunResult;
